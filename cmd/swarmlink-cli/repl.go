@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/swarmlink/swarmlink/internal/adapters/config"
 	"github.com/swarmlink/swarmlink/internal/domain/group"
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
@@ -16,6 +19,8 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
+
+func configDBPath(dir string) string { return config.DBPath(dir) }
 
 func (c *cli) repl(ctx context.Context) {
 	sc := bufio.NewScanner(os.Stdin)
@@ -42,24 +47,26 @@ func (c *cli) repl(ctx context.Context) {
 
 // subscribeEvents 把领域事件打到终端。
 //
-// 由于所有内部事件都过总线，这个功能几乎零成本 —— 也正是「事件驱动核心」
+// 由于所有内部事件都过总线，这个功能几乎零成本 —— 正是「事件驱动核心」
 // 带来的那份礼物（架构书 3.5）。
 func (c *cli) subscribeEvents() {
-	c.bus.Subscribe(eventbus.TopicPeerDiscovered, func(p any) {
+	bus := c.node.Bus
+
+	bus.Subscribe(eventbus.TopicPeerDiscovered, func(p any) {
 		pp, ok := p.(peer.Peer)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[发现] %s (%s) @ %s\n> ", displayName(pp), shorten(pp.NodeID.String()), orDash(pp.LastAddr))
 	})
-	c.bus.Subscribe(eventbus.TopicPeerOnline, func(p any) {
+	bus.Subscribe(eventbus.TopicPeerOnline, func(p any) {
 		ev, ok := p.(eventbus.PeerOnline)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[在线] %s (rtt=%v)\n> ", shorten(ev.NodeID), ev.RTT)
 	})
-	c.bus.Subscribe(eventbus.TopicPeerOffline, func(p any) {
+	bus.Subscribe(eventbus.TopicPeerOffline, func(p any) {
 		ev, ok := p.(eventbus.PeerOffline)
 		if !ok {
 			return
@@ -70,13 +77,13 @@ func (c *cli) subscribeEvents() {
 		}
 		fmt.Printf("\r[离线] %s (%s)\n> ", shorten(ev.NodeID), ev.Reason)
 	})
-	c.bus.Subscribe(eventbus.TopicChatReceived, func(p any) {
+	bus.Subscribe(eventbus.TopicChatReceived, func(p any) {
 		m, ok := p.(message.Message)
 		if !ok {
 			return
 		}
 		who := shorten(m.SenderID.String())
-		if pp, ok := c.dir.Get(m.SenderID); ok && pp.DisplayName != "" {
+		if pp, ok := c.node.PeerDir.Get(m.SenderID); ok && pp.DisplayName != "" {
 			who = pp.DisplayName
 		}
 		where := ""
@@ -85,42 +92,42 @@ func (c *cli) subscribeEvents() {
 		}
 		fmt.Printf("\r[消息]%s %s: %s\n> ", where, who, m.Content)
 	})
-	c.bus.Subscribe(eventbus.TopicChatDelivered, func(p any) {
+	bus.Subscribe(eventbus.TopicChatDelivered, func(p any) {
 		ack, ok := p.(protocol.ChatAck)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[已送达] %s\n> ", shorten(ack.MsgID))
 	})
-	c.bus.Subscribe(eventbus.TopicTransferProgress, func(p any) {
+	bus.Subscribe(eventbus.TopicTransferProgress, func(p any) {
 		ev, ok := p.(eventbus.TransferProgress)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[传输] %s %.1f%%\n> ", shorten(ev.JobID), ev.Percent)
 	})
-	c.bus.Subscribe(eventbus.TopicTransferDone, func(p any) {
+	bus.Subscribe(eventbus.TopicTransferDone, func(p any) {
 		ev, ok := p.(eventbus.TransferDone)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[完成] 文件已保存: %s\n> ", ev.Path)
 	})
-	c.bus.Subscribe(eventbus.TopicTransferError, func(p any) {
+	bus.Subscribe(eventbus.TopicTransferError, func(p any) {
 		ev, ok := p.(eventbus.TransferError)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[传输错误] %s: %v\n> ", shorten(ev.JobID), ev.Err)
 	})
-	c.bus.Subscribe(eventbus.TopicNetError, func(p any) {
+	bus.Subscribe(eventbus.TopicNetError, func(p any) {
 		ev, ok := p.(eventbus.NetError)
 		if !ok {
 			return
 		}
 		fmt.Printf("\r[网络错误] %s: %v\n> ", ev.Op, ev.Err)
 	})
-	c.bus.Subscribe(eventbus.TopicGroupUpdated, func(p any) {
+	bus.Subscribe(eventbus.TopicGroupUpdated, func(p any) {
 		g, ok := p.(group.Group)
 		if !ok {
 			return
@@ -141,7 +148,8 @@ func (c *cli) handleCommand(ctx context.Context, line string) bool {
 		printHelp()
 	case "/me":
 		fmt.Printf("NodeID = %s\n", c.self)
-		fmt.Printf("显示名 = %s\n", c.name())
+		fmt.Printf("显示名 = %s\n", c.node.Cfg.General.DisplayName)
+		fmt.Printf("监听   = TCP :%d / UDP :%d\n", c.node.TCPPort, c.node.UDPPort)
 	case "/peers":
 		c.printPeers()
 	case "/seeds":
@@ -191,26 +199,26 @@ func printHelp() {
 `)
 }
 
-func (c *cli) name() string { return "（见启动信息）" }
-
 func (c *cli) printPeers() {
-	all := c.dir.List(ports.PeerFilter{})
+	all := c.node.PeerDir.List(ports.PeerFilter{})
 	if len(all) == 0 {
 		fmt.Println("尚未发现任何节点。若为跨网段部署，请检查 /seeds。")
 		return
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].NodeID.Less(all[j].NodeID) })
 
-	fmt.Printf("%-18s %-14s %-8s %-22s %-18s %s\n", "NodeID", "显示名", "状态", "地址", "子网(P-2)", "来源")
+	fmt.Printf("%-18s %-14s %-10s %-22s %-18s %-6s %s\n",
+		"NodeID", "显示名", "状态", "地址", "子网(P-2)", "已连", "来源")
 	for _, p := range all {
-		fmt.Printf("%-18s %-14s %-8s %-22s %-18s %s\n",
+		_, connected := c.node.Conn.SessionOf(p.NodeID)
+		fmt.Printf("%-18s %-14s %-10s %-22s %-18s %-6s %s\n",
 			p.NodeID.String(), truncate(displayName(p), 14), string(p.State),
-			orDash(p.LastAddr), orDash(p.Subnet), orDash(p.Source))
+			orDash(p.LastAddr), orDash(p.Subnet), yesNo(connected), orDash(p.Source))
 	}
 }
 
 func (c *cli) printSeeds() {
-	snap := c.registry.Snapshot()
+	snap := c.node.Registry.Snapshot()
 	if len(snap) == 0 {
 		fmt.Println("未配置种子（单网段部署无需种子）")
 		return
@@ -224,7 +232,8 @@ func (c *cli) printSeeds() {
 
 func (c *cli) printDiag() {
 	online, discovered := 0, 0
-	for _, p := range c.dir.List(ports.PeerFilter{}) {
+	all := c.node.PeerDir.List(ports.PeerFilter{})
+	for _, p := range all {
 		switch p.State {
 		case peer.StateOnline:
 			online++
@@ -232,21 +241,21 @@ func (c *cli) printDiag() {
 			discovered++
 		}
 	}
-	fmt.Printf("节点目录 : %d 条（online=%d, discovered=%d）\n", len(c.dir.List(ports.PeerFilter{})), online, discovered)
+	fmt.Printf("节点目录 : %d 条（online=%d, discovered=%d）\n", len(all), online, discovered)
 	// ADR-009：在线状态走 UDP announce，TCP 只按需拨号 —— 空闲时该值应为 0
-	fmt.Printf("常驻连接 : %d（ADR-009：常态目标 ≤ 10，空闲应为 0）\n", c.conns.SessionCount())
-	fmt.Printf("活跃传输 : %d\n", c.transfer.ActiveJobs())
-	fmt.Printf("种子     : %d 颗\n", c.registry.Len())
-	fmt.Printf("本机监听 : TCP :%d / UDP :%d\n", c.tcpPort, c.bc.UDPPort())
+	fmt.Printf("常驻连接 : %d（ADR-009：常态目标 ≤ 10，空闲应为 0）\n", c.node.Conn.SessionCount())
+	fmt.Printf("活跃传输 : %d\n", c.node.TransferApp.ActiveJobs())
+	fmt.Printf("种子     : %d 颗\n", c.node.Registry.Len())
+	fmt.Printf("本机监听 : TCP :%d / UDP :%d\n", c.node.TCPPort, c.node.UDPPort)
 }
 
 func (c *cli) cmdMsg(ctx context.Context, ref, text string) {
-	p, err := resolvePeer(c.dir, ref)
+	p, err := resolvePeer(c.node.PeerDir, ref)
 	if err != nil {
 		fmt.Println("错误:", err)
 		return
 	}
-	msg, err := c.chat.SendMessage(ctx, p.NodeID, text)
+	msg, err := c.node.ChatApp.SendMessage(ctx, p.NodeID, text)
 	if err != nil {
 		fmt.Println("发送失败:", err)
 		return
@@ -256,7 +265,7 @@ func (c *cli) cmdMsg(ctx context.Context, ref, text string) {
 }
 
 func (c *cli) cmdHistory(args []string) {
-	p, err := resolvePeer(c.dir, args[0])
+	p, err := resolvePeer(c.node.PeerDir, args[0])
 	if err != nil {
 		fmt.Println("错误:", err)
 		return
@@ -269,7 +278,7 @@ func (c *cli) cmdHistory(args []string) {
 	}
 
 	conv := message.DirectConvID(c.self, p.NodeID)
-	ms, err := c.chat.History(conv, limit, 0)
+	ms, err := c.node.ChatApp.History(conv, limit, 0)
 	if err != nil {
 		fmt.Println("查询失败:", err)
 		return
@@ -290,7 +299,7 @@ func (c *cli) cmdHistory(args []string) {
 }
 
 func (c *cli) cmdSend(ctx context.Context, ref, path string) {
-	p, err := resolvePeer(c.dir, ref)
+	p, err := resolvePeer(c.node.PeerDir, ref)
 	if err != nil {
 		fmt.Println("错误:", err)
 		return
@@ -299,9 +308,9 @@ func (c *cli) cmdSend(ctx context.Context, ref, path string) {
 		fmt.Println("无法读取文件:", err)
 		return
 	}
-	fmt.Printf("开始发送 %s → %s（可中断，重发同一文件将自动续传）\n", path, displayName(p))
+	fmt.Printf("开始发送 %s → %s（可中断，重发同一文件将自动续传）\n", filepath.Base(path), displayName(p))
 	go func() {
-		job, err := c.transfer.SendFile(ctx, p.NodeID, path)
+		job, err := c.node.TransferApp.SendFile(ctx, p.NodeID, path)
 		if err != nil {
 			fmt.Printf("\r[发送失败] %v\n> ", err)
 			return
@@ -327,14 +336,14 @@ func (c *cli) cmdGroup(ctx context.Context, args []string) {
 		name := rest[0]
 		var ids []identity.NodeID
 		for _, ref := range rest[1:] {
-			p, err := resolvePeer(c.dir, ref)
+			p, err := resolvePeer(c.node.PeerDir, ref)
 			if err != nil {
 				fmt.Printf("  跳过 %q: %v\n", ref, err)
 				continue
 			}
 			ids = append(ids, p.NodeID)
 		}
-		g, err := c.group.CreateGroup(ctx, name, ids)
+		g, err := c.node.GroupApp.CreateGroup(ctx, name, ids)
 		if err != nil {
 			fmt.Println("建群失败:", err)
 			return
@@ -342,7 +351,7 @@ func (c *cli) cmdGroup(ctx context.Context, args []string) {
 		fmt.Printf("已建群 %s（id=%s，成员 %d，epoch=%d）\n", g.Name, g.ID, len(g.ActiveMembers()), g.Epoch)
 
 	case "list":
-		gs := c.group.List()
+		gs := c.node.GroupApp.List()
 		if len(gs) == 0 {
 			fmt.Println("（本机没有群）")
 			return
@@ -360,12 +369,12 @@ func (c *cli) cmdGroup(ctx context.Context, args []string) {
 			fmt.Println("用法: /group add <群ID> <对端>")
 			return
 		}
-		p, err := resolvePeer(c.dir, rest[1])
+		p, err := resolvePeer(c.node.PeerDir, rest[1])
 		if err != nil {
 			fmt.Println("错误:", err)
 			return
 		}
-		g, err := c.group.AddMember(ctx, rest[0], p.NodeID)
+		g, err := c.node.GroupApp.AddMember(ctx, rest[0], p.NodeID)
 		if err != nil {
 			fmt.Println("添加失败:", err)
 			return
@@ -382,7 +391,7 @@ func (c *cli) cmdGroup(ctx context.Context, args []string) {
 			fmt.Printf("未找到匹配的群 %q\n", rest[0])
 			return
 		}
-		msg, err := c.group.SendGroupMessage(ctx, gid, strings.Join(rest[1:], " "))
+		msg, err := c.node.GroupApp.SendGroupMessage(ctx, gid, strings.Join(rest[1:], " "))
 		if err != nil {
 			fmt.Println("群发失败:", err)
 			return
@@ -397,7 +406,7 @@ func (c *cli) cmdGroup(ctx context.Context, args []string) {
 // resolveGroupID 支持用群 ID 前缀或群名匹配。
 func (c *cli) resolveGroupID(ref string) string {
 	var matches []string
-	for _, g := range c.group.List() {
+	for _, g := range c.node.GroupApp.List() {
 		if strings.HasPrefix(g.ID, ref) || strings.EqualFold(g.Name, ref) {
 			matches = append(matches, g.ID)
 		}
@@ -406,6 +415,65 @@ func (c *cli) resolveGroupID(ref string) string {
 		return matches[0]
 	}
 	return ""
+}
+
+// runSelfCheck 执行 P-1 / P-2 部署前置条件自检。
+//
+// 这两条是【网络侧的既定事实，代码救不了】，因此必须能在部署前被验证，
+// 而不是等到现场才发现跨网段完全不通（架构书 0.5 节）。
+func (c *cli) runSelfCheck(ctx context.Context) {
+	fmt.Println("=== 部署前置条件自检 ===")
+
+	seeds := c.node.Registry.Snapshot()
+	if len(seeds) == 0 {
+		fmt.Println("P-1/P-2 未配置种子，跳过（单网段部署无需自检）")
+		return
+	}
+
+	c.node.DiscApp.RefreshSeeds(ctx)
+	// 目录拉取是异步的（UDP 探测 → TCP 拉取），给它一点时间落地
+	for i := 0; i < 30; i++ {
+		if len(c.node.PeerDir.List(ports.PeerFilter{Source: peer.SourceSeed})) > 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	learned := c.node.PeerDir.List(ports.PeerFilter{Source: peer.SourceSeed})
+	if len(learned) > 0 {
+		fmt.Printf("  [P-1 OK]   已通过种子探通并拉取到 %d 条跨网段目录\n", len(learned))
+	} else {
+		fmt.Println("  [P-1 FAIL] 无法通过种子获取目录 —— 跨网段将完全失效，只能引入中继。")
+		fmt.Println("             请确认任意两网段的种子 IP 之间可 TCP 直连（三层路由可达，非 NAT 隔离）。")
+	}
+
+	subnets := map[string]int{}
+	for _, p := range learned {
+		if p.Subnet != "" {
+			subnets[p.Subnet]++
+		}
+	}
+	warned := false
+	if c.node.SelfSubnet != "" {
+		if n, ok := subnets[c.node.SelfSubnet]; ok && n > 0 {
+			fmt.Printf("  [P-2 警告] 通过种子学到的条目与本机处于同一地址段 %s（%d 个节点）。\n"+
+				"             若它们实际位于不同物理网段，说明各网段地址段重叠，跨网段寻址会崩溃。\n",
+				c.node.SelfSubnet, n)
+			warned = true
+		}
+	}
+	if !warned {
+		fmt.Println("  [P-2 未发现异常] 未观察到与地址段重叠一致的现象。")
+	}
+
+	fmt.Println("  种子状态：")
+	for _, s := range c.node.Registry.Snapshot() {
+		fmt.Printf("    - %-22s fail=%d node=%s tcp=%d subnet=%s\n",
+			s.Addr.String(), s.FailCnt, orDash(s.NodeID), s.TCPPort, orDash(s.Subnet))
+	}
 }
 
 // resolvePeer 把用户输入（NodeID 前缀 / 显示名 / 显示名子串）解析为唯一节点。
@@ -477,4 +545,11 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "是"
+	}
+	return "否"
 }
