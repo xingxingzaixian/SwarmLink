@@ -1,0 +1,28 @@
+# Build artifacts
+/build/
+/dist/
+/bin/
+*.exe
+*.dylib
+
+# Go
+*.test
+*.out
+vendor/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/bindings/
+
+# Runtime data
+*.db
+*.db-wal
+*.db-shm
+*.part
+/data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
