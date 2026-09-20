@@ -51,6 +51,10 @@ const (
 	TypeAuthOK       byte = 0x06
 	TypeError        byte = 0x07
 	TypePingAddr     byte = 0x08
+	// TypeHelloAck 是握手第二段。架构书 4.4 的编号表未显式列出它
+	// （只写了「保留 0x01–0x21 + 新增 0x05/0x06/...」），
+	// 此处按「0x00–0x0F 会话控制」的区间约定取下一个可用号 0x09。
+	TypeHelloAck byte = 0x09
 
 	// 0x10–0x1F 文件传输
 	TypeFileMeta     byte = 0x10
