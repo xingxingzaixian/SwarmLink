@@ -1,4 +1,4 @@
-import { loadBindings } from './bindings'
+import { backendAvailable, realApi } from './bindings'
 import { createMockApi } from './mock'
 import type { SwarmApi } from './types'
 
@@ -8,14 +8,17 @@ let cached: SwarmApi | null = null
 let usingMock = false
 
 /**
- * 返回后端 API。优先使用 Wails 生成的绑定；不可用时降级为本地 mock，
- * 使前端在没有 Go 工具链的环境里也能构建与预览。
+ * 返回后端 API。
+ *
+ * 优先使用 Wails 生成的绑定；若当前不在 Wails 宿主里（例如 `npm run dev`
+ * 单独调样式，或 CI 里只跑构建），则降级为本地 mock，让前端仍可运行与构建。
  */
 export async function getApi(): Promise<SwarmApi> {
   if (cached) return cached
-  const real = await loadBindings()
-  if (real) {
-    cached = real
+
+  if (await backendAvailable()) {
+    cached = realApi
+    usingMock = false
   } else {
     cached = createMockApi()
     usingMock = true

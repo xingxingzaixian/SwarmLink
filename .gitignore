@@ -1,9 +1,11 @@
 # Build artifacts
-/build/
 /dist/
 /bin/
+.task/
 *.exe
 *.dylib
+# 注意：/build/ 是【构建配置与图标资源】（Taskfile、Info.plist、appicon 等），
+# 由 wails3 构建链使用，必须提交。因此这里不再忽略 build/。
 
 # Go
 *.test
@@ -13,7 +15,8 @@ vendor/
 # Node / frontend
 node_modules/
 frontend/dist/
-frontend/bindings/
+# 注意：frontend/bindings/ 【要提交】——它是 wails3 生成的绑定，
+# 提交后前端才能脱离 Go 工具链独立构建（CI 的 frontend job 依赖这一点）。
 
 # Runtime data
 *.db

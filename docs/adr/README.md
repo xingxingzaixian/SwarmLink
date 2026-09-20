@@ -41,3 +41,24 @@
 | 目录增量同步 / 分片拉取 | 全量目录仅 12.8 KB |
 | 种子分发机制 / 只读引导节点 | 3–5 网段手工配 6–10 条 IP 即可闭环 |
 | 跨网段中继 / 转发节点 | P-1 成立时直接按需拨号，**零跳数** |
+
+## 工程化注记（不属于架构决策，但影响日常操作）
+
+1. **Wails 入口在仓库根目录**（`main_wails.go`，build tag `wails`）。
+   两个原因叠加：wails3 的构建任务在根目录执行**不带包路径**的 `go build`；
+   而架构书 §3.1 第 4 点本来就把 `main.go` 定义为唯一组合根。
+   未启用该 tag 时由 `main_stub.go` 占位，因此 `go build ./...` / `go test ./...`
+   在没有 Wails 工具链的环境下始终可用。
+
+2. **`frontend/bindings/` 提交入库**。它是 `wails3 generate bindings` 的产物，
+   入库后前端可脱离 Go 工具链构建（CI 的 frontend job 依赖这一点）。
+   改动服务导出方法后重新执行 `make bindings`。
+
+3. **`build/` 目录提交入库**（wails3 的平台构建配置与图标资源），
+   因此 `.gitignore` **不**忽略它；被忽略的是 `.task/`（Task 运行器缓存）与 `bin/`。
+
+4. **Go 版本下限实际是 1.25**，由 Wails v3 beta.23 的 `go.mod` 决定
+   （架构书写的是 1.23+，该约束已被依赖覆盖）。
+
+5. **wails3 不使用 `wails.json`**（那是 v2 的配置）。v3 的配置在 `build/config.yml`。
+

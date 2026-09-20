@@ -2,6 +2,8 @@ import { useChatStore } from '../stores/chat'
 import { useDebugStore } from '../stores/debug'
 import { usePeersStore } from '../stores/peers'
 import { useTransferStore } from '../stores/transfer'
+import { Events } from '@wailsio/runtime'
+
 import { EV, type DebugEvent, type Message, type Peer, type TransferJob } from '../api/types'
 
 type Handler = (data: any) => void
@@ -13,14 +15,16 @@ type Handler = (data: any) => void
 /**
  * 事件订阅的唯一入口。
  *
- * Wails 环境下走 runtime.EventsOn；否则退化为本地 EventTarget，
+ * Wails 环境下走 @wailsio/runtime 的 Events.On（回调收到 WailsEvent，
+ * 业务数据在 .data 上）；否则退化为本地 EventTarget，
  * 这样在没有后端的浏览器预览里，组件逻辑依然可被驱动与验证。
  */
 export function on(name: string, fn: Handler): void {
-  const rt = (window as any)?.runtime
-  if (rt?.EventsOn) {
-    rt.EventsOn(name, fn)
+  try {
+    Events.On(name, (ev: any) => fn(ev?.data ?? ev))
     return
+  } catch {
+    // 不在 Wails 宿主里：Events.On 无法工作，改用本地事件通道
   }
   window.addEventListener(name, (e) => fn((e as CustomEvent).detail))
 }

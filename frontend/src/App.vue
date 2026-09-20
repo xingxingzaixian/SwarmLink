@@ -7,7 +7,7 @@ import SettingsView from './views/SettingsView.vue'
 import ChatView from './views/ChatView.vue'
 import TransferView from './views/TransferView.vue'
 
-import { isMockMode } from './api'
+import { getApi, isMockMode } from './api'
 import type { Peer } from './api/types'
 import { useChatStore } from './stores/chat'
 import { useGroupStore } from './stores/group'
@@ -33,7 +33,10 @@ const showGroupForm = ref(false)
 let timer: number | undefined
 
 onMounted(async () => {
-  mock.value = isMockMode() || !(window as any)?.runtime
+  // 先探测后端：决定用真实绑定还是降级到 mock，再拉数据
+  await getApi()
+  mock.value = isMockMode()
+
   await Promise.all([
     peers.refresh(),
     chat.loadConversations(),

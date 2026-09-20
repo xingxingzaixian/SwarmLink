@@ -7,6 +7,10 @@
     "strict": true,
     "jsx": "preserve",
     "resolveJsonModule": true,
+    // wails3 生成的绑定是 .js + JSDoc（没有 .d.ts），
+    // 打开 allowJs 让 TS 直接依据 JSDoc 推断类型，从而保留对绑定调用的基本检查。
+    "allowJs": true,
+    "maxNodeModuleJsDepth": 2,
     "isolatedModules": true,
     "esModuleInterop": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"],

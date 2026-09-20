@@ -1,65 +1,64 @@
-import type { SwarmApi } from './types'
-
-type AnyFn = (...args: any[]) => any
-type AnyMod = Record<string, any>
-
 /**
  * 生成绑定的【唯一】接触点。
  *
- * wails3 generate bindings 会把 Go 服务导出到 frontend/bindings/<模块路径>/。
- * 不同 beta 版本的目录结构与导出命名存在差异，因此这里用「动态 import + 名字映射」
- * 隔离：一旦对不上，只需要改本文件，其余前端代码不受影响。
+ * 生成命令（需要在仓库根目录执行）：
+ *
+ *   wails3 generate bindings -f "-tags wails" -clean ./cmd/swarmlink-gui/
+ *
+ * 产物在 frontend/bindings/ 下（已提交入库，因此前端可以脱离 Go 工具链构建）。
+ * 若生成目录结构变化，只需要改本文件的 import 路径。
+ *
+ * 注意：绑定被【静态】导入，这样 Vite 会连同 @wailsio/runtime 一起打包；
+ * 若改用运行时动态 import，产物里的相对路径会在打包后失效。
+ * 「不在 Wails 宿主里」的情况由 backendAvailable() 探测并降级到 mock。
  */
-export async function loadBindings(): Promise<SwarmApi | null> {
-  // 路径写成变量：避免 Vite 在构建期静态解析（未生成绑定时会导致构建失败）。
-  const modulePath = '../../bindings/swarmlink/internal/adapters/wails/index.js'
+import {
+  ChatService,
+  GroupService,
+  PeerService,
+  SettingsService,
+  TransferService
+} from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/index.js'
+
+import type { SwarmApi } from './types'
+
+/** 真实后端实现（由 Wails 生成的服务绑定驱动）。 */
+export const realApi: SwarmApi = {
+  getSettings: async () => SettingsService.Get(),
+  saveSettings: async (s) => SettingsService.Save(s),
+  listInterfaces: async () => SettingsService.ListInterfaces(),
+  downloadDir: async () => SettingsService.DownloadDir(),
+
+  sendMessage: async (peerId, text) => ChatService.SendMessage(peerId, text),
+  history: async (peerId, limit, before) => ChatService.History(peerId, limit, before),
+  conversations: async () => ChatService.Conversations(),
+
+  sendFile: async (peerId, path) => TransferService.SendFile(peerId, path),
+  transfers: async () => TransferService.List(),
+
+  self: async () => PeerService.Self(),
+  peerList: async () => PeerService.List(),
+  diagnostics: async () => PeerService.Diagnostics(),
+
+  groupList: async () => GroupService.List(),
+  groupCreate: async (name, memberIds) => GroupService.Create(name, memberIds),
+  groupAddMember: async (groupId, memberId) => GroupService.AddMember(groupId, memberId),
+  groupSendMessage: async (groupId, text) => GroupService.SendMessage(groupId, text),
+  groupHistory: async (groupId, limit, before) => GroupService.History(groupId, limit, before)
+}
+
+/**
+ * 探测后端是否真的在。
+ *
+ * 生成的绑定在普通浏览器里调用会抛错（没有 Wails runtime），
+ * 因此用一次最轻量的调用做探测，据此决定是否降级到 mock。
+ * 只在启动时执行一次。
+ */
+export async function backendAvailable(): Promise<boolean> {
   try {
-    const mod = (await import(/* @vite-ignore */ modulePath)) as AnyMod
-    return adapt(mod)
+    await SettingsService.Get()
+    return true
   } catch {
-    return null
+    return false
   }
-}
-
-function adapt(mod: AnyMod): SwarmApi {
-  const S = pick(mod, 'SettingsService')
-  const C = pick(mod, 'ChatService')
-  const T = pick(mod, 'TransferService')
-  const P = pick(mod, 'PeerService')
-  const G = pick(mod, 'GroupService')
-
-  return {
-    getSettings: () => S.Get(),
-    saveSettings: (s) => S.Save(s),
-    listInterfaces: () => S.ListInterfaces(),
-    downloadDir: () => S.DownloadDir(),
-
-    sendMessage: (peerId, text) => C.SendMessage(peerId, text),
-    history: (peerId, limit, before) => C.History(peerId, limit, before),
-    conversations: () => C.Conversations(),
-
-    sendFile: (peerId, path) => T.SendFile(peerId, path),
-    transfers: () => T.List(),
-
-    self: () => P.Self(),
-    peerList: () => P.List(),
-    diagnostics: () => P.Diagnostics(),
-
-    groupList: () => G.List(),
-    groupCreate: (name, ids) => G.Create(name, ids),
-    groupAddMember: (gid, mid) => G.AddMember(gid, mid),
-    groupSendMessage: (gid, text) => G.SendMessage(gid, text),
-    groupHistory: (gid, limit, before) => G.History(gid, limit, before)
-  }
-}
-
-function pick(mod: AnyMod, name: string): Record<string, AnyFn> {
-  const svc = mod[name] ?? mod.default?.[name]
-  if (!svc) {
-    throw new Error(
-      `bindings 缺少服务 ${name}：请运行 wails3 generate bindings 后确认导出名，` +
-        `并修正 src/api/bindings.ts`
-    )
-  }
-  return svc as Record<string, AnyFn>
 }

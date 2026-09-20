@@ -44,6 +44,14 @@ ci: build lint-arch test frontend-typecheck frontend-build
 cli:
 	go build -o bin/swarmlink-cli ./cmd/swarmlink-cli
 
-# 需要先：安装 wails3 CLI 且 go get github.com/wailsapp/wails/v3
-gui:
-	go build -tags wails -o bin/swarmlink-gui ./cmd/swarmlink-gui
+# 绑定生成（服务注册在根目录 main_wails.go，因此从 . 扫描）
+bindings:
+	wails3 generate bindings -f "-tags wails" -clean .
+
+# 桌面 GUI（产物 bin/SwarmLink）
+gui: bindings
+	wails3 build -tags wails
+
+# 开发模式（热重载）
+gui-dev: bindings
+	wails3 dev -config ./build/config.yml -port 9245

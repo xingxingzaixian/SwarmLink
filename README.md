@@ -70,22 +70,37 @@ make cli
 
 ### 2.4 桌面 GUI
 
+前置：**Go ≥ 1.25**、Node ≥ 20、`wails3` CLI **v3.0.0-beta.23**。
+
 ```bash
-# 1) 安装 wails3 CLI（见 Wails v3 官方文档）
-# 2) 拉取框架依赖
-go get github.com/wailsapp/wails/v3@v3.0.0-beta.23
-# 3) 构建
-wails3 build -tags wails
+make gui            # = 生成绑定 + wails3 build → bin/SwarmLink
+./bin/SwarmLink      # 运行（会打开窗口）
+
+make gui-dev         # 开发模式（改 Go/前端都热重载）
+wails3 package -tags wails   # 打包成 .app / .dmg（分发用）
 ```
 
-> GUI 装配被隔离在 `cmd/swarmlink-gui/main_wails.go`（build tag `wails`），
-> 是**唯一**接触 Wails API 的文件。服务层与事件桥（`internal/adapters/wails`）
-> 是零 Wails 依赖的纯 Go，因此 `go build ./...` 与 `go test ./...` 无需 Wails 工具链。
-
-前端可独立开发与构建（不依赖 Go）：
+手工等价命令：
 
 ```bash
-cd frontend && npm install && npm run dev     # 无后端时自动进入降级模式
+wails3 generate bindings -f "-tags wails" -clean .   # 生成前端 TypeScript 绑定
+wails3 build -tags wails                             # 产物 bin/SwarmLink
+```
+
+> **入口在仓库根目录**（`main_wails.go`）。原因有二：wails3 的构建任务在根目录执行
+> 不带包路径的 `go build`；而架构书本来就把 `main.go` 定义为唯一组合根。
+>
+> 它也是**唯一**接触 Wails API 的文件。服务层与事件桥（`internal/adapters/wails`）
+> 是零 Wails 依赖的纯 Go，因此 `go build ./...` 与 `go test ./...` **不需要 Wails 工具链**
+> （未启用 `wails` tag 时，根目录由 `main_stub.go` 占位）。
+
+生成的绑定 `frontend/bindings/` **已提交入库**，因此前端可脱离 Go 工具链构建
+（CI 的 frontend job 依赖这一点）。若改了服务的导出方法，重新执行一次 `make bindings` 即可。
+
+前端也可单独跑（用于调样式，无后端时自动进入降级 mock 模式）：
+
+```bash
+cd frontend && npm install && npm run dev
 cd frontend && npm run typecheck && npm run build
 ```
 
@@ -102,7 +117,7 @@ cd frontend && npm run typecheck && npm run build
 | 群聊（全互联单播扇出，≤ 20 人，epoch 签名成员同步） | ✅ |
 | 单文件断点续传（滑动窗口 + 周期性全量位图 + 坏块定位重传） | ✅ |
 | 聊天记录（SQLite + WAL + 版本化迁移 + 单写队列） | ✅ |
-| 桌面 GUI（Wails v3 + Vue3，含**调试面板**） | ✅ 代码就绪，需 Wails 工具链构建 |
+| 桌面 GUI（Wails v3 + Vue3，含**调试面板**） | ✅ 已构建并启动验证通过（`wails3 build -tags wails` → `bin/SwarmLink`） |
 
 **明确不做**：NAT 穿透 / 中心服务器 / 引导节点 / 文件夹传输 / **中继（永久不做）** /
 跨设备身份合并 / 端到端加密（v1.1，接缝已留）。
@@ -148,6 +163,10 @@ cd frontend && npm run typecheck && npm run build
 ## 6. 目录结构
 
 ```
+main_wails.go    ★ 桌面外壳组合根（build tag: wails）—— 唯一接触 Wails API 的文件
+main_stub.go     未启用 wails tag 时的占位入口（保证 go build ./... 始终可用）
+Taskfile.yml     wails3 构建任务入口
+build/           wails3 平台构建配置与图标资源（darwin/linux/windows/docker）
 internal/
   domain/        纯领域（零 I/O）: identity peer message group transfer protocol ports
   app/           用例编排: peer/chat/group/transfer/discovery App + Router
@@ -156,12 +175,13 @@ internal/
   bootstrap/     ★ 唯一组合根（CLI 与 GUI 共用装配路径）
 cmd/
   swarmlink-cli/ 命令行前端 + P-1/P-2 自检
-  swarmlink-gui/ Wails 桌面外壳（wails tag 隔离）
 test/
   harness/       单进程多节点装配器
   e2e/           发现/握手/单聊/幂等/传输/续传/跨网段收敛
   scale/         20 节点全量目录 + 零常驻连接
-frontend/        Vue3 + Pinia + TS（可独立构建）
+frontend/
+  src/           Vue3 + Pinia + TS
+  bindings/      wails3 生成的绑定（已入库，勿手改）
 docs/adr/        11 条架构决策记录
 ```
 
@@ -189,10 +209,12 @@ docs/adr/        11 条架构决策记录
 
 **当前限制**
 
-- 原生文件选择对话框未接入 Wails 侧，传输页用路径输入框代替；
+- 传输页用「路径输入框」而非原生文件选择对话框（Wails 的 Dialog 服务尚未接入）；
 - 空闲回收后的「连接不再可用」不触发自动重连，下次发消息时才按需拨号（符合 ADR-009，但首条消息有 +1 RTT）；
 - 群聊离线成员不暂存消息（诚实取舍，UI 明确标注）；
-- 未接入混沌测试（随机杀连接）的自动化 CI 任务。
+- 未接入混沌测试（随机杀连接）的自动化 CI 任务；
+- 分发包（`.app` / `.dmg`）需自行执行 `wails3 package -tags wails`；
+  `build/` 内的图标与 DMG 资源仍是 Wails 模板默认值 —— 替换 `build/appicon.png` 后重新 `make gui` 即换成自己的图标。
 
 **v1.1 计划（接缝已留）**
 
