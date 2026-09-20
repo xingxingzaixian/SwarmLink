@@ -197,6 +197,9 @@ func (b *Broadcaster) recvLoop() {
 				continue
 			}
 			a.Source = peer.SourceBroadcast
+			if src != nil {
+				a.ObservedIP = src.IP.String()
+			}
 			if h := b.getSink(); h != nil {
 				h(a)
 			}

@@ -3,6 +3,7 @@ package message
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,11 +60,54 @@ func NewID() string {
 	return id.String()
 }
 
-// DirectConvID 返回单聊会话 ID（= 对端 NodeID 的 hex）。
-func DirectConvID(p identity.NodeID) string { return p.String() }
+// DirectConvID 返回单聊会话 ID。
+//
+// 必须【对称】：A 与 B 对同一段会话必须算出同一个 conv_id，否则两端会各建
+// 一条「半条会话」，历史记录、未读与去重都会分裂。
+// 因此取两个 NodeID 排序后拼接，而不是取「对端 ID」。
+func DirectConvID(a, b identity.NodeID) string {
+	if b.Less(a) {
+		a, b = b, a
+	}
+	return a.String() + ":" + b.String()
+}
 
 // GroupConvID 返回群聊会话 ID（= group_id）。
 func GroupConvID(groupID string) string { return groupID }
+
+// IsDirectConv 判断 conv_id 是否为单聊（形如 "nodeid:nodeid"）。
+// 群聊 conv_id 是 group_id（32 位 hex，不含冒号），因此不会误判。
+func IsDirectConv(convID string) bool {
+	parts := strings.Split(convID, ":")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, p := range parts {
+		if _, err := identity.ParseNodeID(p); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// DirectPeer 从对称 conv_id 中解析出【对端】NodeID。
+//
+// outbox 重发需要它：待确认记录只存了 conv_id，而重发必须知道拨给谁。
+func DirectPeer(convID string, self identity.NodeID) (identity.NodeID, bool) {
+	if !IsDirectConv(convID) {
+		return identity.NodeID{}, false
+	}
+	for _, p := range strings.Split(convID, ":") {
+		id, err := identity.ParseNodeID(p)
+		if err != nil {
+			continue
+		}
+		if id != self {
+			return id, true
+		}
+	}
+	return identity.NodeID{}, false
+}
 
 // SortInPlace 按展示顺序排序：sent_at 升序，同 sent_at 按 msg_id 二次排序。
 // UUIDv7 本身时间有序，因此二次排序结果稳定（ADR-004）。

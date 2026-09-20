@@ -89,6 +89,11 @@ type Announcement struct {
 	Epoch       uint64
 	Source      string
 	Sig         []byte
+
+	// ObservedIP 是【接收方】观测到的来源 IP。
+	// 它由本地网络栈给出，不是对端声明，因此不参与签名，
+	// 也不会被对端伪造 —— 目录里的可拨号地址必须以它为准。
+	ObservedIP string
 }
 
 // announceDomain 是 ANNOUNCE 签名的域分隔串。

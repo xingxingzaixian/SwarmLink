@@ -81,6 +81,8 @@ type MessageRepo interface {
 	// AppendIfAbsent 幂等写入：msg_id 已存在则返回 inserted=false。
 	// 调用方据此决定 UI 是否更新，但【无论是否重复都必须回 ACK】。
 	AppendIfAbsent(m message.Message) (inserted bool, err error)
+	// Get 按 msg_id 读取消息（outbox 重发时需要取回原文）。
+	Get(msgID string) (message.Message, bool)
 	// Latest 按 conv 取最近 limit 条；before 为游标（毫秒时间戳，0 表示最新）。
 	Latest(convID string, limit int, before int64) ([]message.Message, error)
 	MarkDelivered(msgID string) error
@@ -120,6 +122,24 @@ type OutboxRepo interface {
 	Delete(msgID string) error
 	BumpAttempt(msgID string, nextTry time.Time) error
 	ListByConv(convID string) ([]OutboxEntry, error)
+}
+
+// ---------------------------------------------------------------------------
+// 消息 + outbox 的原子写入（ADR-004）
+// ---------------------------------------------------------------------------
+
+// ChatStore 组合消息与 outbox，提供跨表原子操作。
+//
+// 存在理由：ADR-004 要求「messages(pending) + outbox」必须【单事务】写入，
+// 否则进程崩溃会出现「消息没存但 outbox 有」或反之的不一致。
+// 事件总线不能用于需要事务的路径，因此由 ChatApp 显式编排本接口。
+type ChatStore interface {
+	MessageRepo
+	OutboxRepo
+	// AppendOutgoing 单事务写入出站消息（state=pending）与 outbox 记录。
+	AppendOutgoing(m message.Message, nextTry time.Time) error
+	// Deliver 单事务把消息置为 delivered 并删除对应 outbox 记录。
+	Deliver(msgID string) error
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +203,14 @@ type SeedRegistry interface {
 	Pick(n int) []peer.SeedAddr
 	// Report 回填探测/拉取结果；learned == nil 表示失败，据此累计 fail_cnt。
 	Report(addr peer.SeedAddr, learned *peer.Announcement, err error)
+}
+
+// SeedProber 执行种子第一跳（UDP 探测 → 种子单播回 ANNOUNCE）。
+//
+// 定义在 ports 而非直接使用 udp.Prober，是为了让 app 层不依赖具体适配器
+// （依赖方向保持 app → ports，实现由 adapters/net/udp 提供）。
+type SeedProber interface {
+	Probe(ctx context.Context, addr peer.SeedAddr) (*peer.Announcement, error)
 }
 
 // ---------------------------------------------------------------------------

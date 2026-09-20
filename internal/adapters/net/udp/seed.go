@@ -81,6 +81,8 @@ func (p *Prober) Probe(ctx context.Context, addr peer.SeedAddr) (*peer.Announcem
 		if !identity.Verify(a.PublicKey, a.SigningBytes(), a.Sig) {
 			continue
 		}
+		a.Source = peer.SourceSeed
+		a.ObservedIP = addr.IP
 		return &a, nil
 	}
 }

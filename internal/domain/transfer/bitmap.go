@@ -89,6 +89,20 @@ func (b ChunkBitmap) Copy() ChunkBitmap {
 	return ChunkBitmap{data: append([]byte(nil), b.data...)}
 }
 
+// OrBits 按位或合并另一个位图（用于吸收对端回传的全量位图 ACK）。
+//
+// 按字节而非按位操作：1 GB 文件的 ACK 是 256 B，逐位遍历会产生
+// 「ACK 次数 × 块数」的二次开销。
+func (b ChunkBitmap) OrBits(o ChunkBitmap) {
+	n := len(b.data)
+	if len(o.data) < n {
+		n = len(o.data)
+	}
+	for i := 0; i < n; i++ {
+		b.data[i] |= o.data[i]
+	}
+}
+
 // EnsureLen 保证位图容量至少覆盖 total 块（用于续传时按元数据重建）。
 func (b *ChunkBitmap) EnsureLen(total int) {
 	want := (total + 7) / 8
