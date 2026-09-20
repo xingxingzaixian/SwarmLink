@@ -147,6 +147,12 @@ func (b *Broadcaster) Interfaces() []Interface { return b.ifaces }
 // SetInterfaces 覆盖接口列表。仅用于测试注入（生产由 EnumerateInterfaces 决定）。
 func (b *Broadcaster) SetInterfaces(ifaces []Interface) { b.forced = ifaces }
 
+// SetUDPPort 设置将要绑定的 UDP 端口（0 = 自动分配）。必须在 Start 之前调用。
+//
+// 用途：ADR-008 的端口回退 —— 2425 被占则试 2426…2434。
+// 实际端口会写进 ANNOUNCE 供对端学习，因此对端无需配置。
+func (b *Broadcaster) SetUDPPort(port int) { b.cfg.UDPPort = port }
+
 func (b *Broadcaster) announceLoop() {
 	defer b.wg.Done()
 	for {
@@ -238,12 +244,18 @@ func (b *Broadcaster) sendAnnounces() {
 }
 
 func (b *Broadcaster) replyAnnounce(src *net.UDPAddr) {
+	// subnet 必须尽量填上：P-2（地址段重叠）检测完全依赖它。
+	// 若探测源不在任何本机子网内（如从回环探测），退回首个网卡的子网，
+	// 也好过留空 —— 空值会让对端失去这一唯一的冲突检测信号。
 	subnet := ""
 	for _, iface := range b.ifaces {
 		if iface.Contains(src.IP) {
 			subnet = iface.SubnetString()
 			break
 		}
+	}
+	if subnet == "" && len(b.ifaces) > 0 {
+		subnet = b.ifaces[0].SubnetString()
 	}
 	payload, err := protocol.EncodeUDP(protocol.UDPTypeAnnounce, protocol.NewAnnounceWire(b.buildAnnounce(subnet)))
 	if err != nil {

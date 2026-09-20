@@ -85,6 +85,18 @@ func (a *GroupApp) CreateGroup(ctx context.Context, name string, memberIDs []ide
 			return g, err
 		}
 	}
+	return a.commitGroup(ctx, g)
+}
+
+// commitGroup 是所有「群状态变更」的唯一收口：epoch+1 → owner 重新签名 → 落库 → 广播。
+//
+// 所有变更都必须走这里。否则会出现「成员变了但 epoch 没动」的状态，
+// 而对端是按 epoch 判断新旧并静默丢弃的 —— 那种 bug 极难排查。
+func (a *GroupApp) commitGroup(ctx context.Context, g group.Group) (group.Group, error) {
+	// 已存在的群才是「变更」，新建群沿用调用方给定的 epoch。
+	if _, exists := a.groups.Get(g.ID); exists {
+		g.Epoch++
+	}
 	g.StateSig = a.kp.Sign(g.SigningBytes())
 
 	if err := a.groups.Upsert(g); err != nil {
@@ -95,6 +107,53 @@ func (a *GroupApp) CreateGroup(ctx context.Context, name string, memberIDs []ide
 	}
 	go a.broadcastMeta(ctx, g)
 	return g, nil
+}
+
+// AddMember 由群主把成员加入群（epoch+1 并广播 GROUP_META）。
+func (a *GroupApp) AddMember(ctx context.Context, groupID string, memberID identity.NodeID) (group.Group, error) {
+	g, ok := a.groups.Get(groupID)
+	if !ok {
+		return group.Group{}, fmt.Errorf("group: unknown group %s", groupID)
+	}
+	if g.OwnerID != a.self {
+		return g, fmt.Errorf("group: only the owner can change membership")
+	}
+	if memberID.IsZero() || memberID == a.self {
+		return g, fmt.Errorf("group: invalid member")
+	}
+
+	_, exists := g.Member(memberID)
+	if !exists && len(g.ActiveMembers()) >= group.MaxMembers {
+		return g, fmt.Errorf("group: 成员上限 %d（v1.0）", group.MaxMembers)
+	}
+
+	display := ""
+	if p, ok := a.dir.Get(memberID); ok {
+		display = p.DisplayName
+	}
+	if err := g.AddMember(group.Member{
+		NodeID:      memberID,
+		DisplayName: display,
+		Role:        group.RoleMember,
+		JoinedAt:    a.clk.Now(),
+		State:       group.MemberActive,
+	}); err != nil {
+		return g, err
+	}
+	return a.commitGroup(ctx, g)
+}
+
+// SetMemberState 变更成员状态（离开 / 移除），仅群主可操作。
+func (a *GroupApp) SetMemberState(ctx context.Context, groupID string, memberID identity.NodeID, state group.MemberState) (group.Group, error) {
+	g, ok := a.groups.Get(groupID)
+	if !ok {
+		return group.Group{}, fmt.Errorf("group: unknown group %s", groupID)
+	}
+	if g.OwnerID != a.self {
+		return g, fmt.Errorf("group: only the owner can change membership")
+	}
+	g.RemoveMember(memberID, state)
+	return a.commitGroup(ctx, g)
 }
 
 // Local 读取本地群快照。
