@@ -290,6 +290,65 @@ func (s *Messages) ListActive() ([]transfer.Job, error) {
 	return out, nil
 }
 
+// ListRecent 返回最近更新的若干任务，包含已结束的（界面的传输记录用）。
+//
+// 语义见 ports.TransferRepo.ListRecent：与 ListActive 相反，这里【不】排除
+// 已完成的任务 —— 否则「刚传完的文件从列表里消失」。
+func (s *Messages) ListRecent(limit int) ([]transfer.Job, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]transfer.Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		j.Bitmap = j.Bitmap.Copy()
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// PurgeFinished 清理已结束的任务，返回删除条数（语义见 ports.TransferRepo）。
+func (s *Messages) PurgeFinished(keep int, olderThan time.Time) (int, error) {
+	if keep < 0 {
+		keep = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	terminal := make([]transfer.Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		if isTerminal(j.Status) {
+			terminal = append(terminal, j)
+		}
+	}
+	sort.Slice(terminal, func(i, j int) bool { return terminal[i].UpdatedAt.After(terminal[j].UpdatedAt) })
+
+	retain := make(map[string]bool, keep)
+	for i := 0; i < keep && i < len(terminal); i++ {
+		retain[terminal[i].JobID] = true
+	}
+
+	n := 0
+	for id, j := range s.jobs {
+		if !isTerminal(j.Status) || retain[id] || !j.UpdatedAt.Before(olderThan) {
+			continue
+		}
+		delete(s.jobs, id)
+		n++
+	}
+	return n, nil
+}
+
+// isTerminal 判断是否为不会再变动的终态。
+func isTerminal(st transfer.State) bool {
+	return st == transfer.StateDone || st == transfer.StateFailed || st == transfer.StateCancelled
+}
+
 // ---------------------------------------------------------------------------
 // Peers：实现 ports.PeerDirectory
 // ---------------------------------------------------------------------------

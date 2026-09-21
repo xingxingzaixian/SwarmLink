@@ -6,7 +6,7 @@
 
 **Architecture:** 四层——L4 入站适配器（wails）→ L3 应用层（app）→ L2 纯领域核心（domain，零 I/O）→ L1 出站适配器（net/store/config）；横切 `infra/{eventbus,clock,log,fsutil}`；`main.go` 为唯一组合根。跨模块只走 `domain/ports` 接口或事件总线。
 
-**Tech Stack:** Go 1.21（架构书要求 1.23+，见 spec §2.1）、Wails v3.0.0-beta.23、Vue3 + Pinia + TypeScript、`modernc.org/sqlite`（纯 Go）、`google/uuid`（UUIDv7）、`BurntSushi/toml`、`log/slog`。
+**Tech Stack:** Go 1.21（架构书要求 1.23+，见 spec §2.1）、Wails v3.0.0-beta.24、Vue3 + Pinia + TypeScript、`modernc.org/sqlite`（纯 Go）、`google/uuid`（UUIDv7）、`BurntSushi/toml`、`log/slog`。
 
 **Spec:** `docs/superpowers/specs/2026-09-20-swarmlink-v1-design.md`
 **权威契约来源:** `架构设计书.md`（协议表 4.4、SQL 第 5 章、端口定义 3.4、主题 3.5）
@@ -57,11 +57,13 @@ Makefile (lint-arch)
 - [ ] **Step 1:** 设置模块与依赖基线
 
 Run:
+
 ```bash
 cd /Users/small_bud/Desktop/OpenCode/SwarmLink
 go mod edit -go=1.21
 go get github.com/google/uuid@latest github.com/BurntSushi/toml@latest
 ```
+
 Expected: `go.mod` 含上述 require。
 
 - [ ] **Step 2:** 建 `Makefile`（lint-arch 红线条）

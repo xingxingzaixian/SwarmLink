@@ -1,0 +1,214 @@
+name: Release
+
+# 三平台客户端打包。
+#
+# 为什么必须用 CI 而不能在 Windows 上一把梭（这不是配置问题，是工具链约束）：
+#   - macOS 的 create:dmg 任务本身写了 platforms: [darwin]，非 macOS 上会被直接跳过；
+#     .app 的合成还依赖 codesign，跨平台产物必被 Gatekeeper 拦。
+#   - Linux 的 AppImage/deb/rpm 打包依赖目标平台的工具链（linuxdeploy、nfpm 等）。
+# 所以这里用三个原生 runner 各出各的，只有 macOS 那条能产出可发布的 dmg。
+#
+# 触发方式：
+#   - push tag（v*）→ 打包并创建 GitHub Release
+#   - 手动 workflow_dispatch → 只打包并上传 artifact，不发 Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# gh release create 需要写权限
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ⚠ 这一行是整个工作流里最容易漏、也最致命的一行。
+  #
+  # main_wails.go 带 `//go:build wails`，而 build/*/Taskfile.yml 的生产 BUILD_FLAGS
+  # 只有 `-tags production`；wails3 CLI 也不会替我们补这个 tag
+  # （internal/commands/task_wrapper.go 只在 -tags 非空时才设 EXTRA_TAGS）。
+  # 少了它，产物是 2.4MB 的占位程序（运行时只打印"未启用 wails tag"），
+  # 却仍会被正常打包成安装包 —— 构建报成功、装上去打不开。
+  #
+  # 必须用【环境变量】而不是 `wails3 build -tags wails`：
+  # wails3 package 的参数里根本没有 tags 这一项（Package 的签名忽略它），
+  # 只有环境变量能穿透到 package → create:nsis:installer → deps: build
+  # 这条嵌套调用链里的每一层。
+  EXTRA_TAGS: wails
+
+jobs:
+  package:
+    name: package (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台失败不要连坐另外两个：否则你永远只能看到第一个错误
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-amd64
+            task: windows:package
+          - os: macos-latest
+            label: macos-universal
+            # universal = arm64 + amd64，用 lipo 合成一份，Intel 与 Apple Silicon 通吃
+            task: darwin:package:universal
+          - os: ubuntu-latest
+            label: linux-amd64
+            task: linux:package
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # 直接读 go.mod（go 1.25.0），避免版本在两处各写一遍后悄悄漂移
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ---------------------------------------------------------------- 平台依赖
+
+      - name: 安装 Linux 构建依赖
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          # libgtk-3-dev + libwebkit2gtk-4.1-dev 是 Wails v3 Linux 后端（GTK3）的必需项。
+          # patchelf / desktop-file-utils 是 AppImage 的 gtk 插件打包时要用到的。
+          # 注意不需要 libfuse2：wails3 生成 AppImage 用的是
+          # `--appimage-extract-and-run`（internal/commands/appimage.go），
+          # 不走 FUSE 挂载，所以 Ubuntu 24.04 默认没有 libfuse2 也能过。
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            patchelf desktop-file-utils
+
+      - name: 确保 NSIS 可用（Windows）
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+            # choco 装在 C:\Program Files (x86)\NSIS，且不会刷新当前进程的 PATH。
+            # 写进 GITHUB_PATH 才能让【后续步骤】也看得到。
+            $dir = 'C:\Program Files (x86)\NSIS'
+            if (Test-Path $dir) { $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          }
+          "makensis: " + (Get-Command makensis).Source
+
+      # ------------------------------------------------------- wails3 CLI 版本锁定
+
+      - name: 解析 go.mod 锁定的 wails3 版本
+        id: wails
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)
+          echo "锁定版本：$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: 安装并校验 wails3 CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@${{ steps.wails.outputs.version }}"
+
+          # CLI 与库是两份独立安装，版本不一致时 wails3 会以
+          # "flag provided but not defined" 之类的方式报错，报错点离原因很远
+          # （旧 CLI 不认识脚手架生成的新 flag）。这里当场对齐、当场断言。
+          got=$(wails3 version 2>&1 | tr -d '\r')
+          echo "wails3 = $got（需要 ${{ steps.wails.outputs.version }}）"
+          if [ "$got" != "${{ steps.wails.outputs.version }}" ]; then
+            echo "::error::wails3 CLI 版本不匹配：$got != ${{ steps.wails.outputs.version }}"
+            exit 1
+          fi
+          echo "wails3 路径：$(command -v wails3)"
+
+      # -------------------------------------------------------------------- 打包
+
+      - name: 打包
+        # 不指定 shell：Windows 用 pwsh、Linux/macOS 用 bash，各取所长。
+        # EXTRA_TAGS=wails 由作业级 env 继承下来。
+        run: wails3 task ${{ matrix.task }}
+
+      - name: 生成 dmg（macOS）
+        if: matrix.os == 'macos-latest'
+        run: wails3 task darwin:create:dmg
+
+      - name: 核对产物（防占位程序回归）
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh bin/
+          # 占位程序约 2.4MB，真实客户端十几 MB 起。
+          # 这是本项目最隐蔽的失败模式：构建成功、安装包正常、装上去是空壳。
+          size=$(wc -c < bin/SwarmLink.exe 2>/dev/null || wc -c < bin/SwarmLink)
+          if [ "$size" -lt 5000000 ]; then
+            echo "::error::产物只有 $((size / 1024 / 1024))MB，几乎肯定是占位程序（EXTRA_TAGS 没生效）"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SwarmLink-${{ matrix.label }}
+          # 三个平台的产物都落在 bin/：
+          #   Windows  bin/SwarmLink.exe + bin/SwarmLink-amd64-installer.exe
+          #   Linux    bin/SwarmLink + *.AppImage / *.deb / *.rpm / *.pkg.tar.zst
+          #   macOS    bin/SwarmLink.app + bin/*.dmg
+          path: bin/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: 发布 GitHub Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: 列出待发布文件
+        run: find dist -type f | sort
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 用数组而不是 $(find ...)：文件名里可能有空格，
+          # 直接拼进命令行会被 word splitting 拆散。
+          mapfile -t files < <(find dist -type f)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::没有任何产物，拒绝创建空 Release"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${files[@]}"
+
+      - name: 发布说明提醒（未签名的后果）
+        run: |
+          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          ## 关于签名
+
+          当前流水线**没有签名**，因此：
+
+          - **macOS**：.dmg 未签名也未公证，用户首次打开会被 Gatekeeper 拦下。
+            临时绕过：右键 → 打开，或 `xattr -cr /Applications/SwarmLink.app`。
+          - **Windows**：安装包没有 Authenticode 签名，SmartScreen 会弹"未知发布者"。
+
+          要消除这些提示，需要配置证书：
+            - Windows：`wails3 setup signing` + `wails3 task windows:sign:installer`
+            - macOS：Apple Developer ID 证书 + `codesign` + `notarytool` 公证
+          EOF

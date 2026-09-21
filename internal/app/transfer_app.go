@@ -117,11 +117,56 @@ func NewTransferApp(
 // 发送侧
 // ---------------------------------------------------------------------------
 
-// SendFile 发送单个文件，阻塞直到完成/失败。
+// SendFile 发送单个文件，阻塞直到完成/失败。job_id 由本层生成。
 //
 // 流程：FILE_META →（对端回已完成位图）→ 窗口内发送缺失块 →
 // （对端周期性回全量位图，据此补洞）→ FILE_DONE → 校验结果。
 func (a *TransferApp) SendFile(ctx context.Context, peerID identity.NodeID, path string) (transfer.Job, error) {
+	return a.SendFileAs(ctx, peerID, path, message.NewID())
+}
+
+// SendFileAs 与 SendFile 完全一致，只是 job_id 由调用方指定。
+//
+// 存在的唯一理由：异步调用方（桌面外壳）必须在任务【真正开始之前】就拿到
+// job_id，才能在同一个 RPC 的返回值里把它交给界面，让界面据此把任务条目
+// 和随后到达的 transfer:progress / done / error 事件对上。
+// 若 id 在本层生成，异步调用方就只能另造一个 id 返回 —— 那个 id
+// 与任何事件都对不上，表现为「发了文件但进度永远不出现」。
+func (a *TransferApp) SendFileAs(
+	ctx context.Context,
+	peerID identity.NodeID,
+	path string,
+	jobID string,
+) (job transfer.Job, err error) {
+	if jobID == "" {
+		return transfer.Job{}, fmt.Errorf("transfer: job_id 不能为空")
+	}
+
+	// 统一出口：任何失败路径都必须让前端收到 transfer:error，且只发一次。
+	//
+	// 过去只有 runSender 的错误会发事件；其余（打开文件失败、拿不到会话、
+	// 元数据发送失败、等 FILE_META_ACK / FILE_DONE_ACK 超时、对端校验失败）
+	// 全是裸 return。而调用方 TransferService.SendFile 又把错误丢给了 `_`，
+	// 于是界面只建了一条「排队中」的任务，然后永远等不到任何反馈 ——
+	// 用户看到的就是「点了发送文件，实际并没有发送」。
+	defer func() {
+		if err == nil {
+			return
+		}
+		if job.JobID == "" {
+			job.JobID = jobID
+		}
+		job.Status = transfer.StateFailed
+		job.Error = err.Error()
+		job.UpdatedAt = a.clk.Now()
+		_ = a.store.UpsertJob(job)
+		if a.bus != nil {
+			a.bus.Publish(eventbus.TopicTransferError, eventbus.TransferError{
+				JobID: job.JobID, PeerID: peerID.String(), Err: err,
+			})
+		}
+	}()
+
 	select {
 	case a.sendSem <- struct{}{}:
 		defer func() { <-a.sendSem }()
@@ -148,8 +193,9 @@ func (a *TransferApp) SendFile(ctx context.Context, peerID identity.NodeID, path
 		window = transfer.DefaultWindow
 	}
 
-	job := transfer.Job{
-		JobID:       message.NewID(),
+	// job 是命名返回值，此处用 = 而非 :=
+	job = transfer.Job{
+		JobID:       jobID,
 		PeerID:      peerID,
 		FileName:    fileBase(path),
 		FileSize:    size,
@@ -218,15 +264,8 @@ func (a *TransferApp) SendFile(ctx context.Context, peerID identity.NodeID, path
 		return job, ctx.Err()
 	}
 
+	// 失败时由函数顶部统一的出口发事件，避免这里和那里各发一次
 	if err := a.runSender(ctx, sess, sj); err != nil {
-		job.Status = transfer.StateFailed
-		job.Error = err.Error()
-		_ = a.store.UpsertJob(job)
-		if a.bus != nil {
-			a.bus.Publish(eventbus.TopicTransferError, eventbus.TransferError{
-				JobID: job.JobID, PeerID: peerID.String(), Err: err,
-			})
-		}
 		return job, err
 	}
 
@@ -242,9 +281,6 @@ func (a *TransferApp) SendFile(ctx context.Context, peerID identity.NodeID, path
 	select {
 	case da := <-sj.doneCh:
 		if !da.ok {
-			job.Status = transfer.StateFailed
-			job.Error = da.err
-			_ = a.store.UpsertJob(job)
 			return job, fmt.Errorf("transfer: peer verify failed: %s", da.err)
 		}
 	case <-a.clk.After(30 * time.Second):

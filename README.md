@@ -22,11 +22,11 @@ L1 出站适配器   adapters/{net/{tcp,udp},store/{sqlite,mem},config,filesink,
 
 **三条红线由 CI 强制**（`make lint-arch`），而不是靠自觉：
 
-| 红线 | 内容 |
-|---|---|
-| R1 | `domain/**` 禁止 import `net` / `database/sql` / `os` / Wails |
-| R2 | 适配器之间禁止互引；跨模块只走 `ports` 接口或事件总线 |
-| R3 | 业务代码（`app` / `domain`）禁止 `new` 具体适配器 |
+| 红线 | 内容                                                          |
+| ---- | ------------------------------------------------------------- |
+| R1   | `domain/**` 禁止 import `net` / `database/sql` / `os` / Wails |
+| R2   | 适配器之间禁止互引；跨模块只走 `ports` 接口或事件总线         |
+| R3   | 业务代码（`app` / `domain`）禁止 `new` 具体适配器             |
 
 ---
 
@@ -70,7 +70,7 @@ make cli
 
 ### 2.4 桌面 GUI
 
-前置：**Go ≥ 1.25**、Node ≥ 20、`wails3` CLI **v3.0.0-beta.23**。
+前置：**Go ≥ 1.25**、Node ≥ 20、`wails3` CLI **v3.0.0-beta.24**。
 
 ```bash
 make gui            # = 生成绑定 + wails3 build → bin/SwarmLink
@@ -108,16 +108,16 @@ cd frontend && npm run typecheck && npm run build
 
 ## 3. 功能范围（v1.0）
 
-| 能力 | 状态 |
-|---|---|
-| 节点自动发现（网段内 UDP 广播 + 签名 ANNOUNCE + 多网卡策略） | ✅ |
-| 跨网段发现（每网段 ≥2 种子 + 单跳目录拉取，零特权零中继） | ✅ |
-| 节点身份（Ed25519 持久化 + 三段握手认证 + 防重放） | ✅ |
-| 单聊（`msg_id` + ACK + outbox 重发 + 幂等去重 + 送达状态） | ✅ |
-| 群聊（全互联单播扇出，≤ 20 人，epoch 签名成员同步） | ✅ |
-| 单文件断点续传（滑动窗口 + 周期性全量位图 + 坏块定位重传） | ✅ |
-| 聊天记录（SQLite + WAL + 版本化迁移 + 单写队列） | ✅ |
-| 桌面 GUI（Wails v3 + Vue3，含**调试面板**） | ✅ 已构建并启动验证通过（`wails3 build -tags wails` → `bin/SwarmLink`） |
+| 能力                                                         | 状态                                                                    |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| 节点自动发现（网段内 UDP 广播 + 签名 ANNOUNCE + 多网卡策略） | ✅                                                                      |
+| 跨网段发现（每网段 ≥2 种子 + 单跳目录拉取，零特权零中继）    | ✅                                                                      |
+| 节点身份（Ed25519 持久化 + 三段握手认证 + 防重放）           | ✅                                                                      |
+| 单聊（`msg_id` + ACK + outbox 重发 + 幂等去重 + 送达状态）   | ✅                                                                      |
+| 群聊（全互联单播扇出，≤ 20 人，epoch 签名成员同步）          | ✅                                                                      |
+| 单文件断点续传（滑动窗口 + 周期性全量位图 + 坏块定位重传）   | ✅                                                                      |
+| 聊天记录（SQLite + WAL + 版本化迁移 + 单写队列）             | ✅                                                                      |
+| 桌面 GUI（Wails v3 + Vue3，含**调试面板**）                  | ✅ 已构建并启动验证通过（`wails3 build -tags wails` → `bin/SwarmLink`） |
 
 **明确不做**：NAT 穿透 / 中心服务器 / 引导节点 / 文件夹传输 / **中继（永久不做）** /
 跨设备身份合并 / 端到端加密（v1.1，接缝已留）。
@@ -126,10 +126,10 @@ cd frontend && npm run typecheck && npm run build
 
 ## 4. 部署前置条件（**代码救不了，必须在部署前确认**）
 
-| # | 前置条件 | 不满足的后果 | 自检 |
-|---|---|---|---|
-| **P-1** | 任意两网段的种子 IP 之间**可 TCP 直连**（三层路由可达，非 NAT 隔离） | 跨网段发现与消息全部失效，此时只能引入中继 —— 而中继是本项目刻意回避的设计 | `swarmlink-cli --self-check` |
-| **P-2** | 各网段使用**不重叠的地址段**（不得都是 `192.168.1.0/24`） | 目录中出现 node_id 不同、IP 相同的条目 → **跨网段寻址崩溃，且现象隐蔽、极难排查** | `ANNOUNCE` 携带 `subnet`，CLI 与 GUI 均展示 |
+| #       | 前置条件                                                             | 不满足的后果                                                                      | 自检                                        |
+| ------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------- |
+| **P-1** | 任意两网段的种子 IP 之间**可 TCP 直连**（三层路由可达，非 NAT 隔离） | 跨网段发现与消息全部失效，此时只能引入中继 —— 而中继是本项目刻意回避的设计        | `swarmlink-cli --self-check`                |
+| **P-2** | 各网段使用**不重叠的地址段**（不得都是 `192.168.1.0/24`）            | 目录中出现 node_id 不同、IP 相同的条目 → **跨网段寻址崩溃，且现象隐蔽、极难排查** | `ANNOUNCE` 携带 `subnet`，CLI 与 GUI 均展示 |
 
 > P-2 不是理论风险：「多个厂区/门店各自一个 `192.168.1.0/24`，再靠 VPN 互联」
 > 是内网组网里最常见的形态之一。
@@ -147,16 +147,16 @@ cd frontend && npm run typecheck && npm run build
 配置文件：`<用户配置目录>/SwarmLink/config.toml`（首次启动自动生成）。
 数据库：`<用户配置目录>/SwarmLink/data/app.db`。
 
-| 段 | 关键项 |
-|---|---|
-| `[general]` | `display_name` |
-| `[download]` | `default_dir`、`auto_open`（接收不弹框，同名自动加 `(1)`） |
-| `[network]` | `tcp_port=0`/`udp_port=0`（0 = 自动）、`port_fallback_range`、`interface_mode`、`allow/deny_interfaces` |
-| `[discovery]` | `announce_interval`、`peer_ttl`、`max_peers`、`max_peer_list_size` |
-| `[discovery.seeds]` | `refresh_interval`、`seeds_per_refresh=2`、`list`（格式 `IP:UDP_PORT`） |
-| `[connection]` | `idle_conn_timeout`、`max_dial_concurrency`、`max_active_conns` |
-| `[transfer]` | `max_concurrent`、`chunk_size`、`window_size`、`bitmap_flush_interval` |
-| `[security]` | `require_auth=true`（**强烈建议保持开启**）、`encryption`（v1.1） |
+| 段                  | 关键项                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `[general]`         | `display_name`                                                                                          |
+| `[download]`        | `default_dir`、`auto_open`（接收不弹框，同名自动加 `(1)`）                                              |
+| `[network]`         | `tcp_port=0`/`udp_port=0`（0 = 自动）、`port_fallback_range`、`interface_mode`、`allow/deny_interfaces` |
+| `[discovery]`       | `announce_interval`、`peer_ttl`、`max_peers`、`max_peer_list_size`                                      |
+| `[discovery.seeds]` | `refresh_interval`、`seeds_per_refresh=2`、`list`（格式 `IP:UDP_PORT`）                                 |
+| `[connection]`      | `idle_conn_timeout`、`max_dial_concurrency`、`max_active_conns`                                         |
+| `[transfer]`        | `max_concurrent`、`chunk_size`、`window_size`、`bitmap_flush_interval`                                  |
+| `[security]`        | `require_auth=true`（**强烈建议保持开启**）、`encryption`（v1.1）                                       |
 
 ---
 
@@ -189,16 +189,16 @@ docs/adr/        11 条架构决策记录
 
 ## 7. 测试矩阵
 
-| 层级 | 范围 | 命令 | 目标 |
-|---|---|---|---|
-| 单元 | `domain/**` | `make test-domain-cover` | 覆盖率 ≥ 80% |
-| 组件 | 协议编解码 | `make test-fuzz` | 无 panic |
-| 组件 | SQLite 迁移/仓储 | `go test ./internal/adapters/store/sqlite/` | 迁移可重入 |
-| 集成 | 2 节点握手 / 会话管理 | `go test ./internal/adapters/net/...` | 主链路通过 |
-| E2E | 3~4 节点全链路 | `make test-e2e` | 通过 |
-| E2E | **跨网段收敛** | `make test-e2e` | 通过（ADR-011 的验收物） |
-| 规模 | 20 节点 | `make test-scale` | 目录同步正确 + 常驻连接 0 |
-| 前端 | 类型 + 构建 | `make frontend-typecheck frontend-build` | 通过 |
+| 层级 | 范围                  | 命令                                        | 目标                      |
+| ---- | --------------------- | ------------------------------------------- | ------------------------- |
+| 单元 | `domain/**`           | `make test-domain-cover`                    | 覆盖率 ≥ 80%              |
+| 组件 | 协议编解码            | `make test-fuzz`                            | 无 panic                  |
+| 组件 | SQLite 迁移/仓储      | `go test ./internal/adapters/store/sqlite/` | 迁移可重入                |
+| 集成 | 2 节点握手 / 会话管理 | `go test ./internal/adapters/net/...`       | 主链路通过                |
+| E2E  | 3~4 节点全链路        | `make test-e2e`                             | 通过                      |
+| E2E  | **跨网段收敛**        | `make test-e2e`                             | 通过（ADR-011 的验收物）  |
+| 规模 | 20 节点               | `make test-scale`                           | 目录同步正确 + 常驻连接 0 |
+| 前端 | 类型 + 构建           | `make frontend-typecheck frontend-build`    | 通过                      |
 
 `FakeClock` 是必需品：心跳超时（30 s）、TTL（300 s）、空闲回收（5 min）
 若用真实时间测试，一个用例要跑几分钟；有了 `Clock` 接口全部变成微秒级。

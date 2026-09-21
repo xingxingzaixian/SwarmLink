@@ -31,6 +31,16 @@ type Config struct {
 	DenyInterfaces   []string
 	// SeedOnly=true 时关闭自动发现，只用种子（VPN / 安全敏感环境）。
 	SeedOnly bool
+
+	// AnnouncePorts 是广播 ANNOUNCE 的【目标端口集合】。
+	//
+	// 为什么是集合而不是一个端口：ADR-008 允许 udp_port 被占时回退
+	// （2425→2426…），而 ANNOUNCE 里携带的端口只对【单播】有用 ——
+	// 广播的接收方必须恰好监听在发送方选择的端口上。若只发自己的端口，
+	// 两台机器一旦回退到不同端口就永远互相看不见
+	// （这正是「udp_port=0 时默认发现失效」的根因）。
+	// 为空时退化为只发自己的端口（兼容旧调用方与测试）。
+	AnnouncePorts []int
 }
 
 // DefaultConfig 返回默认配置。
@@ -153,6 +163,12 @@ func (b *Broadcaster) SetInterfaces(ifaces []Interface) { b.forced = ifaces }
 // 实际端口会写进 ANNOUNCE 供对端学习，因此对端无需配置。
 func (b *Broadcaster) SetUDPPort(port int) { b.cfg.UDPPort = port }
 
+// SetAnnouncePorts 设置广播 ANNOUNCE 的目标端口集合。必须在 Start 之前调用。
+//
+// 见 Config.AnnouncePorts：它让「本机端口被占而回退到非基准端口」的机器
+// 依然能被按基准端口广播的其他节点发现。
+func (b *Broadcaster) SetAnnouncePorts(ports []int) { b.cfg.AnnouncePorts = ports }
+
 func (b *Broadcaster) announceLoop() {
 	defer b.wg.Done()
 	for {
@@ -223,23 +239,34 @@ func (b *Broadcaster) getSink() func(peer.Announcement) {
 }
 
 // sendAnnounces 每个接口发一份 ANNOUNCE（各自携带该接口的 subnet，便于 P-2 检测）。
+//
+// 目标端口取 cfg.AnnouncePorts（通常是基准端口的整个回退区间），而不是只发
+// 自己绑定的那个：否则「某台机器端口被占而回退到 2426」后，仍按 2425 广播的
+// 节点永远到不了它。端口上没有监听者时会收到 ICMP 不可达 —— 每次都新建
+// socket 且忽略写错误，因此不会出现连接被置为错误态的连带问题。
 func (b *Broadcaster) sendAnnounces() {
+	targets := b.cfg.AnnouncePorts
+	if len(targets) == 0 {
+		targets = []int{b.port}
+	}
 	for _, iface := range b.ifaces {
 		payload, err := protocol.EncodeUDP(protocol.UDPTypeAnnounce, protocol.NewAnnounceWire(b.buildAnnounce(iface.SubnetString())))
 		if err != nil {
 			continue
 		}
-		// 以接口 IP 作为源地址，强制报文从该网卡发出（可移植的等价于绑定接口）。
-		conn, err := net.DialUDP("udp4",
-			&net.UDPAddr{IP: iface.IP, Port: 0},
-			&net.UDPAddr{IP: iface.Broadcast, Port: b.port},
-		)
-		if err != nil {
-			continue
+		for _, port := range targets {
+			// 以接口 IP 作为源地址，强制报文从该网卡发出（可移植的等价于绑定接口）。
+			conn, err := net.DialUDP("udp4",
+				&net.UDPAddr{IP: iface.IP, Port: 0},
+				&net.UDPAddr{IP: iface.Broadcast, Port: port},
+			)
+			if err != nil {
+				continue
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_, _ = conn.Write(payload)
+			_ = conn.Close()
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		_, _ = conn.Write(payload)
-		_ = conn.Close()
 	}
 }
 

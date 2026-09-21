@@ -108,6 +108,66 @@ WHERE status NOT IN ('done','cancelled') ORDER BY created_at`)
 	return out, rows.Err()
 }
 
+// ListRecent 返回最近更新的若干任务，包含已结束的（界面的传输记录用）。
+//
+// 见 ports.TransferRepo.ListRecent：它和 ListActive 的语义完全不同，
+// 这里【不】排除 done/cancelled —— 否则用户刚传完的文件会从列表里消失。
+func (t *Transfers) ListRecent(limit int) ([]transfer.Job, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := t.db.Query(`
+SELECT `+transferColumns+` FROM transfer_jobs
+ORDER BY updated_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []transfer.Job
+	for rows.Next() {
+		item, err := scanTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// PurgeFinished 清理已结束的任务；正在进行的永远不动。
+//
+// 为什么必须有它：每条记录都带 chunk_bitmap，而界面只看最近若干条 ——
+// 没有清理策略的话，这张表会成为应用里唯一持续膨胀的东西。
+// 清理放在【启动】时做而不是退出时：异常退出根本走不到退出逻辑。
+func (t *Transfers) PurgeFinished(keep int, olderThan time.Time) (int, error) {
+	if keep < 0 {
+		keep = 0
+	}
+	var n int
+	err := t.db.Write(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`
+DELETE FROM transfer_jobs
+WHERE status IN ('done','failed','cancelled')
+  AND updated_at < ?
+  AND job_id NOT IN (
+    SELECT job_id FROM transfer_jobs
+    WHERE status IN ('done','failed','cancelled')
+    ORDER BY updated_at DESC LIMIT ?
+  )`, msOf(olderThan), keep)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		n = int(affected)
+		return nil
+	})
+	return n, err
+}
+
 func scanTransfer(s rowScanner) (transfer.Job, error) {
 	var (
 		out       transfer.Job

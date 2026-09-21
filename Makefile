@@ -1,4 +1,19 @@
-.PHONY: build test test-domain-cover test-e2e test-scale test-fuzz lint-arch frontend-install frontend-build frontend-typecheck ci cli gui
+.PHONY: build test test-domain-cover test-e2e test-scale test-fuzz lint-arch frontend-install frontend-build frontend-typecheck ci cli gui gui-dev package
+
+# 桌面入口 main_wails.go 带 `//go:build wails`，main_stub.go 带 `//go:build !wails`。
+#
+# 这个 tag 必须【由调用方】给出：wails3 CLI 只把 `-tags` 映射成 EXTRA_TAGS
+# （internal/commands/task_wrapper.go），不带 `-tags` 时它什么都不加。
+# 而 build/*/Taskfile.yml 的生产 BUILD_FLAGS 恰好只有 `-tags production`，
+# 于是 `wails3 build` / `wails3 dev` / `wails3 package` 会编出
+# main_stub.go —— 一个 2.4MB、运行时打印“未启用 wails tag”的占位程序，
+# 却仍会被正常打包成安装包。产物变占位、构建却报成功，是最难发现的一类错误。
+#
+# 用 make 变量而不是写死在每条 recipe 里：make 会把变量导出到子进程环境，
+# 而 wails3 的 Taskfile 正是从 EXTRA_TAGS 环境变量读取它 ——
+# 这样 build/package 里任何【嵌套】的 build 调用（包括 deps 链）都能拿到，
+# 不必依赖 go-task 的变量传递规则。
+export EXTRA_TAGS = wails
 
 build:
 	go build ./...
@@ -51,6 +66,14 @@ bindings:
 # 桌面 GUI（产物 bin/SwarmLink）
 gui: bindings
 	wails3 build -tags wails
+
+# 桌面安装包（当前平台）：Windows → NSIS 安装器，macOS → .app / .dmg，Linux → AppImage / deb / rpm
+#
+# 注意这里【不】传 -tags：wails3 package 的参数里根本没有 tags
+# （internal/commands/task_wrapper.go 的 Package 签名忽略它），
+# 只能靠上面 export 的 EXTRA_TAGS 环境变量传下去。
+package: bindings
+	wails3 package
 
 # 开发模式（热重载）
 gui-dev: bindings

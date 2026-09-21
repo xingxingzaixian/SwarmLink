@@ -152,6 +152,23 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 		n.Messages = sqlite.NewMessages(db)
 		n.Transfers = sqlite.NewTransfers(db)
 		n.Groups = sqlite.NewGroups(db)
+
+		// 传输记录清理放在【启动】时，而不是退出时 ——
+		// 异常退出根本走不到退出逻辑，而这张表是应用里唯一持续膨胀的东西。
+		// 配置写 0 时回落到默认值：否则一次手误就会把历史全清掉。
+		keep := cfg.Transfer.HistoryKeep
+		if keep <= 0 {
+			keep = 50
+		}
+		ttl := cfg.Transfer.HistoryTTL.Std()
+		if ttl <= 0 {
+			ttl = 7 * 24 * time.Hour
+		}
+		if purged, err := n.Transfers.PurgeFinished(keep, time.Now().Add(-ttl)); err != nil {
+			n.Notices = append(n.Notices, fmt.Sprintf("传输记录清理失败：%v", err))
+		} else if purged > 0 {
+			n.Notices = append(n.Notices, fmt.Sprintf("已清理 %d 条过期传输记录", purged))
+		}
 		n.PeerDir = sqlite.NewPeers(db, clk)
 	}
 
@@ -315,15 +332,33 @@ func startTCP(ctx context.Context, mgr *tcp.Manager, base, fallback int) (int, s
 	return 0, "", fmt.Errorf("TCP 端口 %d..%d 全部被占用: %w", base, base+fallback-1, lastErr)
 }
 
+// defaultUDPPort 是 ADR-008 的基准发现端口。
+//
+// udp_port=0 必须落到它，而不是交给系统随机分配：广播发现要求收发双方
+// 落在【同一个】端口上，而 ANNOUNCE 携带的端口只对单播有用 ——
+// 随机端口意味着两台机器几乎必然错开，广播就永远收不到对方的 ANNOUNCE。
+// （TCP 的 0=系统分配是安全的：对端从 announce 学到实际端口再拨号。）
+const defaultUDPPort = 2425
+
 func startBroadcast(ctx context.Context, bc *udp.Broadcaster, base, fallback int, peerApp *app.PeerApp) error {
 	sink := func(an peer.Announcement) { _ = peerApp.OnAnnouncement(an) }
 
 	if base == 0 {
-		return bc.Start(ctx, sink)
+		base = defaultUDPPort
 	}
 	if fallback < 1 {
 		fallback = 1
 	}
+
+	// 广播目标覆盖整个回退区间：即便某台机器因 2425 被占而落在 2426，
+	// 其他节点按 2425..2434 广播它也收得到 —— 这才兑现了
+	// 「对端从 announce 学习、无需配置端口」对发现场景的承诺。
+	ports := make([]int, 0, fallback)
+	for i := 0; i < fallback; i++ {
+		ports = append(ports, base+i)
+	}
+	bc.SetAnnouncePorts(ports)
+
 	var lastErr error
 	for i := 0; i < fallback; i++ {
 		bc.SetUDPPort(base + i)

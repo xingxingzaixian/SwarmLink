@@ -100,6 +100,17 @@ type TransferRepo interface {
 	// SaveBitmap 批量落盘，避免每块一次事务（P1-9）。
 	SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed int64) error
 	ListActive() ([]transfer.Job, error)
+	// ListRecent 返回最近更新的若干任务，【包含】已结束的。
+	//
+	// 与 ListActive 必须分开：ListActive 只服务「续传 / 还有哪些在跑」，
+	// 因此排除 done/cancelled；而界面的传输记录必须能看到已完成的条目，
+	// 拿 ListActive 当数据源会让「刚传完的文件凭空消失」。
+	ListRecent(limit int) ([]transfer.Job, error)
+	// PurgeFinished 清理已结束的任务，返回删除条数。
+	//
+	// 保留规则：永远保留最近的 keep 条（keep<=0 表示一条都不留），
+	// 且只清理 updated_at 早于 olderThan 的。【正在进行】的任务一律不动。
+	PurgeFinished(keep int, olderThan time.Time) (int, error)
 }
 
 // ---------------------------------------------------------------------------

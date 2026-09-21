@@ -1,33 +1,222 @@
-/* SwarmLink 设计系统 —— 深色、低对比度、信息密度优先（这是排障工具，不是营销页）。 */
+/* ============================================================================
+   SwarmLink 设计系统 —— Glassmorphism（深色饱和渐变版）
+   ----------------------------------------------------------------------------
+   三栏布局不变：[联系人] │ [聊天] │ [资料 / 传输]
+
+   配色来源（用户规格）：
+     渐变1  #7C3AED → #EC4899   紫 → 粉（梦幻）
+     渐变2  #2563EB → #06B6D4   蓝 → 青（科技感）
+     玻璃层 rgba(255,255,255,0.15~0.25) + 模糊
+     边框   rgba(255,255,255,0.2~0.3)
+     强调色 #EC4899 / #06B6D4
+
+   ⚠ 一处必须偏离规格的地方（不是口味问题，是可读性问题）：
+
+     「0.15~0.25 白 + 白字」在这两组渐变上直接不可用。按 WCAG 相对亮度公式，
+     白字落在「0.25 白 + #EC4899」上对比度约 3.5:1，落在 #06B6D4 上约 2.4:1，
+     而正文要求 4.5:1 —— 会变成「看起来很仙但读不下去」。
+
+     解法是【深色底 + 白霜】两层：
+       background: linear-gradient(白霜 0.16~0.26), rgba(18,10,44,0.44~0.52);
+     白霜与边框的数值仍在你给的区间内，观感也是白霜玻璃，
+     但底色被压暗后白字才立得住（实测正文 6.7:1、次要 4.8:1、弱化 4.2:1）。
+
+   三层结构：
+     L0 氛围  两组渐变 + 深色薄纱 + 颗粒（静态）
+     L1 玻璃  三栏面板，深色底 + 白霜 + 高光边
+     L2 内容  气泡 / 输入框 / 卡片
+   ========================================================================= */
 
 :root {
-  --bg: #0f1115;
-  --bg-raised: #171a21;
-  --bg-sidebar: #13161c;
-  --border: #262b36;
-  --border-soft: #1e222b;
+  /* --- L0 背景 ---------------------------------------------------------------
+     粉与青【放在对角】，中间留给紫/蓝：
+     中栏文字最密，深色区才是白字达标的区域，构图要服务于对比度。 */
+  --g1-purple: #7c3aed;
+  --g1-pink: #ec4899;
+  --g2-blue: #2563eb;
+  --g2-cyan: #06b6d4;
+  --g-ink: #16307f;
+  --bg-ink: #0f0723; /* 兜底深底，也是窗口底色 */
 
-  --text: #e6e9ef;
-  --text-dim: #9aa3b2;
-  --text-faint: #6b7385;
+  /* --- L1 玻璃（深色底 + 白霜两层） ------------------------------------------
+     深色底的 alpha 是这套观感的命门：
+       太低（<0.5）面板和背景亮度拉不开，看着就是「渐变上浮了几个框」；
+       太高（>0.85）色相彻底被吃掉，白做玻璃。
+     0.6 附近：面板明显比背景暗一档、色偏仍然看得见。 */
+  --glass-rail: linear-gradient(158deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.07) 62%),
+    rgba(12, 6, 32, 0.6);
+  --glass-chat: linear-gradient(158deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05) 62%),
+    rgba(12, 6, 32, 0.55);
+  --glass-side: linear-gradient(158deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.07) 62%),
+    rgba(12, 6, 32, 0.6);
+  --glass-chrome: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08)),
+    rgba(12, 6, 32, 0.5);
+  --glass-float: linear-gradient(158deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.1) 58%),
+    rgba(12, 6, 32, 0.86);
 
-  --accent: #4f8cff;
-  --accent-soft: rgba(79, 140, 255, 0.14);
+  /* --- L2 内容层 -------------------------------------------------------------
+     paper  = 浅色「纸面」：留给需要长时精读的内容（收到的消息）
+     surface* = 深色凹槽：输入框、标签、列表卡片这类短文本 */
+  --paper: rgba(255, 255, 255, 0.93);
+  --paper-ink: #180f33;
+  --surface: rgba(255, 255, 255, 0.1);
+  --surface-strong: rgba(255, 255, 255, 0.17);
+  --surface-sunken: rgba(255, 255, 255, 0.08);
 
-  --ok: #3fb950;
-  --warn: #d29922;
-  --err: #f85149;
-  --info: #58a6ff;
+  /* --- 交互态：白色叠白（深色底上唯一不会发脏的做法） ----------------------- */
+  --hover: rgba(255, 255, 255, 0.12);
+  --press: rgba(255, 255, 255, 0.2);
+  --selected: rgba(255, 255, 255, 0.18);
 
-  --radius: 8px;
-  --radius-sm: 6px;
+  /* --- 线 / 边：规格给 0.2~0.3 ---------------------------------------------- */
+  --edge: rgba(255, 255, 255, 0.26);
+  --ring: rgba(14, 7, 34, 0.85);
+  --line: rgba(255, 255, 255, 0.14);
+  --line-soft: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.24);
 
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* --- 模糊 ---------------------------------------------------------------- */
+  --blur: 34px;
+  --blur-lg: 48px;
+
+  /* --- 文字：背景是深色饱和渐变，因此用白，不用深灰 -------------------------
+     三档都做过对比度核算：正文 ~6.7:1 / 次要 ~4.8:1 / 弱化 ~4.2:1。
+     弱化档只用于时间戳这类非关键元信息。 */
+  --t1: #ffffff;
+  --t2: rgba(255, 255, 255, 0.78);
+  --t3: rgba(255, 255, 255, 0.72);
+  --t-on-brand: #06202a; /* 落在青色面上的深字 */
+
+  /* --- 强调色：粉做身份（选中/未读/活动），青做行动（主按钮/进度） ---------- */
+  --brand: #ec4899;
+  --brand-deep: #db2777;
+  --brand-soft: rgba(236, 72, 153, 0.22);
+  --brand-ring: rgba(236, 72, 153, 0.45);
+  --brand-ink: #ffd0e5;
+
+  --cyan: #06b6d4;
+  --cyan-deep: #0891b2;
+  --cyan-soft: rgba(6, 182, 212, 0.2);
+
+  /* --- 语义色：在深色底上要提亮，否则会「糊成一团暗色」 -------------------- */
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.18);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.18);
+  --err: #fb7185;
+  --err-soft: rgba(251, 113, 133, 0.2);
+
+  /* 语义色【文字】档：深底用亮字，浅底用深字。
+     之前这些亮字是直接写死在 .tag.ok / .banner 里的，
+     换到浅色主题就变成「淡薄荷压在淡绿上」——整条看不见。 */
+  --ok-ink: #a7f3d0;
+  --warn-ink: #fde68a;
+  --err-ink: #fecdd3;
+
+  /* --- 圆角 ---------------------------------------------------------------- */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-2xl: 20px;
+
+  /* --- 阴影：深色界面的投影要更黑更散，否则等于没画 ------------------------ */
+  --shadow-glass: 0 20px 44px -26px rgba(4, 0, 18, 0.62);
+  --shadow-pop: 0 16px 40px -12px rgba(4, 0, 18, 0.64), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --shadow-modal: 0 40px 96px -30px rgba(2, 0, 12, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.24);
+
+  /* --- 动效 ---------------------------------------------------------------- */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-1: 0.12s;
+  --dur-2: 0.18s;
+  --dur-3: 0.22s;
+
+  /* --- 排版 ---------------------------------------------------------------- */
+  --font: system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI',
+    'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei',
+    sans-serif;
+  --mono: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --fs-2xl: 20px;
+
+  /* --- 尺寸 ---------------------------------------------------------------- */
+  --rail-w: 292px;
+  --side-w: 300px;
+  --head-h: 64px;
 }
 
-* {
+html[data-theme='light'] {
+  /* body 的兜底色必须跟着主题走。
+     它铺在 .ambient 之下：浅色主题里若仍留着深色 :root 的 #0f0723，
+     任何「氛围层尚未铺满」的瞬间（启动、重排、层被裁掉）都会闪一下深色。
+     这正是「先深后浅」最容易出现的来源之一。
+     （原先此处定义的 --amb-base 全项目无人引用，已删除。） */
+  --bg-ink: #eef4fb;
+  --g1-purple: #c4b5fd;
+  --g1-pink: #fbcfe8;
+  --g2-blue: #bfdbfe;
+  --g2-cyan: #a5f3fc;
+  --g-ink: #c7d2fe;
+
+  --glass-rail: rgba(255, 255, 255, 0.56);
+  --glass-chat: rgba(255, 255, 255, 0.5);
+  --glass-side: rgba(255, 255, 255, 0.56);
+  --glass-chrome: rgba(255, 255, 255, 0.54);
+  --glass-float: rgba(255, 255, 255, 0.8);
+
+  --surface: rgba(255, 255, 255, 0.6);
+  --surface-strong: rgba(255, 255, 255, 0.9);
+  --surface-sunken: rgba(255, 255, 255, 0.5);
+  --hover: rgba(255, 255, 255, 0.5);
+  --press: rgba(255, 255, 255, 0.75);
+  --selected: rgba(255, 255, 255, 0.78);
+
+  --edge: rgba(255, 255, 255, 0.75);
+  --ring: rgba(255, 255, 255, 0.92);
+  --line: rgba(148, 163, 184, 0.24);
+  --line-soft: rgba(148, 163, 184, 0.15);
+  --line-strong: rgba(148, 163, 184, 0.36);
+
+  --t1: #14162a;
+  --t2: #515a70;
+  --t3: #8a93a6;
+  --t-on-brand: #06202a;
+
+  --brand-soft: rgba(236, 72, 153, 0.14);
+  --brand-ink: #b3276f;
+  --cyan-soft: rgba(6, 182, 212, 0.14);
+
+  --ok: #16a97a;
+  --warn: #d9942f;
+  --err: #e5484d;
+
+  /* 比深色主题那组再压深一档：标签只有 10px，
+     浅底上要高对比才不至于「看不清」 */
+  --ok-ink: #0a6144;
+  --warn-ink: #7a4e0d;
+  --err-ink: #992a2e;
+
+  --ok-soft: rgba(22, 169, 122, 0.14);
+  --warn-soft: rgba(217, 148, 47, 0.16);
+  --err-soft: rgba(229, 72, 77, 0.13);
+
+  --shadow-glass: 0 18px 40px -24px rgba(23, 38, 66, 0.22);
+  --shadow-pop: 0 12px 32px -10px rgba(23, 38, 66, 0.24);
+  --shadow-modal: 0 32px 72px -24px rgba(23, 38, 66, 0.28);
+}
+
+/* ---------------------------------------------------------------- 重置 */
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -39,157 +228,314 @@ body,
 }
 
 body {
-  background: var(--bg);
-  color: var(--text);
+  background: var(--bg-ink);
+  color: var(--t1);
   font-family: var(--font);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: var(--fs-md);
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  cursor: default;
+  overflow: hidden;
 }
+
+.selectable,
+input,
+textarea {
+  cursor: text;
+  user-select: text;
+}
+
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color var(--dur-3) var(--ease);
+}
+
+.scroll:hover {
+  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+}
+
+.scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.scroll:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+  background-clip: content-box;
+}
+
+/* ---------------------------------------------------------------- 表单 */
 
 button {
   font-family: inherit;
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-raised);
-  color: var(--text);
+  font-size: var(--fs-sm);
+  color: var(--t1);
+  background: none;
+  border: 0;
+  padding: 0;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s;
-}
-
-button:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--accent-soft);
 }
 
 button:disabled {
-  opacity: 0.45;
   cursor: not-allowed;
 }
 
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-button.primary:hover:not(:disabled) {
-  filter: brightness(1.1);
-  background: var(--accent);
-}
-
 input,
+textarea,
 select {
   font-family: inherit;
-  font-size: 12px;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
+  font-size: var(--fs-md);
+  color: var(--t1);
   width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+    box-shadow var(--dur-1) var(--ease);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+input:hover,
+textarea:hover,
+select:hover {
+  background: rgba(255, 255, 255, 0.13);
 }
 
 input:focus,
+textarea:focus,
 select:focus {
   outline: none;
-  border-color: var(--accent);
+  background: var(--surface-strong);
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.32);
 }
 
-/* ---------------------------------------------------------------- 布局 */
-
-.app {
-  display: grid;
-  grid-template-columns: 240px 1fr 300px;
-  height: 100%;
-}
-
-.pane {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.pane + .pane {
-  border-left: 1px solid var(--border);
-}
-
-.pane-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+input[type='checkbox'],
+input[type='radio'] {
   flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  accent-color: var(--cyan);
+  cursor: pointer;
 }
 
-.pane-title {
-  font-weight: 600;
-  letter-spacing: 0.02em;
+input[type='checkbox']:hover,
+input[type='radio']:hover {
+  background: none;
 }
 
-.pane-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px;
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--t2) 50%),
+    linear-gradient(135deg, var(--t2) 50%, transparent 50%);
+  background-position: right 14px top 55%, right 9px top 55%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 26px;
+  cursor: pointer;
+}
+
+/* 下拉展开后的原生 option 在深色主题里必须显式给底色，
+   否则 Windows 上会出现「黑底黑字」 */
+select option {
+  background: #1c1140;
+  color: var(--t1);
+}
+
+textarea {
+  resize: none;
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.975);
+}
+
+.btn:disabled {
+  opacity: 0.42;
+}
+
+/* 主按钮走【青 + 深字】而不是粉 + 白字：
+   白字在 #EC4899 上只有 3.5:1，深字在 #06B6D4 上有 6.2:1。
+   规格说强调色二选一，这里按「哪个可用」来分派。 */
+.btn-primary {
+  background: var(--cyan);
+  color: var(--t-on-brand);
+  box-shadow: 0 6px 18px -8px rgba(6, 182, 212, 0.75),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--cyan-deep);
+}
+
+.btn-ghost {
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--t1);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.btn-soft {
+  background: var(--surface);
+  color: var(--t1);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.btn-soft:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-sm);
+  color: var(--t2);
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.icon-btn.on {
+  background: var(--brand-soft);
+  color: #fff;
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+}
+
+/* 键盘导航的焦点环：深色界面里绝不能省 —— 不然 Tab 完全找不到位置 */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
 }
 
 /* ---------------------------------------------------------------- 通用 */
 
+.mono {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
 .muted {
-  color: var(--text-dim);
+  color: var(--t2);
 }
 
 .faint {
-  color: var(--text-faint);
+  color: var(--t3);
 }
 
-.mono {
-  font-family: var(--mono);
-  font-size: 11px;
+.nowrap {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.divider {
+  height: 1px;
+  background: var(--line-soft);
 }
 
 .tag {
-  display: inline-block;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
   border-radius: 999px;
   font-size: 10px;
-  line-height: 1.6;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--t1);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .tag.ok {
-  color: var(--ok);
-  border-color: rgba(63, 185, 80, 0.4);
+  background: var(--ok-soft);
+  color: var(--ok-ink);
 }
 
 .tag.warn {
-  color: var(--warn);
-  border-color: rgba(210, 153, 34, 0.4);
+  background: var(--warn-soft);
+  color: var(--warn-ink);
 }
 
 .tag.err {
-  color: var(--err);
-  border-color: rgba(248, 81, 73, 0.4);
+  background: var(--err-soft);
+  color: var(--err-ink);
 }
 
-.tag.info {
-  color: var(--info);
-  border-color: rgba(88, 166, 255, 0.4);
+.tag.brand {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
 }
 
 .dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  margin-right: 6px;
-  background: var(--text-faint);
+  background: var(--t3);
 }
 
 .dot.online {
@@ -197,74 +543,179 @@ select:focus {
 }
 
 .dot.connected {
-  background: var(--info);
+  background: var(--cyan);
 }
 
 .dot.offline {
-  background: var(--err);
+  background: rgba(255, 255, 255, 0.35);
 }
 
 .empty {
-  padding: 24px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 24px;
   text-align: center;
-  color: var(--text-faint);
+  color: var(--t3);
+  font-size: var(--fs-sm);
+}
+
+.empty-title {
+  color: var(--t1);
+  font-size: var(--fs-md);
 }
 
 .banner {
-  padding: 6px 12px;
-  font-size: 11px;
-  background: rgba(210, 153, 34, 0.12);
-  color: var(--warn);
-  border-bottom: 1px solid rgba(210, 153, 34, 0.3);
+  padding: 8px 14px;
+  font-size: var(--fs-sm);
+  background: var(--warn-soft);
+  color: var(--warn-ink);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.25);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
-/* ---------------------------------------------------------------- 列表项 */
+.banner.err {
+  background: var(--err-soft);
+  color: var(--err-ink);
+  border-bottom-color: rgba(251, 113, 133, 0.25);
+}
 
-.row {
+.section-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 7px 8px;
-  border-radius: var(--radius-sm);
+  height: 30px;
+  padding: 0 10px 0 12px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--t3);
+  user-select: none;
+}
+
+.list-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--r-md);
   cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
 }
 
-.row:hover {
-  background: var(--bg-raised);
+.list-row:hover {
+  background: var(--hover);
 }
 
-.row.active {
-  background: var(--accent-soft);
+.list-row.active {
+  background: var(--selected);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
-.row-main {
+/* 选中态再加一道粉色侧标：半透明玻璃上的色差本来就小，
+   只靠「白一点」区分选中与 hover 会分不清 */
+.list-row.active::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--brand);
+}
+
+.list-row-main {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.row-title {
+.list-row-title {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.list-row-sub {
+  font-size: var(--fs-sm);
+  color: var(--t3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.row-sub {
-  font-size: 11px;
-  color: var(--text-faint);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+/* 未读角标：#E11D48 而不是纯红 —— 在白字下有 4.7:1，
+   纯红（#F43F5E / #FF3B30）都过不了 */
 .badge {
   min-width: 18px;
+  height: 18px;
   padding: 0 5px;
   border-radius: 999px;
-  background: var(--accent);
+  background: #e11d48;
   color: #fff;
   font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 3px 10px -3px rgba(225, 29, 72, 0.9);
+}
+
+/* ---------------------------------------------------------------- 动效 */
+
+@keyframes sl-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes sl-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sl-pop-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.anim-fade {
+  animation: sl-fade var(--dur-3) var(--ease) both;
+}
+
+.anim-pop {
+  animation: sl-pop var(--dur-3) var(--ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -89,6 +89,11 @@ type Config struct {
 		ChunkSize           int64    `toml:"chunk_size"`
 		MaxUploadMbps       int      `toml:"max_upload_mbps"`
 		BitmapFlushInterval Duration `toml:"bitmap_flush_interval"`
+		// HistoryKeep / HistoryTTL 是传输记录的清理策略：
+		// 启动时只保留最近 HistoryKeep 条已结束的，并丢弃超过 HistoryTTL 的。
+		// 每条记录都带 chunk_bitmap，这张表是应用里唯一持续膨胀的东西。
+		HistoryKeep int      `toml:"history_keep"`
+		HistoryTTL  Duration `toml:"history_ttl"`
 	} `toml:"transfer"`
 
 	Security struct {
@@ -128,6 +133,8 @@ func Default() *Config {
 	c.Transfer.WindowSize = 8
 	c.Transfer.ChunkSize = 512 * 1024
 	c.Transfer.BitmapFlushInterval = Duration(2 * time.Second)
+	c.Transfer.HistoryKeep = 50
+	c.Transfer.HistoryTTL = Duration(7 * 24 * time.Hour)
 
 	c.Security.RequireAuth = true // 强烈建议保持 true
 	c.Security.Encryption = "off"

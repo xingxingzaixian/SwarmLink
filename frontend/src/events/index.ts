@@ -2,9 +2,46 @@ import { useChatStore } from '../stores/chat'
 import { useDebugStore } from '../stores/debug'
 import { usePeersStore } from '../stores/peers'
 import { useTransferStore } from '../stores/transfer'
+import { useUiStore } from '../stores/ui'
 import { Events } from '@wailsio/runtime'
 
-import { EV, type DebugEvent, type Message, type Peer, type TransferJob } from '../api/types'
+import {
+  EV,
+  type DebugEvent,
+  type FilesDroppedEvent,
+  type Message,
+  type Peer,
+  type TransferJob
+} from '../api/types'
+
+/**
+ * 拖放文件 → 发送。
+ *
+ * 路径来自桌面外壳（WebView 的 File 对象没有本地路径），落点由
+ * data-file-drop-target 决定。这里只认聊天区：用户把文件拖到联系人列表上
+ * 多半是误操作，静默忽略比「猜他想发给谁」安全。
+ */
+async function handleFilesDropped(data: FilesDroppedEvent): Promise<void> {
+  if (data?.target !== 'chat' || !data.paths?.length) return
+
+  const chat = useChatStore()
+  const transfers = useTransferStore()
+  const ui = useUiStore()
+
+  const peerId = chat.activePeerId
+  if (!peerId) {
+    ui.notify('先打开与某个联系人的会话，再拖入文件')
+    return
+  }
+
+  ui.focusTransfer()
+  const ok = await transfers.sendFiles(peerId, data.paths)
+  ui.notify(
+    ok === data.paths.length
+      ? `已开始发送 ${ok} 个文件`
+      : `已发起 ${ok}/${data.paths.length} 个文件，失败的请看右侧`
+  )
+}
 
 type Handler = (data: any) => void
 
@@ -15,21 +52,29 @@ type Handler = (data: any) => void
 /**
  * 事件订阅的唯一入口。
  *
- * Wails 环境下走 @wailsio/runtime 的 Events.On（回调收到 WailsEvent，
- * 业务数据在 .data 上）；否则退化为本地 EventTarget，
- * 这样在没有后端的浏览器预览里，组件逻辑依然可被驱动与验证。
+ * 两条通道【同时】订阅：
+ *   - Wails 宿主：@wailsio/runtime 的 Events.On（回调收到 WailsEvent，业务数据在 .data 上）；
+ *   - 浏览器预览：本地 CustomEvent（配合 emitLocal，让降级模式也能被真实驱动）。
+ *
+ * 为什么不做「探测宿主再二选一」：Events.On 在没有原生 runtime 时【不会抛错】，
+ * 它只是把回调登记进一个永远不会被触发的 map —— 靠 try/catch 判断宿主是失效的。
+ * 而两条通道各自沉默的代价是零（各多一个不会被调用的监听器）。
  */
 export function on(name: string, fn: Handler): void {
   try {
     Events.On(name, (ev: any) => fn(ev?.data ?? ev))
-    return
   } catch {
-    // 不在 Wails 宿主里：Events.On 无法工作，改用本地事件通道
+    /* 没有原生 runtime 时忽略 */
   }
   window.addEventListener(name, (e) => fn((e as CustomEvent).detail))
 }
 
-/** 本地触发（仅调试/预览用）。 */
+/**
+ * 本地触发（降级预览 / 调试用）。
+ *
+ * 它驱动的是【真实的 store 更新路径】，不是另做一套假数据 ——
+ * 因此在浏览器里 `npm run dev` 就能验证进度合并、未读、气泡状态这些逻辑。
+ */
 export function emitLocal(name: string, data: any): void {
   window.dispatchEvent(new CustomEvent(name, { detail: data }))
 }
@@ -99,8 +144,17 @@ export function registerEvents(): void {
 
   on(EV.chatDelivered, (data: { msgId: string }) => chat.markDelivered(data.msgId))
 
+  // 进度载荷在【这一处】翻译成 store 的命名：后端发的是 Go 的 JSON key
+  // （speed / eta），前端用 etaMs 明确单位是毫秒，避免和秒混用。
   on(EV.transferProgress, (data: any) => {
-    pendingProgress.set(data.jobId, data)
+    pendingProgress.set(data.jobId, {
+      jobId: data.jobId,
+      peerId: data.peerId,
+      percent: data.percent,
+      status: data.status,
+      speed: data.speed,
+      etaMs: data.eta
+    })
     scheduleProgressFlush()
   })
 
@@ -116,6 +170,10 @@ export function registerEvents(): void {
     // 群元数据只推摘要；成员详情由 GroupService.List() 拉取
     void chat.loadConversations()
     debug.push({ topic: `group.updated → epoch=${data.epoch}`, at: Date.now() })
+  })
+
+  on(EV.fileDropped, (data: FilesDroppedEvent) => {
+    void handleFilesDropped(data)
   })
 
   on(EV.netError, (data: { op: string; peerId: string; error: string }) => {

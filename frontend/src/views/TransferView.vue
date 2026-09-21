@@ -1,164 +1,112 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+/**
+ * 文件传输（弹层的「传输」页）：全局记录。
+ *
+ * 它和右栏的「传输」页职责不同，不能合并：
+ *   - 右栏：当前会话的进度，回答「我刚发的那个文件到哪了」；
+ *   - 这里：所有任务（含接收），回答「刚才谁给我发的东西存哪了」。
+ *
+ * 发起发送的入口不在这里 —— 它属于会话上下文，放在聊天区。
+ * 旧版在传输页放了一个「选择接收方 + 填路径」的表单，本质是把
+ * 「发给谁」这件事从会话里摘出来，反而多了一步。
+ */
+import { computed, onMounted, ref } from 'vue'
 
-import ProgressBar from '../components/ProgressBar.vue'
-import { usePeersStore } from '../stores/peers'
-import { useTransferStore } from '../stores/transfer'
+import Icon from '../components/Icon.vue'
+import TransferList from '../components/TransferList.vue'
+import { getApi } from '../api'
+import { isActive, useTransferStore } from '../stores/transfer'
+import { useUiStore } from '../stores/ui'
 
-const props = defineProps<{ preselectedPeer?: string }>()
-
-const peers = usePeersStore()
 const transfers = useTransferStore()
+const ui = useUiStore()
+const loading = ref(false)
+const clearing = ref(false)
 
-const peerId = ref('')
-const path = ref('')
-const sending = ref(false)
-const notice = ref('')
+const done = computed(() => transfers.jobs.filter((j) => j.status === 'done').length)
+const finished = computed(() => transfers.jobs.filter((j) => !isActive(j.status)).length)
 
-watch(
-  () => props.preselectedPeer,
-  (v) => {
-    if (v) peerId.value = v
-  }
-)
-
-const peerName = computed(() => (id: string) => peers.nameOf(id))
-
-function human(bytes: number): string {
-  if (!bytes) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let v = bytes
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`
-}
-
-function statusTag(j: { status: string }): { text: string; cls: string } {
-  switch (j.status) {
-    case 'done':
-      return { text: '完成', cls: 'ok' }
-    case 'failed':
-      return { text: '失败', cls: 'err' }
-    case 'verifying':
-      return { text: '校验中', cls: 'warn' }
-    case 'paused':
-      return { text: '已暂停', cls: 'warn' }
-    case 'queued':
-      return { text: '排队中', cls: '' }
-    case 'cancelled':
-      return { text: '已取消', cls: '' }
-    default:
-      return { text: '传输中', cls: 'info' }
-  }
-}
-
-async function send(): Promise<void> {
-  notice.value = ''
-  if (!peerId.value || !path.value.trim()) {
-    notice.value = '请选择节点并填写文件路径'
-    return
-  }
-  sending.value = true
+/**
+ * 只清【已结束】的：进行中的任务不该由界面打断 ——
+ * 清掉它们会让用户以为传输被取消了，而实际上后台还在跑。
+ */
+async function clearFinished(): Promise<void> {
+  if (!finished.value) return
+  clearing.value = true
   try {
-    await transfers.sendFile(peerId.value, path.value.trim())
-    path.value = ''
-    notice.value = '已开始发送（结果通过事件通知）'
+    const n = await (await getApi()).clearTransfers()
+    ui.notify(n > 0 ? `已清除 ${n} 条记录` : '没有可清除的记录')
     await transfers.refresh()
   } catch (e: any) {
-    notice.value = String(e?.message ?? e)
+    ui.notify(String(e?.message ?? e))
   } finally {
-    sending.value = false
+    clearing.value = false
   }
 }
+
+async function load(): Promise<void> {
+  loading.value = true
+  try {
+    await transfers.refresh()
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(load)
 </script>
 
 <template>
-  <div class="pane">
-    <div class="pane-head">
-      <div class="pane-title">文件传输</div>
-      <button @click="transfers.refresh()">刷新</button>
+  <div class="transfers">
+    <div class="bar">
+      <span class="faint">
+        共 {{ transfers.jobs.length }} 个任务<template v-if="done">，{{ done }} 个已完成</template>
+      </span>
+      <span class="spacer" />
+      <button
+        class="btn btn-soft"
+        :disabled="clearing || !finished"
+        :title="finished ? `清除 ${finished} 条已结束的记录（进行中的不受影响）` : '没有已结束的记录'"
+        @click="clearFinished"
+      >
+        <Icon name="trash" :size="14" />{{ clearing ? '清除中…' : '清空已结束' }}
+      </button>
+      <button class="btn btn-soft" :disabled="loading" @click="load">
+        <Icon name="refresh" :size="14" />{{ loading ? '刷新中…' : '刷新' }}
+      </button>
     </div>
 
-    <div class="send-form">
-      <select v-model="peerId">
-        <option value="">（选择接收方）</option>
-        <option v-for="p in peers.peers" :key="p.nodeId" :value="p.nodeId">
-          {{ p.displayName }} · {{ p.shortId }}
-        </option>
-      </select>
-      <input v-model="path" placeholder="本地文件绝对路径（如 /Users/me/a.zip）" />
-      <button class="primary" :disabled="sending" @click="send">发送文件</button>
-      <div v-if="notice" class="faint">{{ notice }}</div>
-      <div class="faint tip">
-        支持断点续传：同一文件重复发送会自动从已完成处继续。<br />
-        原生文件选择对话框需在 Wails 侧接入后再替换此输入框。
-      </div>
-    </div>
+    <div v-if="transfers.error" class="banner err">{{ transfers.error }}</div>
 
-    <div class="pane-body">
-      <div v-if="!transfers.jobs.length" class="empty">暂无传输任务。</div>
-
-      <div v-for="j in transfers.jobs" :key="j.jobId" class="job">
-        <div class="job-head">
-          <span class="row-title">{{ j.fileName || j.jobId.slice(0, 8) }}</span>
-          <span class="tag" :class="statusTag(j).cls">{{ statusTag(j).text }}</span>
-        </div>
-        <div class="row-sub">
-          {{ j.direction === 'send' ? '发送至' : '接收自' }} {{ peerName(j.peerId) }} ·
-          {{ human(j.fileSize) }}
-          <span v-if="j.direction === 'send'">· {{ j.percent.toFixed(0) }}%</span>
-        </div>
-        <ProgressBar :percent="j.percent" :status="j.status" />
-        <div v-if="j.error" class="err-text">{{ j.error }}</div>
-        <div v-if="j.status === 'done' && j.localPath" class="faint mono path">
-          {{ j.localPath }}
-        </div>
-      </div>
-    </div>
+    <TransferList :jobs="transfers.jobs" show-peer />
   </div>
 </template>
 
 <style scoped>
-.send-form {
+.transfers {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
 }
 
-.tip {
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.job {
-  padding: 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  margin-bottom: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.job-head {
+.bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  padding: 12px 20px 0;
+  font-size: var(--fs-sm);
 }
 
-.err-text {
-  color: var(--err);
-  font-size: 11px;
+.spacer {
+  flex: 1 1 auto;
 }
 
-.path {
-  font-size: 11px;
-  word-break: break-all;
+.banner {
+  margin: 10px 20px 0;
+  border-radius: var(--r-md);
+  border-bottom: 0;
+}
+
+.transfers :deep(.wrap) {
+  padding: 12px 20px 18px;
 }
 </style>

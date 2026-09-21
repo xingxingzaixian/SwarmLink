@@ -4,7 +4,7 @@
 //
 // 这是【唯一】接触 Wails API 的文件：五个服务与事件桥都在
 // internal/adapters/wails 里以纯 Go 实现，因此 Wails beta 期的 API 波动
-// 只需要在这里适配一次（架构书 7.5：锁定 v3.0.0-beta.23，升级作为独立任务）。
+// 只需要在这里适配一次（架构书 7.5：锁定 v3.0.0-beta.24，升级作为独立任务）。
 //
 // 构建步骤（在仓库根目录执行）：
 //
@@ -22,6 +22,7 @@ import (
 	"os"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 
 	wadapter "github.com/swarmlink/swarmlink/internal/adapters/wails"
 	"github.com/swarmlink/swarmlink/internal/bootstrap"
@@ -116,17 +117,42 @@ func main() {
 	defer bridge.Stop()
 
 	// 5. 主窗口
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:  "SwarmLink",
 		Width:  1180,
 		Height: 760,
+		// 允许把文件拖进窗口来发送。
+		//
+		// 为什么必须开这个开关并把路径转发出去：WebView 里 drop 出来的 File
+		// 对象【没有本地路径】（浏览器安全模型），只有窗口层能拿到真实路径。
+		// 因此拖放发文件这条链路注定要过一次 Go，不可能纯前端实现。
+		EnableFileDrop: true,
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 40,
 			Backdrop:                application.MacBackdropTranslucent,
 			TitleBar:                application.MacTitleBarHiddenInset,
 		},
-		BackgroundColour: application.NewRGB(15, 17, 21),
+		// 窗口底色要和前端的氛围层兜底色一致（#0F0723）：
+		// 不一致的话，调整窗口尺寸时会闪出一道白边
+		BackgroundColour: application.NewRGB(15, 7, 35),
 		URL:              "/",
+	})
+
+	// 拖入文件的路径 → 前端。落在哪个区域由前端的 data-file-drop-target 决定，
+	// 这里只做搬运，不做业务判断（发给谁、能不能发，属于 UI 的决策）。
+	win.OnWindowEvent(events.Common.WindowFilesDropped, func(e *application.WindowEvent) {
+		paths := e.Context().DroppedFiles()
+		if len(paths) == 0 {
+			return
+		}
+		target := ""
+		if d := e.Context().DropTargetDetails(); d != nil {
+			target = d.Attributes["data-file-drop-target"]
+		}
+		app.Event.Emit(wadapter.EventFilesDropped, map[string]any{
+			"paths":  paths,
+			"target": target,
+		})
 	})
 
 	if err := app.Run(); err != nil {

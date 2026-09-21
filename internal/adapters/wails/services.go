@@ -3,6 +3,10 @@ package wails
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 
@@ -279,6 +283,17 @@ func (s *ChatService) Conversations() ([]ConversationDTO, error) {
 type TransferService struct{ d Deps }
 
 // SendFile 发送文件（异步：立即返回 job_id，进度通过事件推送）。
+//
+// 返回值契约：这是【真正的 job_id】，它会原样出现在随后的
+// transfer:progress / transfer:done / transfer:error 事件里。
+//
+// 因此 job_id 在这里生成，再下传给 app 层（TransferApp.SendFileAs）。
+// 早先的实现是 app 自己生成 id、这里另造一个占位值返回 —— 界面拿到的 id
+// 与任何事件都无关，任务条目永远等不到属于自己的进度。
+//
+// 仍然不阻塞：文件哈希与传输都在后台 goroutine 里跑。但路径本身在返回前
+// 做一次最廉价的检查 —— 路径打错是这里最常见的失误，让它同步报错，
+// 用户就不必对着一个「排队中」的任务猜发生了什么。
 func (s *TransferService) SendFile(peerID, path string) (string, error) {
 	id, err := identity.ParseNodeID(peerID)
 	if err != nil {
@@ -287,19 +302,86 @@ func (s *TransferService) SendFile(peerID, path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("请选择文件")
 	}
+	if err := checkSendableFile(path); err != nil {
+		return "", err
+	}
 
 	jobID := message.NewID()
 	go func() {
 		// 结果通过 transfer.done / transfer.error 事件通知前端；
 		// 这里必须脱离请求生命周期，否则前端切页会中断传输。
-		_, _ = s.d.Transfer.SendFile(context.Background(), id, path)
+		_, _ = s.d.Transfer.SendFileAs(context.Background(), id, path, jobID)
 	}()
 	return jobID, nil
 }
 
-// List 返回全部（含已结束的）传输任务。
+// Reveal 在系统文件管理器中定位该路径（尽可能选中文件本身）。
+//
+// 三个平台语义不同：Windows 用 `explorer /select,`、macOS 用 `open -R`
+// 都能选中文件；Linux 的 xdg-open 只能打开所在目录。
+//
+// 一律用 exec.Command 传【参数数组】、不经过 shell ——
+// 否则路径里的空格、分号、& 会被当成命令解析（这是最常见的注入口子）。
+func (s *TransferService) Reveal(path string) error {
+	if path == "" {
+		return fmt.Errorf("没有可定位的路径")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("无效路径: %w", err)
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("路径已不存在: %w", err)
+	}
+	dir := abs
+	if !st.IsDir() {
+		dir = filepath.Dir(abs)
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("explorer", "/select,"+abs).Start()
+	case "darwin":
+		return exec.Command("open", "-R", abs).Start()
+	default:
+		return exec.Command("xdg-open", dir).Start()
+	}
+}
+
+// ClearFinished 清空已结束的传输记录，返回删除条数。
+//
+// 与启动时的自动清理共用 PurgeFinished：keep=0 表示一条都不保留，
+// olderThan=now 表示「比现在更早的都算」—— 合起来即清空全部已结束的。
+func (s *TransferService) ClearFinished() (int, error) {
+	return s.d.TransferRepo.PurgeFinished(0, time.Now())
+}
+
+// checkSendableFile 在建立任务之前做一次廉价的可用性检查。
+//
+// 与 app 层的重复是有意的：这里决定的是「错误【何时】出现」，不是正确性 ——
+// 传输真正开始后仍会按实际读取结果报错。前置检查的价值在于把
+// 「路径打错 / 选到目录 / 空文件」这三类失误从异步静默失败变成同步报错。
+func checkSendableFile(path string) error {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("无法读取文件: %w", err)
+	}
+	if st.IsDir() {
+		return fmt.Errorf("这是一个目录：v1.0 只支持单文件传输")
+	}
+	if st.Size() == 0 {
+		return fmt.Errorf("空文件没有可传输的内容")
+	}
+	return nil
+}
+
+// List 返回最近的传输任务（含已结束的），供界面的传输记录使用。
+//
+// 这里必须是 ListRecent 而不是 ListActive：后者排除 done/cancelled，
+// 用它会导致「文件明明传完了，列表里却没有任何记录」。
 func (s *TransferService) List() ([]TransferDTO, error) {
-	jobs, err := s.d.TransferRepo.ListActive()
+	jobs, err := s.d.TransferRepo.ListRecent(50)
 	if err != nil {
 		return nil, err
 	}

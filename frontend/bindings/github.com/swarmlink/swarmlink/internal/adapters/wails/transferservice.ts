@@ -15,6 +15,16 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * ClearFinished 清空已结束的传输记录，返回删除条数。
+ * 
+ * 与启动时的自动清理共用 PurgeFinished：keep=0 表示一条都不保留，
+ * olderThan=now 表示「比现在更早的都算」—— 合起来即清空全部已结束的。
+ */
+export function ClearFinished(): $CancellablePromise<number> {
+    return $Call.ByID(3179681116);
+}
+
+/**
  * Get 返回单个传输任务。
  */
 export function Get(jobID: string): $CancellablePromise<$models.TransferDTO> {
@@ -22,14 +32,41 @@ export function Get(jobID: string): $CancellablePromise<$models.TransferDTO> {
 }
 
 /**
- * List 返回全部（含已结束的）传输任务。
+ * List 返回最近的传输任务（含已结束的），供界面的传输记录使用。
+ * 
+ * 这里必须是 ListRecent 而不是 ListActive：后者排除 done/cancelled，
+ * 用它会导致「文件明明传完了，列表里却没有任何记录」。
  */
 export function List(): $CancellablePromise<$models.TransferDTO[] | null> {
     return $Call.ByID(3831912297);
 }
 
 /**
+ * Reveal 在系统文件管理器中定位该路径（尽可能选中文件本身）。
+ * 
+ * 三个平台语义不同：Windows 用 `explorer /select,`、macOS 用 `open -R`
+ * 都能选中文件；Linux 的 xdg-open 只能打开所在目录。
+ * 
+ * 一律用 exec.Command 传【参数数组】、不经过 shell ——
+ * 否则路径里的空格、分号、& 会被当成命令解析（这是最常见的注入口子）。
+ */
+export function Reveal(path: string): $CancellablePromise<void> {
+    return $Call.ByID(1451341384, path);
+}
+
+/**
  * SendFile 发送文件（异步：立即返回 job_id，进度通过事件推送）。
+ * 
+ * 返回值契约：这是【真正的 job_id】，它会原样出现在随后的
+ * transfer:progress / transfer:done / transfer:error 事件里。
+ * 
+ * 因此 job_id 在这里生成，再下传给 app 层（TransferApp.SendFileAs）。
+ * 早先的实现是 app 自己生成 id、这里另造一个占位值返回 —— 界面拿到的 id
+ * 与任何事件都无关，任务条目永远等不到属于自己的进度。
+ * 
+ * 仍然不阻塞：文件哈希与传输都在后台 goroutine 里跑。但路径本身在返回前
+ * 做一次最廉价的检查 —— 路径打错是这里最常见的失误，让它同步报错，
+ * 用户就不必对着一个「排队中」的任务猜发生了什么。
  */
 export function SendFile(peerID: string, path: string): $CancellablePromise<string> {
     return $Call.ByID(3239939129, peerID, path);

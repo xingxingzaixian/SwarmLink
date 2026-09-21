@@ -5,14 +5,24 @@ export interface Peer {
   nodeId: string
   shortId: string
   displayName: string
+  /** 领域状态：unknown | discovered | online | offline | blocked */
   state: string
   lastAddr: string
   subnet: string
   source: string
   lastSeen: number
-  /** 节点在线（由 UDP announce 维护） */
+  /**
+   * 已握手过（后端为 `state == 'online'`，由 TCP 连接层置位）。
+   *
+   * ⚠ 它【不是】「节点在不在」—— 后者由 UDP announce 维护，状态是
+   * `discovered`。早期前端注释把它写成 announce 维护，导致分组口径一直
+   * 用错：刚被广播发现、还没聊过天的节点因此被当成离线。
+   */
   online: boolean
-  /** 连接可用（由 TCP 会话维护）—— 与 online 是两件事，UI 必须分开显示 */
+  /**
+   * 此刻已有 TCP 会话：首条消息零跳数，立刻发得出。
+   * 与 online 高度相关但不等价 —— 会话可能被空闲回收，而 state 仍为 online。
+   */
   connected: boolean
 }
 
@@ -52,6 +62,14 @@ export interface TransferJob {
   status: string
   error?: string
   updatedAt: number
+  /**
+   * 传输速率（字节/秒，滑动窗口值）。
+   * 只随 `transfer:progress` 事件到达；TransferService.List() 落库的 DTO 里没有，
+   * 因此刷新后可能短暂为空 —— UI 必须容忍。
+   */
+  speed?: number
+  /** 预计剩余毫秒数。来源同上，仅事件携带。 */
+  etaMs?: number
 }
 
 export interface GroupMember {
@@ -134,6 +152,13 @@ export interface SwarmApi {
   // 传输
   sendFile(peerId: string, path: string): Promise<string>
   transfers(): Promise<TransferJob[]>
+  /**
+   * 在系统文件管理器中定位已传输的文件（Windows/macOS 会选中文件本身）。
+   * 失败时 reject，由调用方提示 —— 例如文件已被用户手动删除。
+   */
+  revealFile(path: string): Promise<void>
+  /** 清空已结束的传输记录，返回删除条数。 */
+  clearTransfers(): Promise<number>
 
   // 节点与诊断
   self(): Promise<Self>
@@ -159,8 +184,17 @@ export const EV = {
   transferError: 'transfer:error',
   netError: 'net:error',
   configChanged: 'config:changed',
-  debug: 'debug:event'
+  debug: 'debug:event',
+  /** 拖入窗口的文件路径（由桌面外壳转发，非领域事件）。 */
+  fileDropped: 'file:dropped'
 } as const
+
+/** `file:dropped` 的载荷。 */
+export interface FilesDroppedEvent {
+  paths: string[]
+  /** 命中的 data-file-drop-target 属性值。 */
+  target: string
+}
 
 export interface DebugEvent {
   topic: string

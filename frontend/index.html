@@ -4,6 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SwarmLink</title>
+    <!--
+      在任何模块加载之前先落主题。
+      必须内联、必须早于 /src/main.ts —— 否则浅色用户在首帧会看到深色底。
+      这是全应用唯一一处重复 THEME_KEY 的地方：它要跑在模块系统之前，
+      这个约束无法用 import 满足。
+      只处理 light：缺省（无属性）本身就是深色，不必多写一次。
+    -->
+    <script>
+      try {
+        if (localStorage.getItem('swarmlink.theme') === 'light') {
+          document.documentElement.dataset.theme = 'light'
+        }
+      } catch (e) {
+        /* 存储不可用：保持默认深色 */
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

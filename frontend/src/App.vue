@@ -1,34 +1,39 @@
 <script setup lang="ts">
+/**
+ * 应用外壳：氛围层 + 三栏 + 全局浮层。
+ *
+ *   左 = 联系人（含本人入口）  中 = 聊天  右 = 资料 / 传输进度
+ *
+ * 氛围层是整块玻璃的「内容」：三栏是半透明面板，没有背后这片渐变，
+ * 磨砂就退化成一坨灰。构图有两条约束：
+ *   1. 粉（#EC4899）与青（#06B6D4）放在【对角】——它们最亮，
+ *      压住面板角落没问题，但不能铺在文字最密的中栏正中；
+ *   2. 中栏底下留紫 / 蓝（深色），白字在这里最容易达到 4.5:1。
+ * 换句话说，这个布局是为了对比度排的，不只是为了好看。
+ *
+ * 布局本身只决定「什么占据主视线的哪一块」，不做任何业务判断。
+ * 所有跨栏联动（发文件后右栏切进度、左栏点人开会话）都走 store。
+ */
 import { onMounted, onUnmounted, ref } from 'vue'
 
-import DebugPanel from './views/DebugPanel.vue'
-import PeerList from './components/PeerList.vue'
-import SettingsView from './views/SettingsView.vue'
 import ChatView from './views/ChatView.vue'
-import TransferView from './views/TransferView.vue'
-
+import ContactPanel from './components/ContactPanel.vue'
+import SidePanel from './components/SidePanel.vue'
+import SettingsDialog from './views/SettingsDialog.vue'
 import { getApi, isMockMode } from './api'
-import type { Peer } from './api/types'
 import { useChatStore } from './stores/chat'
 import { useGroupStore } from './stores/group'
 import { usePeersStore } from './stores/peers'
 import { useTransferStore } from './stores/transfer'
-
-type Tab = 'transfer' | 'settings' | 'debug'
+import { useUiStore } from './stores/ui'
 
 const peers = usePeersStore()
 const chat = useChatStore()
 const transfers = useTransferStore()
 const groups = useGroupStore()
+const ui = useUiStore()
 
-const tab = ref<Tab>('transfer')
 const mock = ref(false)
-const preselectedPeer = ref('')
-
-// 群创建表单
-const groupName = ref('')
-const groupMembers = ref<string[]>([])
-const showGroupForm = ref(false)
 
 let timer: number | undefined
 
@@ -43,7 +48,9 @@ onMounted(async () => {
     transfers.refresh(),
     groups.refresh()
   ])
-  // 诊断数据（连接数/种子）需要周期性拉取；事件流本身是推送的
+
+  // 节点目录的变化主体靠 peer:updated 事件推送，这里只做兜底轮询：
+  // 「连接可用」这类由会话层维护的状态没有单独事件，需要周期性对账。
   timer = window.setInterval(() => {
     void peers.refresh()
   }, 3000)
@@ -52,157 +59,142 @@ onMounted(async () => {
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
 })
-
-async function openPeer(p: Peer): Promise<void> {
-  await chat.openPeer(p.nodeId, p.displayName)
-}
-
-function onSendFile(p: Peer): void {
-  preselectedPeer.value = p.nodeId
-  tab.value = 'transfer'
-}
-
-async function createGroup(): Promise<void> {
-  if (!groupName.value.trim()) return
-  try {
-    await groups.create(groupName.value.trim(), groupMembers.value)
-    groupName.value = ''
-    groupMembers.value = []
-    showGroupForm.value = false
-    await chat.loadConversations()
-  } catch (e: any) {
-    groups.error = String(e?.message ?? e)
-  }
-}
 </script>
 
 <template>
-  <div class="app">
-    <!-- 左：节点与群 -->
-    <aside class="pane sidebar">
-      <div class="pane-head">
-        <div>
-          <div class="pane-title">SwarmLink</div>
-          <div class="row-sub mono">
-            {{ peers.self?.displayName || '…' }} · {{ peers.self?.nodeId?.slice(0, 8) || '—' }}
-          </div>
-        </div>
-      </div>
-
-      <div v-if="mock" class="banner">
-        未连接后端（降级模式）：当前显示的是占位数据。
-      </div>
-
-      <div class="pane-body">
-        <PeerList @chat="openPeer" @send-file="onSendFile" />
-
-        <div class="section-head">
-          <span class="muted">群聊</span>
-          <button @click="showGroupForm = !showGroupForm">
-            {{ showGroupForm ? '取消' : '新建' }}
-          </button>
-        </div>
-
-        <div v-if="showGroupForm" class="group-form">
-          <input v-model="groupName" placeholder="群名称" />
-          <select v-model="groupMembers" multiple size="3">
-            <option v-for="p in peers.peers" :key="p.nodeId" :value="p.nodeId">
-              {{ p.displayName }}
-            </option>
-          </select>
-          <div class="faint">上限 20 人（v1.0）。可多选初始成员。</div>
-          <button class="primary" @click="createGroup">创建</button>
-        </div>
-
-        <div v-if="groups.error" class="banner">{{ groups.error }}</div>
-
-        <div
-          v-for="g in groups.groups"
-          :key="g.groupId"
-          class="row"
-          @click="chat.openPeer(g.groupId, g.name)"
-        >
-          <span class="dot online" />
-          <div class="row-main">
-            <div class="row-title">
-              <span>{{ g.name }}</span>
-              <span class="tag">{{ groups.activeCount(g) }}/20</span>
-            </div>
-            <div class="row-sub mono">epoch {{ g.epoch }} · {{ g.groupId.slice(0, 8) }}</div>
-          </div>
-        </div>
-      </div>
-    </aside>
-
-    <!-- 中：聊天 -->
-    <main class="pane">
-      <ChatView />
-    </main>
-
-    <!-- 右：传输 / 设置 / 调试 -->
-    <section class="pane right">
-      <div class="tabs">
-        <button :class="{ on: tab === 'transfer' }" @click="tab = 'transfer'">传输</button>
-        <button :class="{ on: tab === 'settings' }" @click="tab = 'settings'">设置</button>
-        <button :class="{ on: tab === 'debug' }" @click="tab = 'debug'">调试</button>
-      </div>
-
-      <TransferView v-if="tab === 'transfer'" :preselected-peer="preselectedPeer" />
-      <SettingsView v-else-if="tab === 'settings'" />
-      <DebugPanel v-else />
-    </section>
+  <!-- 氛围层：装饰性，对辅助技术隐藏，且不接收指针事件 -->
+  <div class="ambient" aria-hidden="true">
+    <!-- 细颗粒：玻璃之所以像「材质」而不像「半透明 div」，一半靠这层噪点 -->
+    <span class="grain" />
   </div>
+
+  <div class="app">
+    <ContactPanel :mock="mock" />
+    <ChatView />
+    <SidePanel />
+
+    <Transition name="toast">
+      <div v-if="ui.toast" class="toast">{{ ui.toast }}</div>
+    </Transition>
+  </div>
+
+  <SettingsDialog v-if="ui.panel" />
 </template>
 
 <style scoped>
-.sidebar .pane-body {
-  padding: 8px;
+/* ---------------------------------------------------------------- 氛围层 */
+
+/* 用渐变层而不是「几个 blur 过的大圆」：
+   径向渐变的长衰减本身就是柔和的，省掉大半径 filter: blur 的合成开销。 */
+.ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    /* 渐变1 的粉：只当右上角的一束光。铺太开会把整屏推成粉紫海报 */
+    radial-gradient(58% 58% at 97% 0%, var(--g1-pink) 0%, rgba(236, 72, 153, 0) 58%),
+    /* 渐变2 的青：左下角同理 */
+    radial-gradient(56% 56% at 0% 100%, var(--g2-cyan) 0%, rgba(6, 182, 212, 0) 56%),
+    /* 底：渐变1 的紫 → 渐变2 的蓝，收在更深的靛蓝上 */
+    linear-gradient(135deg, var(--g1-purple) 0%, var(--g2-blue) 56%, var(--g-ink) 100%);
 }
 
-.right {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+/* 深色薄纱：把整片渐变压深一档。
+   这是「高级」与「海报」的分界线 —— 规格给的四色都偏亮，
+   原样铺满屏会亮到让面板失去存在感（第一版就是这样）。
+   压深后色相仍在，只是不再喧宾夺主。 */
+.ambient::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 3, 22, 0.45);
 }
 
-.tabs {
-  display: flex;
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--border);
+/* 浅色主题下薄纱要反过来洗白，而不是继续压暗 */
+html[data-theme='light'] .ambient::after {
+  background: rgba(255, 255, 255, 0.52);
 }
 
-.tabs button {
-  flex: 1 1 0;
-  border: none;
-  border-radius: 0;
+html[data-theme='light'] .grain {
+  opacity: 0.03;
+}
+
+/* 颗粒放在薄纱之上，才不会被洗掉 */
+.grain {
+  position: absolute;
+  inset: 0;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+}
+
+/* ---------------------------------------------------------------- 三栏 */
+
+.app {
+  position: relative;
+  /* 明确压在氛围层之上，不依赖 DOM 顺序 —— 顺序一改就会全盘错位 */
+  z-index: 1;
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--side-w);
+  height: 100%;
+  /* 自身必须透明，否则氛围层被盖住，玻璃就失去内容 */
   background: transparent;
-  color: var(--text-dim);
-  padding: 8px 0;
 }
 
-.tabs button.on {
-  color: var(--text);
-  background: var(--bg-raised);
-  box-shadow: inset 0 -2px 0 var(--accent);
+/* 栏间用【亮】色缝分隔：玻璃接缝处的光，比灰色分隔线更贴合材质 */
+.app > :nth-child(2),
+.app > :nth-child(3) {
+  border-left: 1px solid var(--edge);
 }
 
-.section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin: 12px 0 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-soft);
-  font-size: 11px;
+/* 中等窗口先压缩两侧，保证聊天区不被挤到没法读 */
+@media (max-width: 1120px) {
+  .app {
+    grid-template-columns: 248px minmax(0, 1fr) 268px;
+  }
 }
 
-.group-form {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  margin-bottom: 8px;
+/* 再窄就只保留「人 + 对话」这两件最核心的事（桌面端正常不会走到这里） */
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 224px minmax(0, 1fr);
+  }
+
+  .app > :nth-child(3) {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 轻提示 */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 34px;
+  z-index: 200;
+  transform: translateX(-50%);
+  max-width: 60vw;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(12, 5, 30, 0.78);
+  backdrop-filter: blur(16px) saturate(150%);
+  -webkit-backdrop-filter: blur(16px) saturate(150%);
+  box-shadow: var(--shadow-pop);
+  color: #fff;
+  font-size: var(--fs-sm);
+  pointer-events: none;
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: opacity var(--dur-3) var(--ease), transform var(--dur-3) var(--ease);
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
 }
 </style>

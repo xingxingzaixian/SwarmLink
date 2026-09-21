@@ -35,6 +35,13 @@ const (
 	//
 	// P2P 排障极难，这个面板的投入产出比极高（架构书 3.5）。
 	EventDebug = "debug:event"
+	// EventFilesDropped 转发「拖入窗口的文件路径」。
+	//
+	// 它不是领域事件，因此不经过 EventBus —— WebView 里 drop 出来的 File 对象
+	// 没有本地路径，路径只有窗口层（Go）拿得到，必须由外壳转发。
+	// 载荷：{ paths: []string, target: string }，target 是命中的
+	// data-file-drop-target 属性值，由前端决定「这次投放算发给谁」。
+	EventFilesDropped = "file:dropped"
 )
 
 // ProgressThrottle 是进度事件的最小间隔。
@@ -147,11 +154,14 @@ func (b *Bridge) Start() {
 		if !b.allow(ev.JobID, ProgressThrottle) {
 			return
 		}
+		// 只发「易变」的进度：文件名/大小等元数据由 TransferService.List() 提供。
+		// 高频事件里塞不变的字段，会让 4 Hz 的通道背负无谓的序列化成本。
 		b.emitter.Emit(EventTransferProgress, map[string]any{
 			"jobId":   ev.JobID,
 			"peerId":  ev.PeerID,
 			"percent": ev.Percent,
-			"speed":   ev.Speed,
+			"speed":   ev.Speed,              // 字节/秒
+			"eta":     ev.ETA.Milliseconds(), // 由前端格式化成「剩余 1 分 20 秒」
 			"status":  ev.Status,
 		})
 	})
