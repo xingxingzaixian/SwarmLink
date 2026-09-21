@@ -68,6 +68,7 @@ func main() {
 		Transfer:     node.TransferApp,
 		Group:        node.GroupApp,
 		Peers:        node.PeerApp,
+		Discovery:    node.DiscApp,
 		PeerDir:      node.PeerDir,
 		TransferRepo: node.Transfers,
 		GroupRepo:    node.Groups,

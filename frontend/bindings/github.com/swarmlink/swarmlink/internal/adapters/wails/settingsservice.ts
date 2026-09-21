@@ -39,6 +39,16 @@ export function ListInterfaces(): $CancellablePromise<string[] | null> {
 }
 
 /**
+ * RunSelfCheck 执行部署前置条件自检（P-1 / P-2）。
+ * 
+ * 它会真的发起一轮种子探测与目录拉取，因此最坏要等 3 秒 —— 这是刻意的：
+ * 「发现不到人」的根因九成在这两条前提上，一次真实探测比任何静态提示都有用。
+ */
+export function RunSelfCheck(): $CancellablePromise<$models.SelfCheckDTO> {
+    return $Call.ByID(949668894);
+}
+
+/**
  * Save 落盘配置。返回需要重启才能生效的项清单。
  */
 export function Save($in: $models.SettingsDTO): $CancellablePromise<string[] | null> {

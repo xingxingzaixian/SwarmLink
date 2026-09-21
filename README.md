@@ -44,31 +44,13 @@ make test-fuzz          # 协议畸形输入
 make ci                 # 等价于 CI 的一条命令
 ```
 
-### 2.2 命令行前端（M1 交付物，也是最强调试工具）
+### 2.2 部署前置条件自检（**部署前必做**）
 
-```bash
-make cli
+桌面 GUI → 设置 →「部署前置条件」→ **运行自检**。
 
-# 终端 A
-./bin/swarmlink-cli --name alice
+它会真实探通每个种子、拉取目录，并报告 P-1 / P-2 是否成立（见第 4 节）。
 
-# 终端 B（同网段可直接被发现；跨网段用 --seed 指向 A）
-./bin/swarmlink-cli --name bob --seed 127.0.0.1:2425
-
-# 命令：/peers /msg /send /history /group /seeds /diag /self-check
-```
-
-`--mem` 可完全内存运行（试验用）；不加则落盘 SQLite。
-
-### 2.3 部署前置条件自检（**部署前必做**）
-
-```bash
-./bin/swarmlink-cli --self-check
-```
-
-它会探通每个种子、拉取目录，并报告 P-1 / P-2 是否成立（见第 4 节）。
-
-### 2.4 桌面 GUI
+### 2.3 桌面 GUI
 
 前置：**Go ≥ 1.25**、Node ≥ 20、`wails3` CLI **v3.0.0-beta.24**。
 
@@ -91,8 +73,9 @@ wails3 build -tags wails                             # 产物 bin/SwarmLink
 > 不带包路径的 `go build`；而架构书本来就把 `main.go` 定义为唯一组合根。
 >
 > 它也是**唯一**接触 Wails API 的文件。服务层与事件桥（`internal/adapters/wails`）
-> 是零 Wails 依赖的纯 Go，因此 `go build ./...` 与 `go test ./...` **不需要 Wails 工具链**
-> （未启用 `wails` tag 时，根目录由 `main_stub.go` 占位）。
+> 是零 Wails 依赖的纯 Go，因此 `go build ./...` 与 `go test ./...` **不需要 Wails 工具链**：
+> 未启用 `wails` tag 时根目录没有可编译文件，构建会跳过它（根目录因此也不会再
+> 悄悄产出占位程序 —— 忘传 tag 时 `wails3 build` 会直接失败，这正是想要的）。
 
 生成的绑定 `frontend/bindings/` **已提交入库**，因此前端可脱离 Go 工具链构建
 （CI 的 frontend job 依赖这一点）。若改了服务的导出方法，重新执行一次 `make bindings` 即可。
@@ -128,7 +111,7 @@ cd frontend && npm run typecheck && npm run build
 
 | #       | 前置条件                                                             | 不满足的后果                                                                      | 自检                                        |
 | ------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------- |
-| **P-1** | 任意两网段的种子 IP 之间**可 TCP 直连**（三层路由可达，非 NAT 隔离） | 跨网段发现与消息全部失效，此时只能引入中继 —— 而中继是本项目刻意回避的设计        | `swarmlink-cli --self-check`                |
+| **P-1** | 任意两网段的种子 IP 之间**可 TCP 直连**（三层路由可达，非 NAT 隔离） | 跨网段发现与消息全部失效，此时只能引入中继 —— 而中继是本项目刻意回避的设计        | 设置页 → 运行自检                |
 | **P-2** | 各网段使用**不重叠的地址段**（不得都是 `192.168.1.0/24`）            | 目录中出现 node_id 不同、IP 相同的条目 → **跨网段寻址崩溃，且现象隐蔽、极难排查** | `ANNOUNCE` 携带 `subnet`，CLI 与 GUI 均展示 |
 
 > P-2 不是理论风险：「多个厂区/门店各自一个 `192.168.1.0/24`，再靠 VPN 互联」
@@ -164,17 +147,14 @@ cd frontend && npm run typecheck && npm run build
 
 ```
 main_wails.go    ★ 桌面外壳组合根（build tag: wails）—— 唯一接触 Wails API 的文件
-main_stub.go     未启用 wails tag 时的占位入口（保证 go build ./... 始终可用）
 Taskfile.yml     wails3 构建任务入口
-build/           wails3 平台构建配置与图标资源（darwin/linux/windows/docker）
+build/           wails3 平台构建配置与图标资源（darwin/linux/windows + 交叉编译镜像）
 internal/
   domain/        纯领域（零 I/O）: identity peer message group transfer protocol ports
   app/           用例编排: peer/chat/group/transfer/discovery App + Router
   adapters/      net/{tcp,udp} store/{sqlite,mem} config filesink keystore wails
   infra/         eventbus clock log fsutil
-  bootstrap/     ★ 唯一组合根（CLI 与 GUI 共用装配路径）
-cmd/
-  swarmlink-cli/ 命令行前端 + P-1/P-2 自检
+  bootstrap/     ★ 唯一组合根（GUI 装配路径）
 test/
   harness/       单进程多节点装配器
   e2e/           发现/握手/单聊/幂等/传输/续传/跨网段收敛

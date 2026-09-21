@@ -8,7 +8,7 @@
 import { onMounted, ref } from 'vue'
 
 import Icon from '../components/Icon.vue'
-import { getApi, type Settings } from '../api'
+import { getApi, type SelfCheck, type Settings } from '../api'
 
 const settings = ref<Settings | null>(null)
 const interfaces = ref<string[]>([])
@@ -16,6 +16,8 @@ const restartNeeded = ref<string[]>([])
 const notice = ref('')
 const saving = ref(false)
 const seedsText = ref('')
+const selfCheck = ref<SelfCheck | null>(null)
+const checking = ref(false)
 
 async function load(): Promise<void> {
   const api = await getApi()
@@ -47,6 +49,31 @@ async function save(): Promise<void> {
   } finally {
     saving.value = false
   }
+}
+
+/**
+ * 跑一次部署前置条件自检。
+ *
+ * 它要真实探一轮种子（最坏 3 秒），因此按钮必须给出「检查中」反馈 ——
+ * 否则用户会以为卡住了，而这恰恰是他最需要这次结果的时刻。
+ * 改过种子后结果就失效，所以每次都重新跑，不缓存。
+ */
+async function runSelfCheck(): Promise<void> {
+  checking.value = true
+  selfCheck.value = null
+  try {
+    const api = await getApi()
+    selfCheck.value = await api.runSelfCheck()
+  } catch (e: any) {
+    notice.value = String(e?.message ?? e)
+  } finally {
+    checking.value = false
+  }
+}
+
+/** 把种子列表压成一行（失败次数只在 >0 时才值得占版面）。 */
+function seedLine(s: { addr: string; failCount: number }): string {
+  return s.failCount > 0 ? `${s.addr}（失败 ${s.failCount} 次）` : s.addr
 }
 
 /** textarea ↔ string[] 的双向桥（避免每处都写一遍 split/filter）。 */
@@ -191,8 +218,31 @@ onMounted(load)
             不满足则跨网段发现与消息全部失效。<br /><br />
             <b>P-2</b> 各网段使用不重叠的地址段（不得都是 192.168.1.0/24）。
             不满足会出现「node_id 不同、IP 相同」，跨网段寻址崩溃且现象隐蔽。<br /><br />
-            自检：<code>swarmlink-cli --self-check</code>
+            这两条只能靠改网段规划来修，软件无能为力 —— 所以跨网段部署前先跑一次自检。
           </p>
+          <button class="btn btn-soft" :disabled="checking" @click="runSelfCheck">
+            <Icon name="refresh" :size="14" />{{ checking ? '检查中…' : '运行自检' }}
+          </button>
+          <div v-if="selfCheck" class="check-result">
+            <p
+              v-if="selfCheck.performed"
+              :class="['line', selfCheck.p1OK ? 'ok' : 'bad']"
+            >
+              P-1：{{ selfCheck.p1Detail }}
+            </p>
+            <p
+              v-if="selfCheck.performed"
+              :class="['line', selfCheck.p2Overlap ? 'warn' : 'ok']"
+            >
+              P-2：{{ selfCheck.p2Detail }}
+            </p>
+            <p v-if="!selfCheck.performed" class="line faint">
+              {{ selfCheck.p1Detail }}
+            </p>
+            <p v-if="selfCheck.performed && selfCheck.seeds.length" class="line faint mono">
+              种子 {{ selfCheck.seedCount }} 颗：{{ selfCheck.seeds.map(seedLine).join('、') }}
+            </p>
+          </div>
         </section>
       </div>
     </template>
@@ -303,6 +353,33 @@ label.check > span {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--t2);
+}
+
+/* 自检结果：三条结论各自带色，让人扫一眼就知道哪条不成立。
+   种子明细压到最小号字 —— 它是排查时的补充，不该抢结论的位置。 */
+.check-result {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.line {
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--t3);
+}
+
+.line.ok {
+  color: var(--ok-ink);
+}
+
+.line.bad {
+  color: var(--err-ink);
+}
+
+.line.warn {
+  color: var(--warn-ink);
 }
 
 /* 吸底条：渐隐到弹层自己的玻璃色，而不是某个实色 ——

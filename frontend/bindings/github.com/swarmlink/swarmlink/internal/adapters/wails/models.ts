@@ -97,6 +97,23 @@ export interface SeedDTO {
 }
 
 /**
+ * SelfCheckDTO 是部署前置条件（P-1 / P-2）自检结果。
+ * 
+ * Detail 字段是【给人读的结论】而不是错误码：这两条前提只有部署者能修
+ * （改网段规划 / 开三层路由），软件侧无能为力，因此必须说清「怎么修」。
+ */
+export interface SelfCheckDTO {
+    "performed": boolean;
+    "seedCount": number;
+    "learned": number;
+    "p1OK": boolean;
+    "p1Detail": string;
+    "p2Overlap": boolean;
+    "p2Detail": string;
+    "seeds": SeedDTO[] | null;
+}
+
+/**
  * SelfDTO 是本机身份。
  */
 export interface SelfDTO {

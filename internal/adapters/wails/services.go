@@ -41,10 +41,11 @@ type SelfInfo struct {
 type Deps struct {
 	Self SelfInfo
 
-	Chat     *app.ChatApp
-	Transfer *app.TransferApp
-	Group    *app.GroupApp
-	Peers    *app.PeerApp
+	Chat      *app.ChatApp
+	Transfer  *app.TransferApp
+	Group     *app.GroupApp
+	Peers     *app.PeerApp
+	Discovery *app.DiscoveryApp
 
 	PeerDir      ports.PeerDirectory
 	TransferRepo ports.TransferRepo
@@ -184,6 +185,39 @@ func (s *SettingsService) ListInterfaces() []string {
 		return nil
 	}
 	return s.d.Interfaces()
+}
+
+// RunSelfCheck 执行部署前置条件自检（P-1 / P-2）。
+//
+// 它会真的发起一轮种子探测与目录拉取，因此最坏要等 3 秒 —— 这是刻意的：
+// 「发现不到人」的根因九成在这两条前提上，一次真实探测比任何静态提示都有用。
+func (s *SettingsService) RunSelfCheck() SelfCheckDTO {
+	if s.d.Discovery == nil {
+		return SelfCheckDTO{P1Detail: "自检不可用：发现服务未启动"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	r := app.SelfCheck(ctx, app.SelfCheckInput{
+		Discovery:  s.d.Discovery,
+		Peers:      s.d.PeerDir,
+		SelfSubnet: s.d.Self.Subnet,
+	})
+
+	out := SelfCheckDTO{
+		Performed: r.Performed,
+		SeedCount: r.SeedCount,
+		Learned:   r.Learned,
+		P1OK:      r.P1OK,
+		P1Detail:  r.P1Detail,
+		P2Overlap: r.P2Overlap,
+		P2Detail:  r.P2Detail,
+	}
+	if s.d.SeedSnapshot != nil {
+		out.Seeds = s.d.SeedSnapshot()
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

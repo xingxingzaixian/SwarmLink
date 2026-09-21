@@ -115,6 +115,20 @@ export interface Diagnostics {
   interfaceSummary: string[]
 }
 
+/** 部署前置条件（P-1 / P-2）自检结果。 */
+export interface SelfCheck {
+  /** false = 未配置种子，自检跳过（单网段部署本就无需自检）。 */
+  performed: boolean
+  seedCount: number
+  /** 本轮通过种子学到的跨网段目录条数。 */
+  learned: number
+  p1OK: boolean
+  p1Detail: string
+  p2Overlap: boolean
+  p2Detail: string
+  seeds: SeedDetail[]
+}
+
 export interface Settings {
   displayName: string
   downloadDir: string
@@ -143,6 +157,13 @@ export interface SwarmApi {
   saveSettings(s: Settings): Promise<string[]>
   listInterfaces(): Promise<string[]>
   downloadDir(): Promise<string>
+  /**
+   * 部署前置条件自检（P-1 / P-2）。
+   *
+   * 会真实发起一轮种子探测与目录拉取，因此最坏要等约 3 秒 ——
+   * 「跨网段发现不到人」的根因九成在这两条前提上，静态提示没用，必须实探。
+   */
+  runSelfCheck(): Promise<SelfCheck>
 
   // 单聊
   sendMessage(peerId: string, text: string): Promise<Message>

@@ -5,7 +5,8 @@
  * 自动切换的规则（这是本次改版的核心交互）：
  *   - 默认显示「资料」；
  *   - 一旦当前会话产生进行中的传输，自动切到「传输」；
- *   - 传输全部结束后切回「资料」；
+ *   - 传输结束【不】自动切回资料 —— 用户刚发完文件就被顶回资料页，
+ *     等于这次传输的结果他一眼都没看到（小文件尤其明显：一闪就过去了）；
  *   - 用户手动切到「资料」后就不再抢 —— 除非用户自己又发起了一次传输。
  *
  * 第 4 条是关键：进度条把人正在看的资料顶掉是很难受的，
@@ -57,8 +58,8 @@ watch(
   running,
   (n) => {
     if (!canTransfer.value || ui.pinned) return
+    // 只接管一次，不负责把面板还回去。
     if (n > 0) ui.focusTransfer()
-    else ui.resetSide(false)
   },
   { immediate: true }
 )
@@ -112,11 +113,8 @@ watch(
         @send-file="attach"
       />
 
-      <div v-else-if="!jobs.length" class="empty">
-        <div class="empty-title">还没有传输记录</div>
-        <div>点聊天区的回形针，或把文件拖进聊天区即可发起。</div>
-      </div>
-
+      <!-- 空态由 TransferList 自己画：右栏不再保留第二套空态文案，
+           否则 job 到达前的那一帧会闪出一句不同的提示。 -->
       <TransferList v-else :jobs="jobs" />
     </div>
 

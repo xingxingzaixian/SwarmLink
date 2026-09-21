@@ -7,6 +7,7 @@ import type {
   Message,
   Peer,
   Self,
+  SelfCheck,
   Settings,
   SwarmApi,
   TransferJob
@@ -228,6 +229,23 @@ export function createMockApi(): SwarmApi {
     },
     async downloadDir() {
       return settings.downloadDir
+    },
+    async runSelfCheck(): Promise<SelfCheck> {
+      const n = settings.seeds.length
+      const learned = n === 0 ? 0 : Math.min(n, 3)
+      return {
+        performed: n > 0,
+        seedCount: n,
+        learned,
+        p1OK: n > 0,
+        p1Detail:
+          n === 0
+            ? '未配置种子，跳过（单网段部署无需自检）'
+            : `已通过种子探通并拉取到 ${learned} 条跨网段目录`,
+        p2Overlap: false,
+        p2Detail: n === 0 ? '' : '未观察到地址段重叠的迹象',
+        seeds: [...diagnostics.seedDetails]
+      }
     },
 
     async sendMessage(peerId, text) {

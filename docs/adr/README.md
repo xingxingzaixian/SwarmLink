@@ -47,8 +47,9 @@
 1. **Wails 入口在仓库根目录**（`main_wails.go`，build tag `wails`）。
    两个原因叠加：wails3 的构建任务在根目录执行**不带包路径**的 `go build`；
    而架构书 §3.1 第 4 点本来就把 `main.go` 定义为唯一组合根。
-   未启用该 tag 时由 `main_stub.go` 占位，因此 `go build ./...` / `go test ./...`
-   在没有 Wails 工具链的环境下始终可用。
+   未启用该 tag 时根目录没有可编译文件，`go build ./...` / `go test ./...`
+   会跳过它，因此在没有 Wails 工具链的环境下依然可用；
+   反过来，`wails3 build` 忘传 tag 会【直接失败】，不会再悄悄产出占位程序。
 
 2. **`frontend/bindings/` 提交入库**。它是 `wails3 generate bindings` 的产物，
    入库后前端可脱离 Go 工具链构建（CI 的 frontend job 依赖这一点）。

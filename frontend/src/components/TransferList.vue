@@ -101,15 +101,18 @@ function percentOf(j: TransferJob): number {
           <span v-if="j.completed && j.fileSize" class="mono faint">
             {{ fileSize(j.completed) }} / {{ fileSize(j.fileSize) }}
           </span>
+          <button
+            v-if="j.status === 'done' && j.localPath"
+            class="reveal"
+            :title="`定位到：${j.localPath}`"
+            aria-label="在文件管理器中显示该文件"
+            @click="reveal(j.localPath)"
+          >
+            <Icon name="folder" :size="13" />
+          </button>
         </div>
 
         <div v-if="j.error" class="err">{{ j.error }}</div>
-        <div v-if="j.status === 'done' && j.localPath" class="path-row">
-          <span class="path mono" :title="j.localPath">{{ j.localPath }}</span>
-          <button class="reveal" :title="`定位到：${j.localPath}`" @click="reveal(j.localPath)">
-            <Icon name="folder" :size="12" />打开文件夹
-          </button>
-        </div>
       </article>
     </template>
   </div>
@@ -209,31 +212,20 @@ function percentOf(j: TransferJob): number {
   line-height: 1.5;
 }
 
-.path-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.path {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--t3);
-  word-break: break-all;
-  line-height: 1.5;
-}
-
+/* 定位按钮：只有图标。路径不占版面 —— 它就在 title 里，
+   真要复制的人悬停即可；大多数时候用户只想知道「传到哪了」，点一下最实在。 */
 .reveal {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   border-radius: var(--r-sm);
   background: var(--surface-sunken);
   box-shadow: inset 0 0 0 1px var(--line);
   color: var(--t2);
-  font-size: var(--fs-xs);
   transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
 

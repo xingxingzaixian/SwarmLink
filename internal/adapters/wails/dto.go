@@ -2,7 +2,7 @@
 //
 // 关键设计：本包【不 import Wails】。
 //   - 服务只是普通结构体，方法返回 JSON 友好的 DTO；
-//   - 事件通过 Emitter 接口输出，Wails 的具体桥接在 cmd/swarmlink-gui 里注入。
+//   - 事件通过 Emitter 接口输出，Wails 的具体桥接在根目录 main_wails.go 里注入。
 //
 // 这样做的收益：服务层可以在没有 Wails 工具链的环境下编译与单测，
 // 而 Wails beta 期 API 波动只影响一个薄薄的装配文件。
@@ -198,4 +198,19 @@ type SettingsDTO struct {
 	IdleTimeoutSec  int      `json:"idleTimeoutSec"`
 	RequireAuth     bool     `json:"requireAuth"`
 	Encryption      string   `json:"encryption"`
+}
+
+// SelfCheckDTO 是部署前置条件（P-1 / P-2）自检结果。
+//
+// Detail 字段是【给人读的结论】而不是错误码：这两条前提只有部署者能修
+// （改网段规划 / 开三层路由），软件侧无能为力，因此必须说清「怎么修」。
+type SelfCheckDTO struct {
+	Performed bool      `json:"performed"`
+	SeedCount int       `json:"seedCount"`
+	Learned   int       `json:"learned"`
+	P1OK      bool      `json:"p1OK"`
+	P1Detail  string    `json:"p1Detail"`
+	P2Overlap bool      `json:"p2Overlap"`
+	P2Detail  string    `json:"p2Detail"`
+	Seeds     []SeedDTO `json:"seeds"`
 }

@@ -34,10 +34,11 @@ import {
 import type {
   DiagnosticsDTO,
   GroupDTO,
+  SelfCheckDTO,
   SettingsDTO
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/models.js'
 
-import type { Diagnostics, Group, Settings, SwarmApi } from './types'
+import type { Diagnostics, Group, SelfCheck, Settings, SwarmApi } from './types'
 
 /** 把绑定的可空数组收敛成空数组。 */
 function list<T>(v: T[] | null | undefined): T[] {
@@ -61,12 +62,17 @@ function toDiagnostics(d: DiagnosticsDTO): Diagnostics {
   return { ...d, seedDetails: list(d.seedDetails), interfaceSummary: list(d.interfaceSummary) }
 }
 
+function toSelfCheck(s: SelfCheckDTO): SelfCheck {
+  return { ...s, seeds: list(s.seeds) }
+}
+
 /** 真实后端实现（由 Wails 生成的服务绑定驱动）。 */
 export const realApi: SwarmApi = {
   getSettings: async () => toSettings(await SettingsService.Get()),
   saveSettings: async (s) => list(await SettingsService.Save(s)),
   listInterfaces: async () => list(await SettingsService.ListInterfaces()),
   downloadDir: async () => SettingsService.DownloadDir(),
+  runSelfCheck: async () => toSelfCheck(await SettingsService.RunSelfCheck()),
 
   sendMessage: async (peerId, text) => ChatService.SendMessage(peerId, text),
   history: async (peerId, limit, before) => list(await ChatService.History(peerId, limit, before)),
