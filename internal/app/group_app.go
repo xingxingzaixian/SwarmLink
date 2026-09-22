@@ -205,6 +205,19 @@ func (a *GroupApp) ApplyMeta(g group.Group) error {
 
 // SendGroupMessage 持久化并扇出到所有在线成员。
 func (a *GroupApp) SendGroupMessage(ctx context.Context, groupID, text string) (message.Message, error) {
+	return a.send(ctx, groupID, text, message.MsgTypeText)
+}
+
+// SendGroupImage 发送群聊图片消息（content 为内联图片 JSON 信封）。
+//
+// 与文本走同一条扇出链路：群里的图片没有额外的传输通道，
+// 因此也不会出现在传输列表里。
+func (a *GroupApp) SendGroupImage(ctx context.Context, groupID, content string) (message.Message, error) {
+	return a.send(ctx, groupID, content, message.MsgTypeImage)
+}
+
+// send 是群文本与群图片共用的发送实现。
+func (a *GroupApp) send(ctx context.Context, groupID, content string, msgType message.MsgType) (message.Message, error) {
 	g, ok := a.groups.Get(groupID)
 	if !ok {
 		return message.Message{}, fmt.Errorf("group: unknown group %s", groupID)
@@ -215,8 +228,8 @@ func (a *GroupApp) SendGroupMessage(ctx context.Context, groupID, text string) (
 		ConvID:    message.GroupConvID(groupID),
 		SenderID:  a.self,
 		Direction: message.DirectionOut,
-		Content:   text,
-		MsgType:   message.MsgTypeText,
+		Content:   content,
+		MsgType:   msgType,
 		SentAt:    now,
 		State:     message.StatePending,
 	}
@@ -269,6 +282,8 @@ func (a *GroupApp) sendGroupMsgTo(ctx context.Context, peerID identity.NodeID, m
 		GroupID:  msg.ConvID,
 		SenderID: msg.SenderID.String(),
 		Content:  msg.Content,
+		MsgType:  string(msg.MsgType), // 群里也要声明类型，否则图片到达后变成空白文字气泡
+		FileID:   msg.FileID,
 		SentAt:   msg.SentAt.UnixMilli(),
 	})
 	if err != nil {
@@ -298,13 +313,29 @@ func (a *GroupApp) HandleGroupMsg(sess ports.Session, f protocol.Frame) error {
 		sentAt = time.UnixMilli(gm.SentAt)
 	}
 
+	msgType := message.MsgType(gm.MsgType)
+	if msgType == "" {
+		msgType = message.MsgTypeText
+	}
+
+	content := gm.Content
+	if msgType == message.MsgTypeImage {
+		sanitized, ok := sanitizeImageContent(content)
+		if !ok {
+			// 与单聊同策略：坏图片消息丢弃，但仍回 ACK，避免发送方无限重发。
+			return a.sendAck(sess, gm.MsgID)
+		}
+		content = sanitized
+	}
+
 	m := message.Message{
 		MsgID:     gm.MsgID,
 		ConvID:    message.GroupConvID(gm.GroupID),
 		SenderID:  senderID,
 		Direction: message.DirectionIn,
-		Content:   gm.Content,
-		MsgType:   message.MsgTypeText,
+		Content:   content,
+		MsgType:   msgType,
+		FileID:    gm.FileID,
 		SentAt:    sentAt,
 		RecvAt:    a.clk.Now(),
 		State:     message.StateDelivered,

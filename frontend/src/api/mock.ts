@@ -83,6 +83,24 @@ export function createMockApi(): SwarmApi {
     threads.set(convId, list)
   }
 
+  // 预置一条入站图片消息：一打开预览就能确认图片气泡的渲染路径是通的
+  push(convAlice, {
+    msgId: 'seed-image-1',
+    convId: convAlice,
+    senderId: ALICE,
+    direction: 'in',
+    content: JSON.stringify({
+      v: 1,
+      mime: 'image/jpeg',
+      w: 640,
+      h: 360,
+      b64: mockImageB64('对方发来的截图').b64
+    }),
+    msgType: 'image',
+    state: 'delivered',
+    sentAt: now - 34 * 60_000
+  })
+
   const jobs: TransferJob[] = [
     {
       jobId: 'mock-done-1',
@@ -149,6 +167,57 @@ export function createMockApi(): SwarmApi {
   function page(convId: string, limit: number): Message[] {
     const list = threads.get(convId) ?? []
     return [...list].reverse().slice(0, limit)
+  }
+
+  /**
+   * 现画一张小图当图片消息的载荷。
+   *
+   * 用 canvas 而不是内置一张 base64 常量：前者能带上文字，
+   * 预览时一眼就能分辨「这是哪条消息的图」，常量图则十张一个样。
+   */
+  function mockImageB64(text: string): { b64: string; w: number; h: number } {
+    const w = 320
+    const h = 200
+    if (typeof document === 'undefined') {
+      // 无 DOM 的极端情况：退回 1x1 透明 PNG，保证结构仍然合法
+      return {
+        w: 1,
+        h: 1,
+        b64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+      }
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const g = canvas.getContext('2d')!
+    const grad = g.createLinearGradient(0, 0, w, h)
+    grad.addColorStop(0, '#7c3aed')
+    grad.addColorStop(1, '#ec4899')
+    g.fillStyle = grad
+    g.fillRect(0, 0, w, h)
+    g.fillStyle = '#fff'
+    g.font = '16px sans-serif'
+    g.fillText((text || '预览图片').slice(0, 18), 16, h / 2)
+    return { w, h, b64: canvas.toDataURL('image/jpeg', 0.8).split(',')[1] ?? '' }
+  }
+
+  function mockImageMessage(
+    convId: string,
+    senderId: string,
+    direction: 'in' | 'out',
+    text: string
+  ): Message {
+    const img = mockImageB64(text)
+    return {
+      msgId: `mock-img-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      convId,
+      senderId,
+      direction,
+      content: JSON.stringify({ v: 1, mime: 'image/jpeg', w: img.w, h: img.h, b64: img.b64 }),
+      msgType: 'image',
+      state: 'delivered',
+      sentAt: Date.now()
+    }
   }
 
   /** 模拟一次发送：起一个定时器把进度推给真实的事件处理链路。 */
@@ -268,6 +337,26 @@ export function createMockApi(): SwarmApi {
     async history(peerId, limit) {
       return page(directConvId(self.nodeId, peerId), limit)
     },
+    async sendImage(peerId, path) {
+      const convId = directConvId(self.nodeId, peerId)
+      const name = path.split(/[\\/]/).pop() || ''
+      const m = mockImageMessage(convId, self.nodeId, 'out', name || '发出的图片')
+      m.state = 'pending'
+      push(convId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
+    },
+    async sendImageBytes(peerId, name) {
+      const convId = directConvId(self.nodeId, peerId)
+      const m = mockImageMessage(convId, self.nodeId, 'out', name || '粘贴的图片')
+      m.state = 'pending'
+      push(convId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
+    },
+    async saveImage() {
+      // 降级预览里没有原生保存对话框，调用方会退化成浏览器下载
+    },
     async conversations(): Promise<Conversation[]> {
       const peerOf = (convId: string): Peer | undefined =>
         peers.find((p) => directConvId(self.nodeId, p.nodeId) === convId)
@@ -361,6 +450,21 @@ export function createMockApi(): SwarmApi {
     },
     async groupHistory(groupId, limit) {
       return page(groupId, limit)
+    },
+    async groupSendImage(groupId, path) {
+      const name = path.split(/[\\/]/).pop() || ''
+      const m = mockImageMessage(groupId, self.nodeId, 'out', name || '群里的图片')
+      m.state = 'pending'
+      push(groupId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
+    },
+    async groupSendImageBytes(groupId, name) {
+      const m = mockImageMessage(groupId, self.nodeId, 'out', name || '群里的图片')
+      m.state = 'pending'
+      push(groupId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
     }
   }
 }

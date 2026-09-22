@@ -169,6 +169,12 @@ export interface SwarmApi {
   sendMessage(peerId: string, text: string): Promise<Message>
   history(peerId: string, limit: number, before: number): Promise<Message[]>
   conversations(): Promise<Conversation[]>
+  /** 发送本地图片文件（后端负责压缩与内联编码）。 */
+  sendImage(peerId: string, path: string): Promise<Message>
+  /** 发送剪贴板图片：只有字节没有路径，dataB64 是标准 base64。 */
+  sendImageBytes(peerId: string, name: string, dataB64: string): Promise<Message>
+  /** 把一条图片消息另存到指定路径。 */
+  saveImage(msgId: string, destPath: string): Promise<void>
 
   // 传输
   sendFile(peerId: string, path: string): Promise<string>
@@ -192,6 +198,8 @@ export interface SwarmApi {
   groupAddMember(groupId: string, memberId: string): Promise<Group>
   groupSendMessage(groupId: string, text: string): Promise<Message>
   groupHistory(groupId: string, limit: number, before: number): Promise<Message[]>
+  groupSendImage(groupId: string, path: string): Promise<Message>
+  groupSendImageBytes(groupId: string, name: string, dataB64: string): Promise<Message>
 }
 
 /** 后端推送的事件名（与 internal/adapters/wails/eventbridge.go 保持一致）。 */

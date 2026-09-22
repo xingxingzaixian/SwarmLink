@@ -3,6 +3,7 @@ import { useDebugStore } from '../stores/debug'
 import { usePeersStore } from '../stores/peers'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
+import { isImagePath } from '../utils/image'
 import { Events } from '@wailsio/runtime'
 
 import {
@@ -28,18 +29,44 @@ async function handleFilesDropped(data: FilesDroppedEvent): Promise<void> {
   const transfers = useTransferStore()
   const ui = useUiStore()
 
+  const conv = chat.activeConversation
+  if (!conv) {
+    ui.notify('先打开一个会话，再拖入文件')
+    return
+  }
+
+  // 图片走消息链路（气泡内显示、不进传输列表），其余走文件传输。
+  // 这里按扩展名分流只是为了少一次往返：真实格式仍由后端按魔数判定，
+  // 因此「扩展名骗人」的后果是一个明确的错误提示，而不是错进了传输列表。
+  //
+  // 注意分流必须发生在 peerId 检查【之前】：群会话没有 peerId，
+  // 若先卡 peerId，群里的图片会被一句「先打开与某个联系人的会话」挡回去 ——
+  // 而群里发图本来是支持的（走扇出）。
+  const images = data.paths.filter(isImagePath)
+  const files = data.paths.filter((p) => !isImagePath(p))
+
+  for (const p of images) {
+    try {
+      await chat.sendImage(conv, p)
+    } catch (e: any) {
+      ui.notify(String(e?.message ?? e) || '图片发送失败')
+    }
+  }
+
+  if (!files.length) return
+
   const peerId = chat.activePeerId
   if (!peerId) {
-    ui.notify('先打开与某个联系人的会话，再拖入文件')
+    ui.notify('文件传输暂不支持群聊，请改用图片或在单聊里发送')
     return
   }
 
   ui.focusTransfer()
-  const ok = await transfers.sendFiles(peerId, data.paths)
+  const ok = await transfers.sendFiles(peerId, files)
   ui.notify(
-    ok === data.paths.length
+    ok === files.length
       ? `已开始发送 ${ok} 个文件`
-      : `已发起 ${ok}/${data.paths.length} 个文件，失败的请看右侧`
+      : `已发起 ${ok}/${files.length} 个文件，失败的请看右侧`
   )
 }
 

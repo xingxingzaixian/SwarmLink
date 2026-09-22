@@ -169,6 +169,35 @@ export const useChatStore = defineStore('chat', () => {
     bump(conv.convId, m.sentAt)
   }
 
+  /**
+   * 发送图片消息。
+   *
+   * 与文本发送共用 upsert/bump：图片同样会等到 chat:delivered 事件回来，
+   * 走同一条回填路径 —— 若各写一套，两条链路的送达状态迟早会分叉。
+   */
+  async function sendImage(conv: Conversation, path: string): Promise<void> {
+    const api = await getApi()
+    const m =
+      conv.kind === 'group'
+        ? await api.groupSendImage(conv.convId, path)
+        : await api.sendImage(conv.peerId ?? '', path)
+    upsert(conv.convId, m)
+    previews.value = { ...previews.value, [conv.convId]: m }
+    bump(conv.convId, m.sentAt)
+  }
+
+  /** 发送剪贴板图片（只有字节，没有本地路径）。 */
+  async function sendImageBytes(conv: Conversation, name: string, dataB64: string): Promise<void> {
+    const api = await getApi()
+    const m =
+      conv.kind === 'group'
+        ? await api.groupSendImageBytes(conv.convId, name, dataB64)
+        : await api.sendImageBytes(conv.peerId ?? '', name, dataB64)
+    upsert(conv.convId, m)
+    previews.value = { ...previews.value, [conv.convId]: m }
+    bump(conv.convId, m.sentAt)
+  }
+
   /** 送达确认（由 chat:delivered 事件驱动）。 */
   function markDelivered(msgId: string): void {
     for (const [convId, list] of Object.entries(messagesByConv.value)) {
@@ -249,6 +278,8 @@ export const useChatStore = defineStore('chat', () => {
     unreadOf,
     receive,
     send,
+    sendImage,
+    sendImageBytes,
     markDelivered
   }
 })

@@ -67,9 +67,34 @@ try {
         $vf = Join-Path $env:USERPROFILE '.version-fox\cache'
         if (-not (Test-Path $vf)) { return }
 
-        $go = Get-ChildItem (Join-Path $vf 'golang') -Recurse -Filter 'go.exe' -ErrorAction SilentlyContinue |
+        # 递归会撞上两类不该选的东西，必须显式排除：
+        #
+        #  1. current（junction）—— 它指向的是【上次被激活】的版本，不是最新的
+        #  2. packages\pkg\mod\golang.org\toolchain@* —— GOTOOLCHAIN=auto 自动
+        #     下载的临时工具链。它的路径排在当前版本目录之后且字典序更大
+        #     （"...\golang-1.25.5\packages..." > "...\golang-1.25.5\bin..."），
+        #     于是降序取第一个会正好选中它 —— 这就是那个经典报错的来源：
+        #       compile: version "go1.25.5" does not match go tool version "go1.26.3"
+        #     即 PATH 里是自动下载的 1.26.3，GOROOT 却还是 vfox 写死的 current。
+        $goRoot = Join-Path $vf 'golang'
+        $go = Get-ChildItem $goRoot -Recurse -Filter 'go.exe' -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.FullName -notlike "*\current\*" -and $_.FullName -notlike "*toolchain@*"
+            } |
             Sort-Object FullName -Descending | Select-Object -First 1
-        if ($go) { $env:Path = "$($go.DirectoryName);$env:Path" }
+        if ($go) {
+            $env:Path = "$($go.DirectoryName);$env:Path"
+
+            # GOROOT 必须跟着 PATH 里的这份 go.exe 走。
+            #
+            # 踩过的坑：vfox 把 GOROOT 写成 ...\golang\current，而 current 是个
+            # junction，指向的是【上一个】被激活的版本。一旦 PATH 里的 go.exe
+            # 来自别的版本目录（上面按版本号挑出来的那份），就会出现
+            #   compile: version "go1.25.5" does not match go tool version "go1.26.3"
+            # —— go 命令用 GOROOT 里的标准库包，两者版本不一致。
+            # 显式覆盖，让「用哪个 go」这件事只由一个变量决定。
+            $env:GOROOT = Split-Path -Parent $go.DirectoryName
+        }
 
         # node 与 npm 必须来自【同一个】安装目录，否则 npm 会去找不匹配的 node。
         $node = Get-ChildItem (Join-Path $vf 'nodejs') -Recurse -Filter 'node.exe' -ErrorAction SilentlyContinue |

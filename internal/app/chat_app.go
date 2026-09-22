@@ -51,18 +51,33 @@ func NewChatApp(
 	}
 }
 
-// SendMessage 持久化并尽力发送一条单聊消息。
+// SendMessage 持久化并尽力发送一条单聊文本消息。
+func (a *ChatApp) SendMessage(ctx context.Context, peerID identity.NodeID, text string) (message.Message, error) {
+	return a.send(ctx, peerID, text, message.MsgTypeText)
+}
+
+// SendImage 发送单聊图片消息。
+//
+// content 是 message.EncodeInlineImage 产出的 JSON 信封（不是裸 base64）：
+// 图片在发送前已被压到 300KB 量级，因此直接内联进消息体，
+// 走的是与文本完全相同的「入库 → trySend → outbox 重发 → ACK」链路。
+func (a *ChatApp) SendImage(ctx context.Context, peerID identity.NodeID, content string) (message.Message, error) {
+	return a.send(ctx, peerID, content, message.MsgTypeImage)
+}
+
+// send 是文本与图片共用的发送实现。
 //
 // 「入库成功才算发送」这个顺序由本方法显式编排 —— 事件总线不承载需要事务的路径。
-func (a *ChatApp) SendMessage(ctx context.Context, peerID identity.NodeID, text string) (message.Message, error) {
+// 抽成公共实现是为了让两类消息不会各自漂移出一套检查与重发策略。
+func (a *ChatApp) send(ctx context.Context, peerID identity.NodeID, content string, msgType message.MsgType) (message.Message, error) {
 	now := a.clk.Now()
 	msg := message.Message{
 		MsgID:     message.NewID(),
 		ConvID:    message.DirectConvID(a.self, peerID),
 		SenderID:  a.self,
 		Direction: message.DirectionOut,
-		Content:   text,
-		MsgType:   message.MsgTypeText,
+		Content:   content,
+		MsgType:   msgType,
 		SentAt:    now,
 		State:     message.StatePending,
 	}
@@ -73,6 +88,14 @@ func (a *ChatApp) SendMessage(ctx context.Context, peerID identity.NodeID, text 
 		a.lg.Info("chat: initial send deferred to outbox", "msg_id", msg.MsgID, "err", err)
 	}
 	return msg, nil
+}
+
+// Message 按 msg_id 取一条消息（「另存为」等按 id 回查的入口用）。
+func (a *ChatApp) Message(msgID string) (message.Message, bool) {
+	if a.store == nil {
+		return message.Message{}, false
+	}
+	return a.store.Get(msgID)
 }
 
 // History 返回会话历史（新→旧）。
@@ -109,12 +132,23 @@ func (a *ChatApp) HandleChat(sess ports.Session, f protocol.Frame) error {
 		msgType = message.MsgTypeText
 	}
 
+	content := c.Content
+	if msgType == message.MsgTypeImage {
+		sanitized, ok := sanitizeImageContent(content)
+		if !ok {
+			// 坏消息的处置：不落库、不通知 UI，但【照常回 ACK】。
+			// 不回 ACK 会让发送方按 outbox 策略无限重发同一条垃圾消息。
+			return a.sendAck(sess, c.MsgID)
+		}
+		content = sanitized
+	}
+
 	m := message.Message{
 		MsgID:     c.MsgID,
 		ConvID:    convID,
 		SenderID:  senderID,
 		Direction: message.DirectionIn,
-		Content:   c.Content,
+		Content:   content,
 		MsgType:   msgType,
 		FileID:    c.FileID,
 		SentAt:    sentAt,
@@ -133,6 +167,45 @@ func (a *ChatApp) HandleChat(sess ports.Session, f protocol.Frame) error {
 
 	// 关键：重复消息【也必须回 ACK】，否则发送方永远收不到确认、无限重发。
 	return a.sendAck(sess, c.MsgID)
+}
+
+// maxImageEdge 是接收侧允许声明的最大边长。
+//
+// 尺寸字段来自网络，只用于前端占位；钳制它的意义是防止伪造的
+// w/h 让接收端按天文数字撑开占位框。真实的图片尺寸由浏览器的解码结果决定。
+const maxImageEdge = 20000
+
+// sanitizeImageContent 校验并规范化入站的内联图片 content。
+//
+// 校验通过且尺寸合规时原样返回，避免对正常消息做无意义的重新编码。
+func sanitizeImageContent(content string) (string, bool) {
+	img, err := message.DecodeInlineImage(content)
+	if err != nil {
+		return "", false
+	}
+	if _, err := img.Bytes(); err != nil { // base64 合法性 + 体积上限
+		return "", false
+	}
+	if img.W < 0 || img.H < 0 || img.W > maxImageEdge || img.H > maxImageEdge {
+		img.W = clampEdge(img.W)
+		img.H = clampEdge(img.H)
+		out, err := message.EncodeInlineImage(img)
+		if err != nil {
+			return "", false
+		}
+		return out, true
+	}
+	return content, true
+}
+
+func clampEdge(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > maxImageEdge {
+		return maxImageEdge
+	}
+	return v
 }
 
 func (a *ChatApp) sendAck(sess ports.Session, msgID string) error {

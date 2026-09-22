@@ -206,11 +206,16 @@ type GroupMembersResp struct {
 }
 
 // GroupMsg 是群消息（conv_id = group_id）。
+//
+// MsgType / FileID 与单聊的 Chat 对齐：群里的图片消息同样需要声明类型，
+// 否则接收端只能当纯文本渲染。新增字段对旧版本是「忽略未知字段」，向后兼容。
 type GroupMsg struct {
 	MsgID    string `json:"msg_id"`
 	GroupID  string `json:"group_id"`
 	SenderID string `json:"sender_id"`
 	Content  string `json:"content"`
+	MsgType  string `json:"msg_type,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
 	SentAt   int64  `json:"sent_at"`
 }
 

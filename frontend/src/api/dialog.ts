@@ -40,3 +40,46 @@ export async function pickFiles(multiple = false): Promise<PickOutcome> {
     return { picked: false, paths: [], available: false }
   }
 }
+
+/**
+ * 只选图片文件。
+ *
+ * 对话框层面过滤只是为了让用户少选错一次；真实格式判定仍在 Go 侧按魔数做，
+ * 因为用户随时可以选一个「扩展名叫 .png 的文本」。
+ */
+export async function pickImages(): Promise<PickOutcome> {
+  try {
+    const res = await Dialogs.OpenFile({
+      Title: '选择要发送的图片',
+      CanChooseFiles: true,
+      CanChooseDirectories: false,
+      AllowsMultipleSelection: true,
+      Filters: [{ DisplayName: '图片', Pattern: '*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp' }],
+      ButtonText: '发送'
+    })
+    const paths = (Array.isArray(res) ? res : [res]).filter((p): p is string => !!p)
+    return { picked: paths.length > 0, paths, available: true }
+  } catch {
+    return { picked: false, paths: [], available: false }
+  }
+}
+
+/**
+ * 原生保存对话框，返回用户选择的完整路径（取消或不可用时为空串）。
+ *
+ * 与 pickFiles 同理：直接用 Wails 运行时，不在 Go 侧再注册一个服务。
+ */
+export async function saveFile(defaultName: string): Promise<string> {
+  try {
+    const res = await Dialogs.SaveFile({
+      Title: '保存图片',
+      Filename: defaultName,
+      CanCreateDirectories: true,
+      Filters: [{ DisplayName: '图片', Pattern: '*.jpg;*.jpeg;*.png;*.gif' }],
+      ButtonText: '保存'
+    })
+    return typeof res === 'string' ? res : ''
+  } catch {
+    return ''
+  }
+}

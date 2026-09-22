@@ -77,6 +77,12 @@ export const realApi: SwarmApi = {
   sendMessage: async (peerId, text) => ChatService.SendMessage(peerId, text),
   history: async (peerId, limit, before) => list(await ChatService.History(peerId, limit, before)),
   conversations: async () => list(await ChatService.Conversations()),
+  sendImage: async (peerId, path) => ChatService.SendImage(peerId, path),
+  sendImageBytes: async (peerId, name, dataB64) =>
+    ChatService.SendImageBytes(peerId, name, dataB64),
+  saveImage: async (msgId, destPath) => {
+    await ChatService.SaveImage(msgId, destPath)
+  },
 
   sendFile: async (peerId, path) => TransferService.SendFile(peerId, path),
   transfers: async () => list(await TransferService.List()),
@@ -95,7 +101,10 @@ export const realApi: SwarmApi = {
     toGroup(await GroupService.AddMember(groupId, memberId)),
   groupSendMessage: async (groupId, text) => GroupService.SendMessage(groupId, text),
   groupHistory: async (groupId, limit, before) =>
-    list(await GroupService.History(groupId, limit, before))
+    list(await GroupService.History(groupId, limit, before)),
+  groupSendImage: async (groupId, path) => GroupService.SendImage(groupId, path),
+  groupSendImageBytes: async (groupId, name, dataB64) =>
+    GroupService.SendImageBytes(groupId, name, dataB64)
 }
 
 /**

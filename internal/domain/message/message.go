@@ -29,11 +29,13 @@ const (
 	StateFailed    State = "failed"
 )
 
-// MsgType 是消息类型（text 之外为后续扩展预留）。
+// MsgType 是消息类型。
 type MsgType string
 
 const (
 	MsgTypeText MsgType = "text"
+	// MsgTypeImage 的 content 是 InlineImage 的 JSON 信封（见 inline_image.go）。
+	MsgTypeImage MsgType = "image"
 )
 
 // Message 是单聊/群聊共用的消息实体。

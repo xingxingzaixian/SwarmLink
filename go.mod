@@ -1,11 +1,12 @@
 module github.com/swarmlink/swarmlink
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/wailsapp/wails/v3 v3.0.0-beta.24
+	golang.org/x/image v0.41.0
 	modernc.org/sqlite v1.59.0
 )
 

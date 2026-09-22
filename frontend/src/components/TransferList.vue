@@ -2,57 +2,63 @@
 /**
  * 传输任务列表（右栏「传输」页与设置里的「文件传输」共用）。
  *
- * 关键取舍：进度条只承担「还剩多少」，文字承担「还要多久」。
- * 速率与 ETA 来自 progress 事件（4 Hz），刷新页面后可能暂时为空 ——
- * 因此它们的存在与否不能影响布局（用同一行内的可选片段，不换行占位）。
+ * 采用紧凑表格式布局：每个任务一行，进度以百分比文字展示，
+ * 速率 / ETA / 已传字节放在同一行的次要信息里，不单独占行。
  */
-import { computed } from 'vue'
+import { computed } from "vue";
 
-import Icon from './Icon.vue'
-import ProgressBar from './ProgressBar.vue'
-import { getApi } from '../api'
-import type { TransferJob } from '../api/types'
-import { isActive } from '../stores/transfer'
-import { usePeersStore } from '../stores/peers'
-import { useUiStore } from '../stores/ui'
-import { etaText, fileSize, isSending, speedText, transferStatus } from '../utils/format'
+import Icon from "./Icon.vue";
+import { getApi } from "../api";
+import type { TransferJob } from "../api/types";
+import { isActive } from "../stores/transfer";
+import { usePeersStore } from "../stores/peers";
+import { useUiStore } from "../stores/ui";
+import {
+  etaText,
+  fileSize,
+  isSending,
+  speedText,
+  transferStatus,
+} from "../utils/format";
 
 const props = withDefaults(
   defineProps<{
-    jobs: TransferJob[]
+    jobs: TransferJob[];
     /** 是否显示「对方」名字（全局列表需要，单会话面板不需要）。 */
-    showPeer?: boolean
+    showPeer?: boolean;
   }>(),
-  { showPeer: false }
-)
+  { showPeer: false },
+);
 
-const peers = usePeersStore()
-const ui = useUiStore()
+const peers = usePeersStore();
+const ui = useUiStore();
 
 /** 在系统文件管理器里定位已传输的文件（Windows/macOS 会选中文件本身）。 */
 async function reveal(path: string): Promise<void> {
   try {
-    await (await getApi()).revealFile(path)
+    await (await getApi()).revealFile(path);
   } catch (e: any) {
     // 最常见的原因：文件已被手动删除或移动
-    ui.notify(String(e?.message ?? e) || '无法定位该文件')
+    ui.notify(String(e?.message ?? e) || "无法定位该文件");
   }
 }
 
 /** 进行中的排前面，其余按更新时间倒序 —— 用户关心的是「还在跑的」。 */
 const ordered = computed(() =>
   [...props.jobs].sort((a, b) => {
-    const aa = isActive(a.status) ? 0 : 1
-    const bb = isActive(b.status) ? 0 : 1
-    if (aa !== bb) return aa - bb
-    return b.updatedAt - a.updatedAt
-  })
-)
+    const aa = isActive(a.status) ? 0 : 1;
+    const bb = isActive(b.status) ? 0 : 1;
+    if (aa !== bb) return aa - bb;
+    return b.updatedAt - a.updatedAt;
+  }),
+);
 
-const running = computed(() => props.jobs.filter((j) => isActive(j.status)).length)
+const running = computed(
+  () => props.jobs.filter((j) => isActive(j.status)).length,
+);
 
 function percentOf(j: TransferJob): number {
-  return Math.max(0, Math.min(100, j.percent || 0))
+  return Math.max(0, Math.min(100, j.percent || 0));
 }
 </script>
 
@@ -69,51 +75,66 @@ function percentOf(j: TransferJob): number {
         <span>{{ running }} 个任务进行中</span>
       </div>
 
-      <article v-for="j in ordered" :key="j.jobId" class="job">
-        <header class="head">
-          <span class="dir" :class="isSending(j.direction) ? 'up' : 'down'">
-            <Icon :name="isSending(j.direction) ? 'upload' : 'download'" :size="15" />
-          </span>
+      <div class="rows">
+        <div
+          v-for="j in ordered"
+          :key="j.jobId"
+          class="row"
+          :class="{ err: !!j.error }"
+        >
+          <div class="top">
+            <span class="dir" :class="isSending(j.direction) ? 'up' : 'down'">
+              <Icon
+                :name="isSending(j.direction) ? 'upload' : 'download'"
+                :size="13"
+              />
+            </span>
 
-          <div class="main">
-            <div class="name nowrap" :title="j.fileName">
-              {{ j.fileName || '正在获取文件名…' }}
-            </div>
-            <div class="meta">
-              <span v-if="showPeer" class="nowrap">{{ peers.nameOf(j.peerId) }}</span>
-              <span>{{ isSending(j.direction) ? '发送' : '接收' }}</span>
-              <span v-if="j.fileSize">{{ fileSize(j.fileSize) }}</span>
-              <span v-if="isActive(j.status)" class="pct">{{ percentOf(j).toFixed(0) }}%</span>
+            <div class="name nowrap" :title="j.error || j.fileName">
+              {{ j.fileName || "正在获取文件名…" }}
             </div>
           </div>
 
-          <span class="tag" :class="transferStatus(j.status).cls">
-            {{ transferStatus(j.status).text }}
-          </span>
-        </header>
+          <div class="bottom">
+            <div class="info nowrap">
+              <span v-if="showPeer">{{ peers.nameOf(j.peerId) }}</span>
+              <span v-if="j.fileSize" class="mono"
+                >{{ fileSize(j.completed || 0) }} /
+                {{ fileSize(j.fileSize) }}</span
+              >
+              <span
+                v-if="isActive(j.status) && speedText(j.speed)"
+                class="nowrap"
+                >{{ speedText(j.speed)
+                }}<template v-if="etaText(j.etaMs)">
+                  · {{ etaText(j.etaMs) }}</template
+                ></span
+              >
+            </div>
 
-        <ProgressBar :percent="j.percent" :status="j.status" />
+            <span class="spacer" />
 
-        <div class="foot">
-          <span v-if="speedText(j.speed)" class="mono faint">{{ speedText(j.speed) }}</span>
-          <span v-if="etaText(j.etaMs)" class="faint">{{ etaText(j.etaMs) }}</span>
-          <span class="spacer" />
-          <span v-if="j.completed && j.fileSize" class="mono faint">
-            {{ fileSize(j.completed) }} / {{ fileSize(j.fileSize) }}
-          </span>
-          <button
-            v-if="j.status === 'done' && j.localPath"
-            class="reveal"
-            :title="`定位到：${j.localPath}`"
-            aria-label="在文件管理器中显示该文件"
-            @click="reveal(j.localPath)"
-          >
-            <Icon name="folder" :size="13" />
-          </button>
+            <span class="pct" :class="{ dim: !isActive(j.status) }">
+              {{ isActive(j.status) ? percentOf(j).toFixed(0) + "%" : "" }}
+            </span>
+
+            <span class="tag" :class="transferStatus(j.status).cls">
+              {{ transferStatus(j.status).text }}
+            </span>
+
+            <button
+              v-if="j.status === 'done' && j.localPath"
+              class="reveal"
+              :title="`定位到：${j.localPath}`"
+              aria-label="在文件管理器中显示该文件"
+              @click="reveal(j.localPath)"
+            >
+              <Icon name="folder" :size="13" />
+            </button>
+            <span v-else class="reveal-ph" />
+          </div>
         </div>
-
-        <div v-if="j.error" class="err">{{ j.error }}</div>
-      </article>
+      </div>
     </template>
   </div>
 </template>
@@ -122,8 +143,8 @@ function percentOf(j: TransferJob): number {
 .wrap {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px 18px;
+  gap: 8px;
+  padding: 10px 12px 16px;
 }
 
 .sum {
@@ -134,20 +155,49 @@ function percentOf(j: TransferJob): number {
   font-size: var(--fs-sm);
 }
 
-.job {
+.rows {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 11px 12px;
-  border-radius: var(--r-lg);
-  background: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--edge), 0 8px 20px -16px rgba(2, 0, 12, 0.9);
 }
 
-.head {
+/* 表格式行：上下两行 —— 第一行「图标 + 文件名」，第二行其余信息。
+   细分隔线代替卡片阴影，整行仍然矮而密。 */
+.row {
   display: flex;
-  align-items: flex-start;
-  gap: 9px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-xs);
+  color: var(--t2);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 左边留出图标宽度，让第二行与文件名左对齐。 */
+.bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 28px;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.row + .row {
+  border-top: 1px solid var(--edge);
+}
+
+.row.err {
+  color: var(--err-ink);
 }
 
 .dir {
@@ -155,8 +205,8 @@ function percentOf(j: TransferJob): number {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
+  width: 20px;
+  height: 20px;
   border-radius: var(--r-sm);
 }
 
@@ -170,67 +220,71 @@ function percentOf(j: TransferJob): number {
   color: var(--ok-ink);
 }
 
-.main {
+.name {
   flex: 1 1 auto;
   min-width: 0;
-}
-
-.name {
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   font-weight: 500;
+  color: var(--t1);
 }
 
-.meta {
+.info {
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 1px;
-  font-size: var(--fs-xs);
+  gap: 6px;
+  min-width: 0;
   color: var(--t3);
 }
 
 .pct {
-  color: var(--t2);
+  flex: 0 0 38px;
+  text-align: right;
   font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--t1);
 }
 
-.foot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.pct.dim {
+  color: var(--t3);
+}
+
+.tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
   font-size: var(--fs-xs);
-  min-height: 14px;
 }
 
-.spacer {
-  flex: 1 1 auto;
-}
-
-.err {
-  color: var(--err-ink);
-  font-size: var(--fs-xs);
-  line-height: 1.5;
-}
-
-/* 定位按钮：只有图标。路径不占版面 —— 它就在 title 里，
-   真要复制的人悬停即可；大多数时候用户只想知道「传到哪了」，点一下最实在。 */
 .reveal {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border-radius: var(--r-sm);
-  background: var(--surface-sunken);
-  box-shadow: inset 0 0 0 1px var(--line);
+  background: transparent;
   color: var(--t2);
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
 }
 
 .reveal:hover {
   background: var(--hover);
   color: var(--t1);
+}
+
+/* 占位：与按钮等宽，保证各行末尾对齐。 */
+.reveal-ph {
+  flex: 0 0 20px;
+}
+
+.nowrap {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

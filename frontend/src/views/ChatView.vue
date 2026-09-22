@@ -11,7 +11,9 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import Avatar from '../components/Avatar.vue'
 import ChatBubble from '../components/ChatBubble.vue'
+import EmojiPicker from '../components/EmojiPicker.vue'
 import Icon from '../components/Icon.vue'
+import ImageLightbox from '../components/ImageLightbox.vue'
 import type { Message } from '../api/types'
 import { useFileSend } from '../composables/useFileSend'
 import { useChatStore } from '../stores/chat'
@@ -25,12 +27,16 @@ const peers = usePeersStore()
 const groups = useGroupStore()
 const ui = useUiStore()
 
-const { sending, sendPaths, attach } = useFileSend()
+const { sending, sendPaths, attach, attachImage } = useFileSend()
 
 const draft = ref('')
 const pathInput = ref('')
 const scroller = ref<HTMLElement | null>(null)
 const draftEl = ref<HTMLTextAreaElement | null>(null)
+
+/** 正在放大的图片消息（null = 关闭查看器）。 */
+const zoomed = ref<Message | null>(null)
+const emojiOpen = ref(false)
 
 const conv = computed(() => chat.activeConversation)
 const isGroup = computed(() => chat.activeIsGroup)
@@ -168,10 +174,93 @@ async function submit(): Promise<void> {
 }
 
 function onKeydown(e: KeyboardEvent): void {
+  // 输入法组合态下的 Enter 是「确认候选词」，不是「发送」。
+  // 少了这个判断，中文用户每选一次词就会把半成品发出去。
+  if (e.isComposing) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     void submit()
   }
+}
+
+/**
+ * 中文输入法的组合态。
+ *
+ * 组合期间 textarea 的 selectionStart 指向的是「上一个已提交的位置」，
+ * 此刻插入会把表情切进正在拼音的字符中间。因此组合态下先排队，
+ * 等 compositionend（Vue 也在这一刻才把输入同步进 v-model）再插。
+ */
+const composing = ref(false)
+let pendingEmoji = ''
+
+function onCompositionStart(): void {
+  composing.value = true
+}
+
+function onCompositionEnd(): void {
+  composing.value = false
+  if (!pendingEmoji) return
+  const ch = pendingEmoji
+  pendingEmoji = ''
+  void insertEmoji(ch)
+}
+
+/**
+ * 把表情插入到光标处。
+ *
+ * 必须手动记录并恢复光标：v-model 写回 draft 之后，Vue 重新渲染
+ * 会把 textarea 的选区重置到末尾 —— 表现为「在句子中间插一个表情，光标跳到结尾」。
+ */
+async function insertEmoji(ch: string): Promise<void> {
+  if (composing.value) {
+    pendingEmoji += ch
+    return
+  }
+  const el = draftEl.value
+  const start = el?.selectionStart ?? draft.value.length
+  const end = el?.selectionEnd ?? draft.value.length
+  draft.value = draft.value.slice(0, start) + ch + draft.value.slice(end)
+
+  await nextTick()
+  el?.focus()
+  const caret = start + ch.length
+  el?.setSelectionRange(caret, caret)
+  void autoGrow()
+}
+
+/**
+ * 粘贴图片。
+ *
+ * 剪贴板里的 File 只有 Blob、没有本地路径，因此走 base64 字节入口
+ * （与「选文件」不同：那条路有真实路径，可以让 Go 侧直接读盘）。
+ * 纯文本粘贴不拦截，交给浏览器默认行为。
+ */
+async function onPaste(e: ClipboardEvent): Promise<void> {
+  const c = conv.value
+  if (!c) return
+  const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'))
+  if (!files.length) return
+
+  e.preventDefault()
+  for (const f of files) {
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer())
+      await chat.sendImageBytes(c, f.name || 'clipboard.png', toBase64(bytes))
+    } catch (err: any) {
+      ui.notify(String(err?.message ?? err) || '粘贴图片失败')
+    }
+  }
+  void toBottom()
+}
+
+/** Uint8Array → base64。分块转换：一次性展开大数组会顶爆调用栈。 */
+function toBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
 }
 
 // ---------------------------------------------------------------- 发送文件
@@ -246,6 +335,7 @@ async function sendTypedPath(): Promise<void> {
           :first="it.first"
           :sender-name="peers.nameOf(it.m.senderId)"
           :sender-seed="it.m.senderId"
+          @zoom="(m) => (zoomed = m)"
         />
       </template>
     </div>
@@ -261,6 +351,36 @@ async function sendTypedPath(): Promise<void> {
         >
           <Icon name="paperclip" :size="17" />
         </button>
+
+        <button
+          class="icon-btn"
+          :disabled="!conv"
+          title="发送图片"
+          aria-label="发送图片"
+          @click="attachImage"
+        >
+          <Icon name="image" :size="17" />
+        </button>
+
+        <div class="emoji-wrap">
+          <button
+            class="icon-btn"
+            data-emoji-toggle
+            :disabled="!conv"
+            title="表情"
+            aria-label="插入表情"
+            @click="emojiOpen = !emojiOpen"
+          >
+            <Icon name="smile" :size="17" />
+          </button>
+          <EmojiPicker
+            v-if="emojiOpen"
+            class="emoji-pop"
+            @pick="insertEmoji"
+            @close="emojiOpen = false"
+          />
+        </div>
+
         <span class="spacer" />
         <span class="hint">Enter 发送 · Shift + Enter 换行</span>
       </div>
@@ -274,6 +394,9 @@ async function sendTypedPath(): Promise<void> {
           rows="1"
           :placeholder="conv ? '输入消息…' : '先选择一个会话'"
           @keydown="onKeydown"
+          @paste="onPaste"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
         />
         <button class="send" :disabled="!conv || !draft.trim()" @click="submit">
           <Icon name="send" :size="15" />
@@ -293,6 +416,8 @@ async function sendTypedPath(): Promise<void> {
         <button class="btn btn-soft" @click="ui.hidePathInput()">取消</button>
       </div>
     </footer>
+
+    <ImageLightbox v-if="zoomed" :message="zoomed" @close="zoomed = null" />
 
     <!-- 拖放高亮：file-drop-target-active 由 Wails 运行时在拖入时加上 -->
     <div class="drop-overlay">
@@ -397,6 +522,18 @@ async function sendTypedPath(): Promise<void> {
 
 .spacer {
   flex: 1 1 auto;
+}
+
+.emoji-wrap {
+  position: relative;
+}
+
+/* 面板向上弹出：它挂在输入框上方，向下弹会盖住输入区 */
+.emoji-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
 }
 
 .hint {

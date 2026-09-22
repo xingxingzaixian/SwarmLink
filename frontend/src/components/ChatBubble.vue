@@ -9,12 +9,13 @@
  * 送达状态只对【自己发的】显示，且只显示异常/未完成态：
  * 每条都挂一个「已送达」标签是纯噪音（QQ 也不显示）。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import Avatar from './Avatar.vue'
 import Icon from './Icon.vue'
 import type { Message } from '../api/types'
 import { clockTime } from '../utils/format'
+import { imageBox, imageSrc, parseImageContent } from '../utils/image'
 
 const props = withDefaults(
   defineProps<{
@@ -33,7 +34,31 @@ const props = withDefaults(
   { senderName: '', senderSeed: '', showSender: false, tail: true, first: true }
 )
 
+const emit = defineEmits<{ (e: 'zoom', m: Message): void }>()
+
 const time = computed(() => clockTime(props.message.sentAt))
+
+const isImage = computed(() => props.message.msgType === 'image')
+
+/**
+ * 图片消息的内容解析。
+ *
+ * 解析失败（旧数据 / 损坏）时给占位块，而不是让整块聊天区崩掉 ——
+ * 一条坏消息不该毁掉整段历史。
+ */
+const image = computed(() => (isImage.value ? parseImageContent(props.message.content) : null))
+
+const box = computed(() =>
+  image.value ? imageBox(image.value, 220) : { width: 220, height: 140 }
+)
+
+/**
+ * 解码失败（b64 合法但不是图片、或数据被截断）也要落到占位块。
+ *
+ * 只判断 parse 是不够的：JSON 合法 + base64 合法的垃圾数据依然无法解码，
+ * 那时浏览器会画一个破图图标，比明确的占位块难懂得多。
+ */
+const broken = ref(false)
 
 /** 未送达/失败才给视觉提示；pending 用一个呼吸点表示「在路上」。 */
 const stateIcon = computed(() => {
@@ -73,8 +98,23 @@ const stateText = computed(() => {
     <div class="col">
       <div v-if="showSender && !out && first" class="who">{{ senderName }}</div>
 
-      <div class="bubble">
-        <div class="text">{{ message.content }}</div>
+      <div class="bubble" :class="{ 'bubble-image': isImage }">
+        <template v-if="isImage">
+          <img
+            v-if="image && !broken"
+            class="shot"
+            :src="imageSrc(image)"
+            :width="box.width"
+            :height="box.height"
+            alt="图片消息"
+            @error="broken = true"
+            @click="emit('zoom', message)"
+          />
+          <div v-else class="shot-broken" :style="{ width: box.width, height: box.height }">
+            图片显示失败
+          </div>
+        </template>
+        <div v-else class="text">{{ message.content }}</div>
         <div class="meta">
           <span class="time">{{ time }}</span>
           <Icon
@@ -169,6 +209,35 @@ const stateText = computed(() => {
 .text {
   font-size: var(--fs-md);
   line-height: 1.58;
+}
+
+/* 图片气泡：padding 收紧到 4px —— 图片自带留白，
+   沿用文字的 padding 会让它看起来被「框」住了。 */
+.bubble-image {
+  padding: 4px 4px 2px;
+  /* 文字气泡靠 pre-wrap 保留换行；图片气泡里没有文字，
+     留着它只会把模板换行渲染成额外空隙。 */
+  white-space: normal;
+}
+
+.shot {
+  display: block;
+  max-width: 220px;
+  border-radius: var(--r-md);
+  cursor: zoom-in;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.shot-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 220px;
+  border-radius: var(--r-md);
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--t3);
+  font-size: var(--fs-xs);
 }
 
 .meta {

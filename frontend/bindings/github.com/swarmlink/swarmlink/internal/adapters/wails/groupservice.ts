@@ -43,6 +43,20 @@ export function List(): $CancellablePromise<$models.GroupDTO[] | null> {
 }
 
 /**
+ * SendImage 群发一张本地图片（与单聊同一套压缩与内联格式）。
+ */
+export function SendImage(groupID: string, path: string): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(540331366, groupID, path);
+}
+
+/**
+ * SendImageBytes 群发剪贴板里的图片（dataB64 为 base64 字符串）。
+ */
+export function SendImageBytes(groupID: string, name: string, dataB64: string): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(3905079725, groupID, name, dataB64);
+}
+
+/**
  * SendMessage 群发消息（扇出到在线成员；离线成员不暂存）。
  */
 export function SendMessage(groupID: string, text: string): $CancellablePromise<$models.MessageDTO> {

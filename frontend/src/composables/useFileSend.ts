@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 
 import { isMockMode } from '../api'
-import { pickFiles } from '../api/dialog'
+import { pickFiles, pickImages } from '../api/dialog'
 import { useChatStore } from '../stores/chat'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
@@ -60,5 +60,41 @@ export function useFileSend() {
     await sendPaths(res.paths)
   }
 
-  return { sending, sendPaths, attach }
+  /**
+   * 发送一张图片。
+   *
+   * 刻意【不】调用 ui.focusTransfer()：图片走消息链路、不产生传输任务，
+   * 把右栏切到传输面板只会让用户以为发错了地方。
+   */
+  async function sendImage(path: string): Promise<boolean> {
+    const conv = chat.activeConversation
+    if (!conv) {
+      ui.notify('先打开一个会话')
+      return false
+    }
+    try {
+      await chat.sendImage(conv, path)
+      return true
+    } catch (e: any) {
+      ui.notify(String(e?.message ?? e) || '图片发送失败')
+      return false
+    }
+  }
+
+  /** 图片按钮：选图片文件后立即发送（一次可多选，串行发）。 */
+  async function attachImage(): Promise<void> {
+    if (!chat.activeConversation) {
+      ui.notify('先打开一个会话')
+      return
+    }
+    const res = await pickImages()
+    if (!res.available) {
+      ui.notify('当前环境无法打开文件对话框')
+      return
+    }
+    if (!res.picked) return // 用户点了取消
+    for (const p of res.paths) await sendImage(p)
+  }
+
+  return { sending, sendPaths, attach, sendImage, attachImage }
 }

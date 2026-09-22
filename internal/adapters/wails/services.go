@@ -2,6 +2,8 @@ package wails
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +19,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/infra/imagecodec"
 )
 
 // ConnInspector 是诊断面板所需的连接信息（由 tcp.Manager 实现）。
@@ -241,6 +244,149 @@ func (s *ChatService) SendMessage(peerID, text string) (MessageDTO, error) {
 		return MessageDTO{}, err
 	}
 	return ToMessageDTO(msg), nil
+}
+
+// SendImage 发送一张本地图片：读文件 → 压缩 → 内联进消息。
+//
+// 为什么压缩放在这里（而不是前端）：前端拿到的是路径或 Blob，压缩需要解码 + 缩放 + 体积控制，
+// 放 Go 侧只需实现一次，且不会把大图搬进 WebView 的内存。
+func (s *ChatService) SendImage(peerID, path string) (MessageDTO, error) {
+	id, err := identity.ParseNodeID(peerID)
+	if err != nil {
+		return MessageDTO{}, fmt.Errorf("无效的 NodeID: %w", err)
+	}
+	if err := checkSendableFile(path); err != nil {
+		return MessageDTO{}, err
+	}
+	content, err := prepareImageFile(path)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	msg, err := s.d.Chat.SendImage(context.Background(), id, content)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
+// SendImageBytes 发送剪贴板里的图片：浏览器只能拿到 Blob，拿不到本地路径。
+//
+// dataB64 用 base64 字符串而不是 []byte：Wails 生成器把 []byte 映射成 TS 的
+// `string | null`，参数类型与运行时编码之间会留下一次「猜」的机会。
+// 显式声明为 base64 字符串，两侧的契约才是自解释的。
+func (s *ChatService) SendImageBytes(peerID, name, dataB64 string) (MessageDTO, error) {
+	id, err := identity.ParseNodeID(peerID)
+	if err != nil {
+		return MessageDTO{}, fmt.Errorf("无效的 NodeID: %w", err)
+	}
+	data, err := decodeImageBytes(dataB64)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	content, err := prepareImageData(data)
+	if err != nil {
+		return MessageDTO{}, withImageSource(err, name)
+	}
+	msg, err := s.d.Chat.SendImage(context.Background(), id, content)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
+// SaveImage 把一条图片消息另存到指定路径。
+func (s *ChatService) SaveImage(msgID, destPath string) error {
+	if msgID == "" {
+		return fmt.Errorf("缺少消息 id")
+	}
+	if destPath == "" {
+		return fmt.Errorf("请选择保存位置")
+	}
+	msg, ok := s.d.Chat.Message(msgID)
+	if !ok {
+		return fmt.Errorf("找不到该图片消息")
+	}
+	if msg.MsgType != message.MsgTypeImage {
+		return fmt.Errorf("这条消息不是图片")
+	}
+	img, err := message.DecodeInlineImage(msg.Content)
+	if err != nil {
+		return fmt.Errorf("图片内容已损坏: %w", err)
+	}
+	raw, err := img.Bytes()
+	if err != nil {
+		return err
+	}
+	// 先看目录：目标目录不存在是「用户选错了位置」，与「写盘失败」不是一回事，
+	// 分开报错才能给出可行动的信息。
+	if dir := filepath.Dir(destPath); dir != "" {
+		if st, statErr := os.Stat(dir); statErr != nil || !st.IsDir() {
+			return fmt.Errorf("保存位置不存在：%s", dir)
+		}
+	}
+	if err := os.WriteFile(destPath, raw, 0o644); err != nil {
+		return fmt.Errorf("保存图片失败: %w", err)
+	}
+	return nil
+}
+
+// decodeImageBytes 把前端传来的 base64 图片数据解码成字节。
+func decodeImageBytes(dataB64 string) ([]byte, error) {
+	if dataB64 == "" {
+		return nil, fmt.Errorf("剪贴板里没有图片数据")
+	}
+	raw, err := base64.StdEncoding.DecodeString(dataB64)
+	if err != nil {
+		return nil, fmt.Errorf("图片数据不是合法的 base64")
+	}
+	return raw, nil
+}
+
+// prepareImageFile 读取并规范化一个本地图片文件。
+func prepareImageFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("无法读取该图片: %w", err)
+	}
+	return prepareImageData(raw)
+}
+
+// prepareImageData 把图片字节变成可内联的消息 content。
+//
+// 错误信息刻意做成用户能读懂并据此行动的中文：图片发送失败的原因
+// 只可能是「不是图片 / 太大 / 解不开」这三种，让用户猜是最差的选择。
+func prepareImageData(data []byte) (string, error) {
+	img, err := imagecodec.Prepare(data, imagecodec.DefaultMaxEdge, imagecodec.DefaultMaxBytes)
+	switch {
+	case errors.Is(err, imagecodec.ErrNotImage):
+		return "", fmt.Errorf("不是可识别的图片格式")
+	case errors.Is(err, imagecodec.ErrTooLarge):
+		return "", fmt.Errorf("图片过大，压缩后仍超出上限，请改用「发送文件」")
+	case errors.Is(err, imagecodec.ErrEmpty):
+		return "", fmt.Errorf("图片内容为空")
+	case err != nil:
+		return "", fmt.Errorf("处理图片失败: %w", err)
+	}
+
+	content, err := message.EncodeInlineImage(message.InlineImage{
+		MIME: img.MIME,
+		W:    img.W,
+		H:    img.H,
+		B64:  base64.StdEncoding.EncodeToString(img.Data),
+	})
+	if err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
+// withImageSource 给错误补上来源（剪贴板里的文件名/来源路径），
+// 否则用户面对「不是可识别的图片格式」时无从判断说的是哪一张。
+func withImageSource(err error, source string) error {
+	if err == nil || source == "" {
+		return err
+	}
+	return fmt.Errorf("%s：%w", source, err)
 }
 
 // History 返回与某对端的最近消息（新→旧）。
@@ -556,6 +702,45 @@ func (s *GroupService) SendMessage(groupID, text string) (MessageDTO, error) {
 		return MessageDTO{}, fmt.Errorf("消息内容不能为空")
 	}
 	msg, err := s.d.Group.SendGroupMessage(context.Background(), groupID, text)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
+// SendImage 群发一张本地图片（与单聊同一套压缩与内联格式）。
+func (s *GroupService) SendImage(groupID, path string) (MessageDTO, error) {
+	if groupID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少群 id")
+	}
+	if err := checkSendableFile(path); err != nil {
+		return MessageDTO{}, err
+	}
+	content, err := prepareImageFile(path)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	msg, err := s.d.Group.SendGroupImage(context.Background(), groupID, content)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
+// SendImageBytes 群发剪贴板里的图片（dataB64 为 base64 字符串）。
+func (s *GroupService) SendImageBytes(groupID, name, dataB64 string) (MessageDTO, error) {
+	if groupID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少群 id")
+	}
+	data, err := decodeImageBytes(dataB64)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	content, err := prepareImageData(data)
+	if err != nil {
+		return MessageDTO{}, withImageSource(err, name)
+	}
+	msg, err := s.d.Group.SendGroupImage(context.Background(), groupID, content)
 	if err != nil {
 		return MessageDTO{}, err
 	}

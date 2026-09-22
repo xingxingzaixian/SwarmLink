@@ -31,6 +31,34 @@ export function History(peerID: string, limit: number, before: number): $Cancell
 }
 
 /**
+ * SaveImage 把一条图片消息另存到指定路径。
+ */
+export function SaveImage(msgID: string, destPath: string): $CancellablePromise<void> {
+    return $Call.ByID(1701836894, msgID, destPath);
+}
+
+/**
+ * SendImage 发送一张本地图片：读文件 → 压缩 → 内联进消息。
+ * 
+ * 为什么压缩放在这里（而不是前端）：前端拿到的是路径或 Blob，压缩需要解码 + 缩放 + 体积控制，
+ * 放 Go 侧只需实现一次，且不会把大图搬进 WebView 的内存。
+ */
+export function SendImage(peerID: string, path: string): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(3761468007, peerID, path);
+}
+
+/**
+ * SendImageBytes 发送剪贴板里的图片：浏览器只能拿到 Blob，拿不到本地路径。
+ * 
+ * dataB64 用 base64 字符串而不是 []byte：Wails 生成器把 []byte 映射成 TS 的
+ * `string | null`，参数类型与运行时编码之间会留下一次「猜」的机会。
+ * 显式声明为 base64 字符串，两侧的契约才是自解释的。
+ */
+export function SendImageBytes(peerID: string, name: string, dataB64: string): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(3398562546, peerID, name, dataB64);
+}
+
+/**
  * SendMessage 发送单聊消息，返回已入库的消息（状态为 pending，等待 ACK）。
  */
 export function SendMessage(peerID: string, text: string): $CancellablePromise<$models.MessageDTO> {
