@@ -207,6 +207,17 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      # 必须有：gh release create 是"在 git 仓库里"工作的 —— 它要解析 tag、
+      # 算 --generate-notes 的区间。这个作业里只有 download-artifact，
+      # 工作目录下没有 .git，gh 于是直接抛
+      # "failed to run git: fatal: not a git repository"。
+      #
+      # fetch-depth: 0 也不能省：--generate-notes 要从上一个 tag 一路读到本 tag，
+      # 默认的浅克隆只有 1 个 commit，会生成一份几乎空白的 notes。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
