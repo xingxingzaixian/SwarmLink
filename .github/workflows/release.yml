@@ -230,13 +230,42 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # 用数组而不是 $(find ...)：文件名里可能有空格，
-          # 直接拼进命令行会被 word splitting 拆散。
-          mapfile -t files < <(find dist -type f)
+
+          # 只挑真正要发布的安装包/镜像，不能把 dist 下的文件一股脑塞给 gh：
+          #   - macOS 的 SwarmLink.app 是【目录树】，download-artifact 会把它还原成
+          #     几十个独立文件，全都会变成 Release 上的资产，发布页直接变垃圾场；
+          #   - 更要命的是里面的 Contents/MacOS/SwarmLink 与 Linux 的 bin/SwarmLink
+          #     完全同名。gh 遇到【多个同名资产】时不会报 422，而是抛一句毫无线索的
+          #     "HTTP 404: Not Found (https://uploads.github.com/...?label=&name=SwarmLink)"，
+          #     然后把已经建好的 Release 删掉。报错点到原因的距离极远，
+          #     见 cli/cli#10734 与 cli/cli#10792。
+          files=()
+          while IFS= read -r f; do
+            files+=("$f")
+          done < <(find dist -type f \( \
+            -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \
+            -o -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) | sort)
+
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::没有任何产物，拒绝创建空 Release"
             exit 1
           fi
+
+          echo "== 准备上传 ${#files[@]} 个文件 =="
+          printf '  %s\n' "${files[@]}"
+
+          # 重名必须在这里拦下。上面那套通配符已经排除了 .app 内部，
+          # 但只要以后有人往 bin/ 里多塞一个同名产物，这里就会当场报清楚，
+          # 而不是又变成一句 "HTTP 404: Not Found"。
+          dupes=$(for f in "${files[@]}"; do basename "$f"; done | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::资产重名，gh 对同名文件会以含糊的 HTTP 404 失败："
+            printf '  %s\n' "$dupes"
+            exit 1
+          fi
+
+          # 用数组而不是 $(find ...)：文件名里可能有空格，
+          # 直接拼进命令行会被 word splitting 拆散。
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
