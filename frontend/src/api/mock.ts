@@ -109,7 +109,8 @@ export function createMockApi(): SwarmApi {
       fileSize: 42_318_592,
       direction: 'recv',
       localPath: '~/Downloads/SwarmLink/firmware-v2.4.1.bin.zip',
-      completed: 42_318_592,
+      // 与真实后端一致：completed 是【分块数】，不是字节数
+      completed: 81,
       totalChunks: 81,
       percent: 100,
       status: 'done',
@@ -258,7 +259,7 @@ export function createMockApi(): SwarmApi {
         if (job) {
           job.percent = 100
           job.status = 'done'
-          job.completed = size
+          job.completed = job.totalChunks
           job.localPath = `/remote/${name}`
           diagnostics.activeTransfers = 0
         }

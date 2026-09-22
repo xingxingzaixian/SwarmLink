@@ -56,6 +56,11 @@ export interface TransferJob {
   fileSize: number
   direction: 'send' | 'recv' | string
   localPath: string
+  /**
+   * 已确认的【分块数】，不是字节数（后端 Job.Completed ← Bitmap.CompletedCount）。
+   * 展示已传字节请用 utils/format 的 transferredBytes：直接 fileSize(completed)
+   * 会把 15MB 的文件显示成「30 B」。
+   */
   completed: number
   totalChunks: number
   percent: number

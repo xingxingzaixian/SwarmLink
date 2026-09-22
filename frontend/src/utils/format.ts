@@ -15,6 +15,24 @@ function startOfDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
 }
 
+/**
+ * 传输任务的「已传字节数」。
+ *
+ * 刻意【不接收】DTO 里的 completed 字段，只吃字节口径的数据：那个字段是
+ * 【已确认的分块数】而不是字节数（见 domain/transfer.Job.Completed ←
+ * Bitmap.CompletedCount）。曾经把它直接喂给 fileSize() 渲染，
+ * 于是 15MB 的文件显示成「30 B / 15 MB」—— 30 其实是 30 个分块。
+ *
+ * 字节数只能由字节口径算出来：完成即全量（也顺手抹掉百分比取整带来的
+ * 14.9MB / 15MB 这种尾差），进行中则按百分比折算。
+ */
+export function transferredBytes(fileSize: number, percent: number, done: boolean): number {
+  if (fileSize <= 0) return 0
+  if (done) return fileSize
+  const p = Math.max(0, Math.min(100, percent || 0))
+  return Math.round((fileSize * p) / 100)
+}
+
 /** 今天 / 昨天 / 更早，用于「按天分组」。 */
 function dayDiff(ms: number): number {
   const today = startOfDay(new Date())

@@ -19,6 +19,7 @@ import {
   isSending,
   speedText,
   transferStatus,
+  transferredBytes,
 } from "../utils/format";
 
 const props = withDefaults(
@@ -60,6 +61,17 @@ const running = computed(
 function percentOf(j: TransferJob): number {
   return Math.max(0, Math.min(100, j.percent || 0));
 }
+
+/**
+ * 已传字节数。
+ *
+ * 必须由字节口径算（transferredBytes），不能像以前那样把 DTO 的 completed
+ * 直接喂给 fileSize()：那个字段是【已确认的分块数】，所以 15MB 的文件
+ * 会显示成「30 B / 15 MB」。
+ */
+function doneBytes(j: TransferJob): number {
+  return transferredBytes(j.fileSize, percentOf(j), j.status === "done");
+}
 </script>
 
 <template>
@@ -99,8 +111,7 @@ function percentOf(j: TransferJob): number {
             <div class="info nowrap">
               <span v-if="showPeer">{{ peers.nameOf(j.peerId) }}</span>
               <span v-if="j.fileSize" class="mono"
-                >{{ fileSize(j.completed || 0) }} /
-                {{ fileSize(j.fileSize) }}</span
+                >{{ fileSize(doneBytes(j)) }} / {{ fileSize(j.fileSize) }}</span
               >
               <span
                 v-if="isActive(j.status) && speedText(j.speed)"
