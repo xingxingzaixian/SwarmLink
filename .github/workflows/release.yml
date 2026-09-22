@@ -81,28 +81,58 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          # libgtk-3-dev + libwebkit2gtk-4.1-dev 是 Wails v3 Linux 后端（GTK3）的必需项。
+          # Wails v3 的 Linux 后端在 beta.24 已从 GTK3 迁到 GTK4：
+          # internal/operatingsystem 里的 cgo 指令要求 pkg-config 能解析
+          # `gtk4` 与 `webkitgtk-6.0`（GTK4 版 WebKit，注意名字里没有 "2"）。
+          # 装 libgtk-3-dev + libwebkit2gtk-4.1-dev 一个都顶不上，
+          # 报错形如 "Package gtk4 was not found in the pkg-config search path"。
           # patchelf / desktop-file-utils 是 AppImage 的 gtk 插件打包时要用到的。
           # 注意不需要 libfuse2：wails3 生成 AppImage 用的是
           # `--appimage-extract-and-run`（internal/commands/appimage.go），
           # 不走 FUSE 挂载，所以 Ubuntu 24.04 默认没有 libfuse2 也能过。
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
-            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libgtk-4-dev libwebkitgtk-6.0-dev \
             patchelf desktop-file-utils
 
       - name: 确保 NSIS 可用（Windows）
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          $nsisDir = 'C:\Program Files (x86)\NSIS'
+
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
             choco install nsis -y --no-progress
-            # choco 装在 C:\Program Files (x86)\NSIS，且不会刷新当前进程的 PATH。
-            # 写进 GITHUB_PATH 才能让【后续步骤】也看得到。
-            $dir = 'C:\Program Files (x86)\NSIS'
-            if (Test-Path $dir) { $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::choco install nsis 退出码 $LASTEXITCODE，继续尝试解析 makensis"
+            }
+            # choco 只把 NSIS 目录写进【注册表里的机器级 PATH】，而当前 pwsh 进程的环境块
+            # 在步骤启动时就固定了，改注册表不会回灌进来 —— 所以安装成功之后立刻
+            # Get-Command 依然找不到它。必须从注册表重新读一遍拼回 $env:Path。
+            $env:Path = "$nsisDir;" +
+              [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+              [Environment]::GetEnvironmentVariable('Path', 'User')
           }
-          "makensis: " + (Get-Command makensis).Source
+
+          # 给【后续步骤】用（wails3 task windows:package → create:nsis:installer 里直接调
+          # makensis）。GITHUB_PATH 的生效时机是下一步，救不了当前进程，两者都得写。
+          if (Test-Path $nsisDir) {
+            $nsisDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
+          # 兜底：万一没生成 shim 也没进 PATH，按约定路径直接取，
+          # 免得错误以 "makensis is not recognized" 的形式埋在打包步骤深处。
+          $found = Get-Command makensis -ErrorAction SilentlyContinue
+          $exe = if ($found) { $found.Source } else { $null }
+          if (-not $exe) {
+            $candidate = Join-Path $nsisDir 'makensis.exe'
+            if (-not (Test-Path $candidate)) { throw "NSIS 安装后仍找不到 makensis，安装似乎失败了" }
+            $exe = $candidate
+          }
+
+          "makensis: $exe"
+          & $exe /VERSION
+          if ($LASTEXITCODE -ne 0) { throw "makensis 无法执行：$exe" }
 
       # ------------------------------------------------------- wails3 CLI 版本锁定
 
@@ -125,7 +155,11 @@ jobs:
           # "flag provided but not defined" 之类的方式报错，报错点离原因很远
           # （旧 CLI 不认识脚手架生成的新 flag）。这里当场对齐、当场断言。
           got=$(wails3 version 2>&1 | tr -d '\r')
-          echo "wails3 = $got（需要 ${{ steps.wails.outputs.version }}）"
+          # 大括号不能省：macOS 的 /bin/bash 是 3.2，变量名后紧跟中文全角字符时
+          # 它会把该字符的首字节并进变量名，于是 `$got（` 被解析成一个叫 "got<乱码>"
+          # 的未定义变量，在 set -u 下直接 "unbound variable" 退出。
+          # Linux 的 bash 5.x 解析正确，所以只有 macOS 这条会挂。
+          echo "wails3 = ${got}（需要 ${{ steps.wails.outputs.version }}）"
           if [ "$got" != "${{ steps.wails.outputs.version }}" ]; then
             echo "::error::wails3 CLI 版本不匹配：$got != ${{ steps.wails.outputs.version }}"
             exit 1
