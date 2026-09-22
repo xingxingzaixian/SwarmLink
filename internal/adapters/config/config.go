@@ -116,7 +116,9 @@ func Default() *Config {
 	c.Network.DenyInterfaces = []string{"utun*", "vmnet*", "vboxnet*", "docker*"}
 	c.Network.EnableMulticast = false
 
-	c.Discovery.AnnounceInterval = Duration(5 * time.Second)
+	// 45s ± 33%（见 udp.DefaultConfig）→ 实际 30~60s。正常退出会发 BYE，
+	// 因此这个周期只决定「崩溃后多久被发现」，不决定「关闭后多久变离线」。
+	c.Discovery.AnnounceInterval = Duration(45 * time.Second)
 	c.Discovery.PeerTTL = Duration(300 * time.Second)
 	c.Discovery.MaxPeers = 512        // 全局约 200 节点，留 2.5× 余量
 	c.Discovery.MaxPeerListSize = 256 // 单次响应即可覆盖全量 200 条目（ADR-010）

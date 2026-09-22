@@ -94,6 +94,14 @@ type Announcement struct {
 	// 它由本地网络栈给出，不是对端声明，因此不参与签名，
 	// 也不会被对端伪造 —— 目录里的可拨号地址必须以它为准。
 	ObservedIP string
+
+	// Leaving 表示这是一条「我要下线了」的通告（BYE），而不是「我在线」。
+	//
+	// 它由 UDP 报文【类型】表达（protocol.UDPTypeBye），不占线格式字段、
+	// 不参与签名：签名只证明「是同一个人发的」，「我要走了」这层语义由
+	// 报文类型承载就足够了 —— 而且旧版本客户端遇到未知类型会直接忽略，
+	// 不会把一条告别误当成在线刷新。
+	Leaving bool
 }
 
 // announceDomain 是 ANNOUNCE 签名的域分隔串。

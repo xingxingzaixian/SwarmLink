@@ -44,10 +44,16 @@ type Config struct {
 }
 
 // DefaultConfig 返回默认配置。
+//
+// 通告周期 45s ± 33% → 实际落在 30~60s：局域网上几十个节点时，
+// 这个量级既能让新节点在一分钟内被发现，又把纯保活流量压到可忽略
+// （对比 5s 一轮：200 节点 ≈ 40 pkt/s 的常驻噪声，换来的只是「更早几秒被看到」）。
+// 代价是「对方异常掉线」的感知变慢，因此配了 BYE 主动下线（见 UDPTypeBye）——
+// 正常关闭立即通知，只有崩溃/断电才回退到 TTL 兜底。
 func DefaultConfig() Config {
 	return Config{
-		AnnounceInterval: 5 * time.Second,
-		JitterRatio:      0.2,
+		AnnounceInterval: 45 * time.Second,
+		JitterRatio:      0.33,
 		DenyInterfaces:   []string{"utun*", "vmnet*", "vboxnet*", "docker*"},
 	}
 }
@@ -73,6 +79,9 @@ type Broadcaster struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// stopOnce 保证 Stop 只完整执行一次：BYE 只能发一次（发完就退出了），
+	// 重复执行会变成「已经下线了还在广播」的噪声。
+	stopOnce sync.Once
 }
 
 var _ ports.DiscoveryStrategy = (*Broadcaster)(nil)
@@ -134,20 +143,26 @@ func (b *Broadcaster) Start(ctx context.Context, sink func(peer.Announcement)) e
 	return nil
 }
 
-// Stop 停止发现并关闭 socket。
+// Stop 先宣告下线（BYE），再停止发现并关闭 socket。
+//
+// 顺序不能反：BYE 要趁 socket 与网卡信息都还在的时候发出去。它是
+// 「优雅退出」与「崩溃」之间的唯一区别 —— 没有它，对端只能等 TTL 过期。
 func (b *Broadcaster) Stop() error {
-	if b.cancel != nil {
-		b.cancel()
-	}
-	if b.conn != nil {
-		_ = b.conn.Close()
-	}
-	done := make(chan struct{})
-	go func() { b.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
+	b.stopOnce.Do(func() {
+		b.sendByes()
+		if b.cancel != nil {
+			b.cancel()
+		}
+		if b.conn != nil {
+			_ = b.conn.Close()
+		}
+		done := make(chan struct{})
+		go func() { b.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
 	return nil
 }
 
@@ -202,22 +217,13 @@ func (b *Broadcaster) recvLoop() {
 		}
 
 		switch typ {
-		case protocol.UDPTypeAnnounce:
-			var w protocol.AnnounceWire
-			if protocol.DecodeJSON(body, &w) != nil {
+		case protocol.UDPTypeAnnounce, protocol.UDPTypeBye:
+			a, ok := b.decodeAnnounce(body)
+			if !ok {
 				continue
 			}
-			a, err := w.Announcement()
-			if err != nil {
-				continue
-			}
-			// 自发现过滤：UDP 广播默认回环到自己
-			if a.NodeID == b.kp.NodeID() {
-				continue
-			}
-			if !identity.Verify(a.PublicKey, a.SigningBytes(), a.Sig) {
-				continue
-			}
+			// 语义差别只在这里：BYE 表示对方正在退出，接收方应立即判离线。
+			a.Leaving = typ == protocol.UDPTypeBye
 			a.Source = peer.SourceBroadcast
 			if src != nil {
 				a.ObservedIP = src.IP.String()
@@ -232,25 +238,80 @@ func (b *Broadcaster) recvLoop() {
 	}
 }
 
+// decodeAnnounce 解析并验签一条 ANNOUNCE / BYE 载荷。
+//
+// 两者载荷完全同构（BYE 也带签名），因此共用这一条校验路径 ——
+// 若是给 BYE 单独写一套解析，最可能漏掉的就是验签：那会让任何人
+// 凭一个伪造的 BYE 把别人从节点列表里踢下线。
+func (b *Broadcaster) decodeAnnounce(body []byte) (peer.Announcement, bool) {
+	var w protocol.AnnounceWire
+	if protocol.DecodeJSON(body, &w) != nil {
+		return peer.Announcement{}, false
+	}
+	a, err := w.Announcement()
+	if err != nil {
+		return peer.Announcement{}, false
+	}
+	// 自发现过滤：UDP 广播默认回环到自己
+	if a.NodeID == b.kp.NodeID() {
+		return peer.Announcement{}, false
+	}
+	if !identity.Verify(a.PublicKey, a.SigningBytes(), a.Sig) {
+		return peer.Announcement{}, false
+	}
+	return a, true
+}
+
 func (b *Broadcaster) getSink() func(peer.Announcement) {
 	b.sinkMu.RLock()
 	defer b.sinkMu.RUnlock()
 	return b.sink
 }
 
+// byeRounds 是 BYE 的重发次数。
+//
+// UDP 不保证送达，而这是节点发出的【最后一个】报文 —— 退出之后就再也没有
+// 下一次了，因此值得多发两遍（间隔 20ms）。三遍足以覆盖单个报文丢失，
+// 又不会让退出流程慢到用户能察觉。
+const byeRounds = 3
+
 // sendAnnounces 每个接口发一份 ANNOUNCE（各自携带该接口的 subnet，便于 P-2 检测）。
+func (b *Broadcaster) sendAnnounces() { b.broadcastTo(protocol.UDPTypeAnnounce) }
+
+// sendByes 向所有网卡宣告「我要下线了」。
+//
+// 只在真正参与过广播的节点上发：SeedOnly 模式本就不广播，
+// 未启动过（ifaces 为空）时也没有网卡可发。
+func (b *Broadcaster) sendByes() {
+	if b.cfg.SeedOnly || len(b.ifaces) == 0 {
+		return
+	}
+	// 打一行日志：退出流程出问题时，「到底有没有发出下线通知」是第一个要确认的事实。
+	// 不重复打 node_id —— logger 上下文里已经有了。
+	if b.lg != nil {
+		b.lg.Info("broadcast bye", "interfaces", len(b.ifaces), "rounds", byeRounds)
+	}
+	for i := 0; i < byeRounds; i++ {
+		b.broadcastTo(protocol.UDPTypeBye)
+		if i < byeRounds-1 {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+// broadcastTo 给每个参与发现的网卡发一份指定类型的通告报文。
 //
 // 目标端口取 cfg.AnnouncePorts（通常是基准端口的整个回退区间），而不是只发
 // 自己绑定的那个：否则「某台机器端口被占而回退到 2426」后，仍按 2425 广播的
 // 节点永远到不了它。端口上没有监听者时会收到 ICMP 不可达 —— 每次都新建
 // socket 且忽略写错误，因此不会出现连接被置为错误态的连带问题。
-func (b *Broadcaster) sendAnnounces() {
+func (b *Broadcaster) broadcastTo(typ byte) {
 	targets := b.cfg.AnnouncePorts
 	if len(targets) == 0 {
 		targets = []int{b.port}
 	}
 	for _, iface := range b.ifaces {
-		payload, err := protocol.EncodeUDP(protocol.UDPTypeAnnounce, protocol.NewAnnounceWire(b.buildAnnounce(iface.SubnetString())))
+		payload, err := protocol.EncodeUDP(typ, protocol.NewAnnounceWire(b.buildAnnounce(iface.SubnetString())))
 		if err != nil {
 			continue
 		}

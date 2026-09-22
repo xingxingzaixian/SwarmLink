@@ -100,6 +100,12 @@ const (
 	UDPTypePeerListReq  byte = 0x02
 	UDPTypePeerListResp byte = 0x03
 	UDPTypeSeedProbe    byte = 0x04
+	// UDPTypeBye 是「我要下线了」的通告：载荷与 ANNOUNCE 同构（同样带签名），
+	// 接收方据此立即把该节点标记为离线，而不必等 TTL 过期。
+	//
+	// 单独立一个类型而不是在 ANNOUNCE 里加标志位：旧版本客户端对未知类型
+	// 会直接丢弃，从而【不会】把一条告别误当成在线刷新 —— 这正是要防的。
+	UDPTypeBye byte = 0x05
 )
 
 // TypeName 返回类型的可读名（日志用）。

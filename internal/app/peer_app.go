@@ -62,6 +62,25 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 	}
 	now := a.clk.Now()
 
+	// 告别报文（BYE）：对方正在正常退出，立即判离线，不等 TTL。
+	// 这是「优雅退出」（秒级可见）与「崩溃/断电」（等 TTL）的区别所在。
+	if an.Leaving {
+		if err := a.dir.MarkOffline(an.NodeID, now); err != nil {
+			return err
+		}
+		if a.lg != nil {
+			// 用 peer_id 而不是 node_id：logger 的上下文字段里已经有自己的 node_id 了
+			a.lg.Info("peer left", "peer_id", an.NodeID.String())
+		}
+		if a.bus != nil {
+			a.bus.Publish(eventbus.TopicPeerOffline, eventbus.PeerOffline{
+				NodeID: an.NodeID.String(),
+				Reason: "leave",
+			})
+		}
+		return nil
+	}
+
 	prev, exists := a.dir.Get(an.NodeID)
 
 	// 「节点在线」由 announce 维护；「连接可用」由 tcp 层维护，两者互不覆盖。
