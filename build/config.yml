@@ -52,7 +52,14 @@ dev_mode:
       - "*.ts" # The frontend directory will be excluded entirely by the setting above.
     git_ignore: true
   executes:
-    - cmd: wails3 build DEV=true
+    # `-tags wails` 不能省：入口 main_wails.go 带 `//go:build wails`，不带这个 tag 时
+    # 根目录【一个 Go 文件都不剩】，dev 构建会直接以
+    #   "build constraints exclude all Go files in <repo>"
+    # 失败，然后整个 wails3 dev 进程退出 —— 表现就是"dev 跑不起来"。
+    # 开发构建【不能】带 production tag（注意这里确实没有）：assetserver 的
+    # build_dev.go 是 `//go:build !production`，带上 production 就丢失
+    # FRONTEND_DEVSERVER_URL 支持，界面会去读嵌入的旧 dist，热更新静默失效。
+    - cmd: wails3 build -tags wails DEV=true
       type: blocking
     - cmd: wails3 task common:dev:frontend
       type: background
