@@ -53,6 +53,56 @@ type recordingSession struct {
 	acked bool
 }
 
+// ackEagerSession + ackEagerConns：模拟「对端在本端发送返回【之前】就确认了」。
+//
+// 这不是造出来的极端情况，而是同机回环下的常态：对端在几百微秒内就回 ACK，
+// 而发送 RPC 还要经过 DTO 序列化 + Wails IPC 才回到前端。也就是说
+// chat:delivered 事件完全可能早于发送调用的返回 —— 谁先到是竞态，不确定。
+type ackEagerSession struct {
+	peer identity.NodeID
+	// chat 由测试在构造出 ChatApp 之后回填（ChatApp 又依赖本会话，只能两段式）。
+	chat *ChatApp
+}
+
+func (s *ackEagerSession) PeerID() identity.NodeID   { return s.peer }
+func (s *ackEagerSession) Recv() (protocol.Frame, error) {
+	return protocol.Frame{}, errors.New("test: 不读")
+}
+func (s *ackEagerSession) RTT() time.Duration { return 0 }
+func (s *ackEagerSession) Close() error       { return nil }
+
+func (s *ackEagerSession) Send(f protocol.Frame) error {
+	if f.Type != protocol.TypeChat || s.chat == nil {
+		return nil
+	}
+	var c protocol.Chat
+	if err := protocol.DecodeJSON(f.Payload, &c); err != nil {
+		return err
+	}
+	payload, err := protocol.EncodeJSON(protocol.ChatAck{MsgID: c.MsgID})
+	if err != nil {
+		return err
+	}
+	// 同步走完 ACK 处理：送达事件在 Send 返回前就已发布
+	return s.chat.HandleChatAck(s, protocol.New(protocol.TypeChatAck, payload))
+}
+
+type ackEagerConns struct{ sess *ackEagerSession }
+
+func newAckEagerConns(peer identity.NodeID) *ackEagerConns {
+	return &ackEagerConns{sess: &ackEagerSession{peer: peer}}
+}
+
+func (c *ackEagerConns) Dial(context.Context, identity.NodeID, string) (ports.Session, error) {
+	return c.sess, nil
+}
+func (c *ackEagerConns) Accept(context.Context) (ports.Session, error) { return c.sess, nil }
+func (c *ackEagerConns) SessionOf(identity.NodeID) (ports.Session, bool) {
+	return c.sess, true
+}
+func (c *ackEagerConns) Broadcast(protocol.Frame, ...identity.NodeID) error { return nil }
+func (c *ackEagerConns) Close(identity.NodeID) error                       { return nil }
+
 func (s *recordingSession) PeerID() identity.NodeID { return s.peer }
 func (s *recordingSession) Send(f protocol.Frame) error {
 	if f.Type == protocol.TypeChatAck {

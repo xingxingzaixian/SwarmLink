@@ -114,6 +114,58 @@ func TestHandleChatAcceptsImageMessage(t *testing.T) {
 	}
 }
 
+// 送达事件可能早于「发送调用返回」—— 这是前端的顺序前提，不是假设。
+//
+// 本机测试两个实例时，对端在几百微秒内就回了 ACK，而发送调用还要经过
+// DTO 序列化 + Wails IPC 才回到前端。因此界面有可能先收到 chat:delivered、
+// 后拿到 SendMessage 的返回值（那个返回值里的 state 永远是 pending 快照）。
+//
+// 这条契约一旦被后端改掉（例如把事件延后到 RPC 返回之后再发），
+// 下面的断言会失败 —— 但更重要的是它记录了前端【必须】容忍两种顺序。
+func TestDeliveredEventMayArriveBeforeSendReturns(t *testing.T) {
+	clk := clock.New()
+	store := mem.NewMessages(clk)
+	bus := eventbus.New()
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	delivered := make([]string, 0, 1)
+	bus.Subscribe(eventbus.TopicChatDelivered, func(payload any) {
+		if ack, ok := payload.(protocol.ChatAck); ok {
+			delivered = append(delivered, ack.MsgID)
+		}
+	})
+
+	conns := newAckEagerConns(peerID)
+	capp := NewChatApp(self, store, conns, mem.NewPeers(clk), bus, clk, nil)
+	conns.sess.chat = capp
+
+	msg, err := capp.SendMessage(context.Background(), peerID, "在吗")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	if len(delivered) != 1 {
+		t.Fatalf("送达事件数 = %d，期望 1（对端已确认）", len(delivered))
+	}
+	if delivered[0] != msg.MsgID {
+		t.Errorf("事件 msg_id = %q，期望 %q", delivered[0], msg.MsgID)
+	}
+	// 关键：此刻发送调用刚返回，而事件【已经】发过了 ——
+	// 界面若等到返回值才把消息写进列表，这条 delivered 就永远追不上了。
+	if msg.State != message.StatePending {
+		t.Errorf("返回的 DTO state = %q，期望 pending 快照（这正是前端不能只依赖返回值的原因）", msg.State)
+	}
+
+	stored, ok := store.Get(msg.MsgID)
+	if !ok {
+		t.Fatal("消息未落库")
+	}
+	if stored.State != message.StateDelivered {
+		t.Errorf("落库 state = %q，期望 delivered", stored.State)
+	}
+}
+
 // 畸形/超限的图片消息必须被丢弃，且【仍然回 ACK】——
 // 不回 ACK 会让发送方按 outbox 策略无限重发同一条垃圾消息。
 func TestHandleChatDropsBrokenImageButStillAcks(t *testing.T) {

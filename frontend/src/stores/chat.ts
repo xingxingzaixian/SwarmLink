@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 
 import { getApi, type Conversation, type Group, type Message } from '../api'
 import { directConvId, isGroupId } from '../api/ids'
+import { createDeliveryLedger } from './delivery'
 import { usePeersStore } from './peers'
 
 /** 会话与消息状态。单聊与群聊共用同一套结构（conv_id 统一）。 */
@@ -21,6 +22,9 @@ export const useChatStore = defineStore('chat', () => {
   const activeConvId = ref('')
   const loading = ref(false)
   const error = ref('')
+
+  /** 送达状态账本：让「事件先到」与「消息先到」两种顺序都收敛到已完成。 */
+  const delivery = createDeliveryLedger()
 
   const activeMessages = computed(() => messagesByConv.value[activeConvId.value] ?? [])
   const activeConversation = computed(
@@ -112,12 +116,16 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function upsert(convId: string, m: Message): void {
+    // 进列表前先补齐送达状态：chat:delivered 可能比这条消息先到
+    // （如 SendMessage 的返回值还在 IPC 路上，对端的 ACK 就已经回来了），
+    // 那时事件找不到消息、只能被丢掉，全靠这里把状态补回来。
+    const msg = delivery.reconcile(m)
     const list = messagesByConv.value[convId] ?? []
-    const i = list.findIndex((x) => x.msgId === m.msgId)
+    const i = list.findIndex((x) => x.msgId === msg.msgId)
     if (i >= 0) {
-      list[i] = { ...list[i], ...m }
+      list[i] = { ...list[i], ...msg }
     } else {
-      list.push(m)
+      list.push(msg)
       list.sort((a, b) => a.sentAt - b.sentAt)
     }
     messagesByConv.value = { ...messagesByConv.value, [convId]: list }
@@ -200,6 +208,10 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 送达确认（由 chat:delivered 事件驱动）。 */
   function markDelivered(msgId: string): void {
+    // 先记账：这条消息可能还没进列表（事件早于发送返回值），
+    // 那就等 upsert 时由 reconcile 补上，否则气泡会一直停在「发送中」。
+    delivery.ack(msgId)
+
     for (const [convId, list] of Object.entries(messagesByConv.value)) {
       const i = list.findIndex((m) => m.msgId === msgId)
       if (i >= 0) {
