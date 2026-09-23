@@ -250,6 +250,59 @@ func main() {
 		win.Focus()
 	}
 
+	// 提示气泡：QQ 式「谁发来的、说了什么」。
+	//
+	// 为什么不用 tray.SetTooltip：Windows 下 Wails 走 NOTIFYICON_VERSION_4，
+	// 该模式会抑制标准 tooltip（实测悬停毫无反应）。这里用自建的原生提示框，
+	// 两种触发方式共用它：
+	//   - 鼠标悬停在图标上（NIN_POPUPOPEN / NIN_POPUPCLOSE，Wails 转发给
+	//     OnMouseEnter / OnMouseLeave）→ 按光标位置弹；
+	//   - 收到新消息主动弹 → 按通知区域位置弹（此时鼠标可能在屏幕任何地方）。
+	tip := notify.NewHoverTip()
+	defer tip.Close()
+
+	// resetHideTimer 让「收起提示」这件事只有一个来源，避免两处计时器互相打断。
+	resetHideTimer := func(d time.Duration) {
+		if hideTimer != nil {
+			hideTimer.Stop()
+		}
+		hideTimer = time.AfterFunc(d, tip.Hide)
+	}
+	stopHideTimer := func() {
+		if hideTimer != nil {
+			hideTimer.Stop()
+			hideTimer = nil
+		}
+	}
+	reportTipErr := func(err error) {
+		// 只报一次：提示框建不起来（无桌面）时会每次触发都失败，
+		// 逐次打日志只会把日志刷满。
+		tipWarn.Do(func() { slog.Warn("显示提示气泡失败", "err", err) })
+	}
+
+	showTip := func() { // 悬停：跟着光标
+		stopHideTimer()
+		if err := tip.Show(notifier.HoverText()); err != nil {
+			reportTipErr(err)
+		}
+	}
+	showPopup := func(text string) { // 新消息：弹在托盘上方，几秒后自动消失
+		stopHideTimer()
+		if err := tip.ShowNearNotificationArea(text); err != nil {
+			reportTipErr(err)
+			return
+		}
+		resetHideTimer(popupLinger)
+	}
+
+	// 鼠标离开时不立刻收起，而是延迟一点 —— 这不是为了动画好看。
+	//
+	// 托盘悬停有个恼人的时序：提示框弹出的瞬间，系统偶尔会先送来一个
+	// NIN_POPUPCLOSE（光标从图标「移到」了新出现的提示框上）。若立刻收起，
+	// 用户就永远看不到提示框。延迟一点，期间若又收到 ENTER 就取消收起。
+	tray.OnMouseEnter(showTip)
+	tray.OnMouseLeave(func() { resetHideTimer(hoverLinger) })
+
 	runActs := func(acts []capp.Act) {
 		for _, a := range acts {
 			switch a.Kind {
@@ -265,6 +318,8 @@ func main() {
 				tray.SetIcon(notify.TrayIcon())
 			case capp.ActWindowTitle:
 				win.SetTitle(a.Text)
+			case capp.ActShowPopup:
+				showPopup(a.Text)
 			}
 			// ActHideToTray / ActAllowQuit 由关闭钩子消费，这里不处理。
 		}
@@ -287,39 +342,6 @@ func main() {
 		app.Event.Emit(wadapter.EventConfigChanged, nil)
 	}
 
-	// 悬停提示：QQ 式「谁发来的、说了什么」。
-	//
-	// 为什么不用 tray.SetTooltip：Windows 下 Wails 走 NOTIFYICON_VERSION_4，
-	// 该模式会抑制标准 tooltip（实测悬停毫无反应）。这里用自建的原生提示框，
-	// 由 NIN_POPUPOPEN / NIN_POPUPCLOSE 驱动 —— Wails 把这两个事件转发给
-	// OnMouseEnter / OnMouseLeave。
-	tip := notify.NewHoverTip()
-	defer tip.Close()
-
-	showTip := func() {
-		if hideTimer != nil {
-			hideTimer.Stop()
-			hideTimer = nil
-		}
-		if err := tip.Show(notifier.HoverText()); err != nil {
-			// 只报一次：提示框建不起来（无桌面）时会每次悬停都失败，
-			// 逐次打日志只会把日志刷满。
-			tipWarn.Do(func() { slog.Warn("显示悬停提示失败", "err", err) })
-		}
-	}
-	// 鼠标离开时不立刻收起，而是延迟一点 —— 这不是为了动画好看。
-	//
-	// 托盘悬停有个恼人的时序：提示框弹出的瞬间，系统偶尔会先送来一个
-	// NIN_POPUPCLOSE（光标从图标「移到」了新出现的提示框上）。若立刻收起，
-	// 用户就永远看不到提示框。延迟 250ms，期间若又收到 ENTER 就取消收起。
-	tray.OnMouseEnter(showTip)
-	tray.OnMouseLeave(func() {
-		if hideTimer != nil {
-			hideTimer.Stop()
-		}
-		hideTimer = time.AfterFunc(250*time.Millisecond, tip.Hide)
-	})
-
 	menu := app.NewMenu()
 	menu.Add("显示主窗口").OnClick(func(*application.Context) { showWindow() })
 	// checkbox 的 checked 状态由 Wails 在回调【之前】翻转，
@@ -332,7 +354,6 @@ func main() {
 	trayItem.OnClick(func(*application.Context) {
 		setNotifyOption(notifyOptTray, trayItem.Checked())
 	})
-	addDevMenuItems(menu, notifier, runActs, showTip) // 仅 DEV 构建：见 dev_notify_menu.go
 	menu.AddSeparator()
 	menu.Add("退出").OnClick(func(*application.Context) { app.Quit() })
 	tray.SetMenu(menu)
@@ -413,4 +434,13 @@ type notifyOption int
 const (
 	notifyOptSound notifyOption = iota
 	notifyOptTray
+)
+
+const (
+	// hoverLinger 是鼠标离开图标后提示框延迟收起的时间。
+	// 不能立刻收：提示框刚弹出时系统可能先给一个 NIN_POPUPCLOSE，
+	// 立刻收就等于「永远看不到」（详见 OnMouseLeave 处的说明）。
+	hoverLinger = 250 * time.Millisecond
+	// popupLinger 是新消息气泡停留的时长：够看清「谁发来的」，又不至于烦人。
+	popupLinger = 4 * time.Second
 )

@@ -38,9 +38,9 @@ type HoverTip struct {
 	// wake 是一个自动重置事件：投递命令后唤醒泵线程。
 	wake uintptr
 
-	mu    sync.Mutex
-	lastW int
-	lastH int
+	mu           sync.Mutex
+	lastX, lastY int
+	lastW, lastH int
 }
 
 // LastSize 返回最近一次成功显示时提示框的像素尺寸（尚未显示或建不出来时为 0,0）。
@@ -54,11 +54,32 @@ func (t *HoverTip) LastSize() (int, int) {
 	return t.lastW, t.lastH
 }
 
+// LastRect 返回最近一次成功显示时提示框的屏幕矩形（left, top, right, bottom）。
+//
+// 与 LastSize 一样只为测试存在：主动弹出的气泡位置是我们自己算的
+// （通知区域上方 + 夹取进屏幕），算错就会出现「消息来了，气泡在屏幕外」，
+// 同样是「什么都没报错但用户什么都看不到」。
+func (t *HoverTip) LastRect() (int, int, int, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastX, t.lastY, t.lastX + t.lastW, t.lastY + t.lastH
+}
+
+// screenSize 返回主显示器尺寸（测试里用来断言气泡没有越界）。
+func screenSize() (int, int) {
+	sw, _, _ := procGetSystemMetric.Call(smCxScreen)
+	sh, _, _ := procGetSystemMetric.Call(smCyScreen)
+	return int(sw), int(sh)
+}
+
 type hoverCmd struct {
-	text  string
-	hide  bool
-	close bool
-	reply chan error
+	text string
+	// nearTray 为真时按「通知区域上方」摆放（主动弹出的新消息气泡）；
+	// 为假时按光标位置摆放（鼠标悬停）。
+	nearTray bool
+	hide     bool
+	close    bool
+	reply    chan error
 }
 
 var (
@@ -82,6 +103,10 @@ var (
 
 	// 用于记录显示后的真实尺寸（见 HoverTip.LastSize 的说明）
 	procGetWindowRect = hoverUser32.NewProc("GetWindowRect")
+	// 用于给「主动弹出」找通知区域（托盘图标区）的位置
+	procFindWindowW     = hoverUser32.NewProc("FindWindowW")
+	procFindWindowExW   = hoverUser32.NewProc("FindWindowExW")
+	procGetSystemMetric = hoverUser32.NewProc("GetSystemMetrics")
 )
 
 const (
@@ -115,6 +140,15 @@ const (
 	hoverPmRemove   = 0x0001
 	hoverQsAllInput = 0x04FF
 	hoverInfinite   = 0xFFFFFFFF
+
+	// 主动弹出（新消息气泡）时的摆放参数
+	smCxScreen = 0
+	smCyScreen = 1
+	// popupGapY 是气泡与通知区域之间的留白：太低会盖住任务栏，太高显得没关联
+	popupGapY = 120
+	// popupMaxW 是估算的提示框宽度，仅用于夹取摆放位置（显示后会按实测尺寸再夹一次）
+	popupMaxW  = 360
+	screenEdge = 8
 
 	// 与 tooltip 控件通信的消息号（WM_USER = 0x0400）。
 	// 注意 ANSI 版与 Unicode 版是两个不同的号（ADDTOOLA=+4 / ADDTOOLW=+50），
@@ -188,11 +222,21 @@ func NewHoverTip() *HoverTip {
 	return t
 }
 
-// Show 在鼠标当前位置弹出提示框，并等着它真的弹出来（返回失败原因）。
-func (t *HoverTip) Show(text string) error {
+// Show 在鼠标当前位置弹出提示框（鼠标悬停用），并等着它真的弹出来。
+func (t *HoverTip) Show(text string) error { return t.show(hoverCmd{text: text}) }
+
+// ShowNearNotificationArea 把提示框弹在通知区域（托盘图标区）正上方，
+// 用于【收到消息时主动弹出】—— 此时鼠标可能在屏幕任何地方，
+// 因此不能像悬停那样依赖光标位置，必须自己找托盘。
+func (t *HoverTip) ShowNearNotificationArea(text string) error {
+	return t.show(hoverCmd{text: text, nearTray: true})
+}
+
+func (t *HoverTip) show(cmd hoverCmd) error {
 	reply := make(chan error, 1)
+	cmd.reply = reply
 	select {
-	case t.cmds <- hoverCmd{text: text, reply: reply}:
+	case t.cmds <- cmd:
 		t.signal()
 	case <-t.done:
 		return nil // 已关闭：退出路径上静默忽略
@@ -284,8 +328,9 @@ func (t *HoverTip) loop() {
 				if cmd.hide {
 					w.hide()
 				} else {
-					err = w.show(cmd.text)
+					err = w.show(cmd.text, cmd.nearTray)
 					t.mu.Lock()
+					t.lastX, t.lastY = w.sizeX, w.sizeY
 					t.lastW, t.lastH = w.sizeW, w.sizeH
 					t.mu.Unlock()
 				}
@@ -307,11 +352,12 @@ type hoverWindow struct {
 	added  bool
 	failed error // 首次失败后不再重试，避免每次悬停都白折腾
 
-	// 最近一次显示的尺寸（供 HoverTip.LastSize 暴露给测试）
+	// 最近一次显示的位置与尺寸（供 HoverTip.LastSize / LastRect 暴露给测试）
+	sizeX, sizeY int
 	sizeW, sizeH int
 }
 
-func (w *hoverWindow) show(text string) error {
+func (w *hoverWindow) show(text string, nearTray bool) error {
 	if w.failed != nil {
 		return w.failed
 	}
@@ -331,6 +377,26 @@ func (w *hoverWindow) show(text string) error {
 		procSendMessageW.Call(w.hwnd, ttmUpdateTipTextW, 0, uintptr(unsafe.Pointer(&w.info)))
 	}
 
+	anchor := w.anchor(nearTray)
+	// MAKELPARAM：低 16 位 X、高 16 位 Y（TTF_ABSOLUTE 下按屏幕坐标解释）
+	procSendMessageW.Call(w.hwnd, ttmTrackPosition, 0, packPoint(anchor))
+
+	if ret, _, _ := procSendMessageW.Call(w.hwnd, ttmTrackActivate, 1, uintptr(unsafe.Pointer(&w.info))); ret == 0 {
+		w.failed = errors.New("notify: TTM_TRACKACTIVATE 失败")
+		return w.failed
+	}
+
+	// 记下真实尺寸：调用全部成功但窗口塌成几个像素，是这套 API 最阴的失败方式
+	w.measure()
+	w.clampOnScreen()
+	return nil
+}
+
+// anchor 计算提示框左上角的落点。
+func (w *hoverWindow) anchor(nearTray bool) hoverPoint {
+	if nearTray {
+		return trayAnchor()
+	}
 	var pt hoverPoint
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 	// 向左上偏移，让提示框别盖住光标/托盘图标（见 hoverOffsetX/Y 的说明）
@@ -341,21 +407,94 @@ func (w *hoverWindow) show(text string) error {
 	if y < 0 {
 		y = 0
 	}
+	return hoverPoint{X: x, Y: y}
+}
 
-	// MAKELPARAM：低 16 位 X、高 16 位 Y（TTF_ABSOLUTE 下按屏幕坐标解释）
-	pos := uintptr(uint16(x)) | uintptr(uint16(y))<<16
-	procSendMessageW.Call(w.hwnd, ttmTrackPosition, 0, pos)
-
-	if ret, _, _ := procSendMessageW.Call(w.hwnd, ttmTrackActivate, 1, uintptr(unsafe.Pointer(&w.info))); ret == 0 {
-		w.failed = errors.New("notify: TTM_TRACKACTIVATE 失败")
-		return w.failed
-	}
-
-	// 记下真实尺寸：调用全部成功但窗口塌成几个像素，是这套 API 最阴的失败方式
+// measure 读取窗口的真实位置与尺寸。
+func (w *hoverWindow) measure() {
 	var r hoverRect
 	procGetWindowRect.Call(w.hwnd, uintptr(unsafe.Pointer(&r)))
+	w.sizeX, w.sizeY = int(r.Left), int(r.Top)
 	w.sizeW, w.sizeH = int(r.Right-r.Left), int(r.Bottom-r.Top)
-	return nil
+}
+
+// clampOnScreen 把提示框整体拉回屏幕内。
+//
+// 工具提示控件自己也会做调整，但它的策略（往哪边翻）不可控；主动弹出的气泡
+// 出现在屏幕右下角，一旦越界就可能被翻到任务栏下面去。这里按实测尺寸显式夹一次。
+func (w *hoverWindow) clampOnScreen() {
+	if w.sizeW <= 0 || w.sizeH <= 0 {
+		return
+	}
+	var r hoverRect
+	procGetWindowRect.Call(w.hwnd, uintptr(unsafe.Pointer(&r)))
+	l, t := int(r.Left), int(r.Top)
+	nl, nt := l, t
+
+	sw, _, _ := procGetSystemMetric.Call(smCxScreen)
+	sh, _, _ := procGetSystemMetric.Call(smCyScreen)
+	if nl+w.sizeW > int(sw)-screenEdge {
+		nl = int(sw) - screenEdge - w.sizeW
+	}
+	if nl < screenEdge {
+		nl = screenEdge
+	}
+	if nt+w.sizeH > int(sh)-screenEdge {
+		nt = int(sh) - screenEdge - w.sizeH
+	}
+	if nt < screenEdge {
+		nt = screenEdge
+	}
+	if nl == l && nt == t {
+		return
+	}
+	procSendMessageW.Call(w.hwnd, ttmTrackPosition, 0,
+		packPoint(hoverPoint{X: int32(nl), Y: int32(nt)}))
+	w.measure()
+}
+
+func packPoint(p hoverPoint) uintptr {
+	return uintptr(uint16(p.X)) | uintptr(uint16(p.Y))<<16
+}
+
+// trayAnchor 计算「主动弹出」的落点：通知区域（托盘图标区）正上方。
+//
+// 悬停时可以直接用光标位置，但主动弹气泡时鼠标可能在屏幕任何地方，
+// 因此必须自己找托盘：Shell_TrayWnd → TrayNotifyWnd。找不到（非标准 shell）
+// 就退到主屏右下角，宁可位置差一点也别不弹。
+func trayAnchor() hoverPoint {
+	sw, _, _ := procGetSystemMetric.Call(smCxScreen)
+	sh, _, _ := procGetSystemMetric.Call(smCyScreen)
+
+	trayCls, _ := syscall.UTF16PtrFromString("Shell_TrayWnd")
+	notifyCls, _ := syscall.UTF16PtrFromString("TrayNotifyWnd")
+	tray, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(trayCls)))
+	var r hoverRect
+	found := false
+	if tray != 0 {
+		if notify, _, _ := procFindWindowExW.Call(tray, 0, uintptr(unsafe.Pointer(notifyCls)), 0); notify != 0 {
+			if ok, _, _ := procGetWindowRect.Call(notify, uintptr(unsafe.Pointer(&r))); ok != 0 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		return hoverPoint{X: int32(sw) - popupMaxW - screenEdge, Y: int32(sh) - popupGapY - 60}
+	}
+
+	x := int(r.Left)
+	y := int(r.Top) - popupGapY
+	// 任务栏在屏幕上方时，通知区域上边没有空间 → 改放到它下方
+	if y < screenEdge {
+		y = int(r.Bottom) + screenEdge
+	}
+	if x+popupMaxW > int(sw)-screenEdge {
+		x = int(sw) - screenEdge - popupMaxW
+	}
+	if x < screenEdge {
+		x = screenEdge
+	}
+	return hoverPoint{X: int32(x), Y: int32(y)}
 }
 
 func (w *hoverWindow) hide() {

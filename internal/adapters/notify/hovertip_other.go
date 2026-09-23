@@ -15,6 +15,9 @@ func NewHoverTip() *HoverTip { return &HoverTip{} }
 // Show 在非 Windows 平台是空操作。
 func (t *HoverTip) Show(string) error { return nil }
 
+// ShowNearNotificationArea 在非 Windows 平台是空操作。
+func (t *HoverTip) ShowNearNotificationArea(string) error { return nil }
+
 // Hide 在非 Windows 平台是空操作。
 func (t *HoverTip) Hide() {}
 

@@ -64,7 +64,7 @@ type ackEagerSession struct {
 	chat *ChatApp
 }
 
-func (s *ackEagerSession) PeerID() identity.NodeID   { return s.peer }
+func (s *ackEagerSession) PeerID() identity.NodeID { return s.peer }
 func (s *ackEagerSession) Recv() (protocol.Frame, error) {
 	return protocol.Frame{}, errors.New("test: 不读")
 }
@@ -101,7 +101,7 @@ func (c *ackEagerConns) SessionOf(identity.NodeID) (ports.Session, bool) {
 	return c.sess, true
 }
 func (c *ackEagerConns) Broadcast(protocol.Frame, ...identity.NodeID) error { return nil }
-func (c *ackEagerConns) Close(identity.NodeID) error                       { return nil }
+func (c *ackEagerConns) Close(identity.NodeID) error                        { return nil }
 
 func (s *recordingSession) PeerID() identity.NodeID { return s.peer }
 func (s *recordingSession) Send(f protocol.Frame) error {

@@ -37,7 +37,7 @@ func (s *stubTransferRepo) FindResumable(identity.NodeID, string) (transfer.Job,
 
 func (s *stubTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error { return nil }
 
-func (s *stubTransferRepo) ListActive() ([]transfer.Job, error)         { return nil, nil }
+func (s *stubTransferRepo) ListActive() ([]transfer.Job, error)          { return nil, nil }
 func (s *stubTransferRepo) ListRecent(limit int) ([]transfer.Job, error) { return nil, nil }
 
 func (s *stubTransferRepo) PurgeFinished(keep int, olderThan time.Time) (int, error) {

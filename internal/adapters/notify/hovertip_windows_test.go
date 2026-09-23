@@ -57,6 +57,36 @@ func TestHoverTipPlumbing(t *testing.T) {
 	tip.Hide()
 }
 
+// 主动弹出的新消息气泡：位置由我们自己算（通知区域上方 + 夹进屏幕），
+// 算错的后果是「消息来了、气泡在屏幕外」——功能全在跑，用户什么都看不到。
+func TestTrayPopupIsSizedAndOnScreen(t *testing.T) {
+	tip := NewHoverTip()
+	defer tip.Close()
+
+	if err := tip.ShowNearNotificationArea("张三：晚上一起吃饭吗\n共 3 条未读"); err != nil {
+		if errors.Is(err, errNoDesktop) {
+			t.Skipf("当前环境没有交互式桌面，跳过：%v", err)
+		}
+		t.Fatalf("ShowNearNotificationArea: %v", err)
+	}
+
+	w, h := tip.LastSize()
+	if w < 40 || h < 10 {
+		t.Fatalf("气泡尺寸 = %dx%d，小到看不见", w, h)
+	}
+
+	left, top, right, bottom := tip.LastRect()
+	sw, sh := screenSize()
+	if left < 0 || top < 0 || right > sw || bottom > sh {
+		t.Fatalf("气泡跑到屏幕外了：矩形 (%d,%d)-(%d,%d)，屏幕 %dx%d", left, top, right, bottom, sw, sh)
+	}
+	// 还应当在屏幕下半部分（贴着任务栏那侧），否则说明「通知区域上方」算错了
+	if top < sh/2 {
+		t.Errorf("气泡出现在屏幕上半部分（top=%d，屏高=%d），与「托盘上方」的预期不符", top, sh)
+	}
+	tip.Hide()
+}
+
 // 隐藏与关闭必须可重复调用、且顺序无关：托盘回调与退出路径都可能重复触发。
 func TestHoverTipHideAndCloseAreIdempotent(t *testing.T) {
 	tip := NewHoverTip()

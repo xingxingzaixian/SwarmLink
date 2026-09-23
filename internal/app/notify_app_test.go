@@ -70,6 +70,80 @@ func has(acts []Act, k ActKind) bool {
 	return false
 }
 
+// popupOf 取出「自动弹出提示」动作的文案。
+func popupOf(acts []Act) (string, bool) {
+	for _, a := range acts {
+		if a.Kind == ActShowPopup {
+			return a.Text, true
+		}
+	}
+	return "", false
+}
+
+// 收到新消息要【主动弹出】「谁发来的」，而不是等用户把鼠标移到托盘上（QQ 的做法）。
+func TestIncomingMessageEmitsPopup(t *testing.T) {
+	env, set := NotifyEnv{WindowVisible: false}, NotifySettings{}
+	n, _ := newNotifyFixtureNamed(t, &env, &set, names(map[string]string{testPeerHex: "张三"}))
+
+	acts := n.OnChatMessage(inboundFrom(t, testPeerHex, "你好", message.MsgTypeText))
+
+	text, ok := popupOf(acts)
+	if !ok {
+		t.Fatalf("新消息应产生自动弹出动作（动作=%v）", kinds(acts))
+	}
+	if text != "张三：你好" {
+		t.Errorf("弹出文案 = %q，期望 %q", text, "张三：你好")
+	}
+}
+
+// 不该打扰的场景一个弹出动作都不给：自己发的、正看着该会话、以及传输事件。
+//
+// 传输事件刻意不弹：它的「谁发来的」没有意义（HoverText 会退化成纯计数），
+// 为此在托盘上闪一个空气泡只会让人困惑。
+func TestNoPopupWhenSilent(t *testing.T) {
+	env, set := NotifyEnv{WindowVisible: true, WindowFocused: true, ActiveConvID: "c1"}, NotifySettings{}
+	n, _ := newNotifyFixtureNamed(t, &env, &set, nil)
+
+	// 正看着这个会话
+	if _, ok := popupOf(n.OnChatMessage(inboundFrom(t, testPeerHex, "你好", message.MsgTypeText))); ok {
+		t.Error("正看着该会话时不该弹提示")
+	}
+
+	// 自己发的
+	own := inboundFrom(t, testPeerHex, "你好", message.MsgTypeText)
+	own.Direction = message.DirectionOut
+	if _, ok := popupOf(n.OnChatMessage(own)); ok {
+		t.Error("自己发的消息不该弹提示")
+	}
+
+	// 传输事件（窗口隐藏，属于「该提示」的场景，但只闪烁/计数，不弹气泡）
+	hidden := NotifyEnv{WindowVisible: false}
+	n2, _ := newNotifyFixtureNamed(t, &hidden, &set, nil)
+	if _, ok := popupOf(n2.OnTransferError()); ok {
+		t.Error("传输事件不该弹「谁发来的」气泡")
+	}
+	if _, ok := popupOf(n2.OnTransferDone()); ok {
+		t.Error("传输事件不该弹「谁发来的」气泡")
+	}
+}
+
+// 连发多条时每次都要给出最新的弹出文案（气泡内容要跟着更新）。
+func TestPopupTextFollowsLatestMessage(t *testing.T) {
+	env, set := NotifyEnv{WindowVisible: false}, NotifySettings{}
+	n, _ := newNotifyFixtureNamed(t, &env, &set, names(map[string]string{testPeerHex: "张三"}))
+
+	n.OnChatMessage(inboundFrom(t, testPeerHex, "第一条", message.MsgTypeText))
+	acts := n.OnChatMessage(inboundFrom(t, testPeerHex, "第二条", message.MsgTypeText))
+
+	text, ok := popupOf(acts)
+	if !ok {
+		t.Fatal("第二条消息也应产生弹出动作")
+	}
+	if !strings.HasPrefix(text, "张三：第二条") {
+		t.Errorf("弹出文案 = %q，期望以最新那条开头", text)
+	}
+}
+
 // titleOf 取出窗口标题动作的文案。
 //
 // 未读数走窗口标题而不是托盘 tooltip：Windows 下 Wails 启用了

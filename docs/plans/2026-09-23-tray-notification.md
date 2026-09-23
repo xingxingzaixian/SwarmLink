@@ -1133,9 +1133,18 @@ Expected: 均通过（声音为空实现、托盘用 Wails 原生支持）
 8. **设置页文件是 `views/SettingsView.vue`**（不是计划里写的 `SettingsDialog.vue`，后者只是承载弹层与分页）；前端也**没有** `stores/settings`，设置项由该视图自己持有。
 9. **托盘 → 设置页的刷新**：新增 `ui.configRevision` 计数器，`config:changed` 时自增，设置页 watch 后**只回读那两个提示开关**（整份重载会冲掉用户没保存的种子编辑）。
 10. **未读数从托盘 tooltip 改到窗口标题**（`ActTooltip` → `ActWindowTitle`）：Windows 下 Wails 启用了 `NOTIFYICON_VERSION_4`，该系统模式会抑制标准 tooltip，实测悬停毫无反应（连初始的 `SwarmLink` 都不显示）。因此删掉 `tray.SetTooltip` 相关代码，改由 `win.SetTitle` 承载 `SwarmLink · N 条未读`；决策层的规则表与测试不变，只换了渲染位置。详见设计文档 §9。
+11. **功能落地后【移除了 DEV 专用的托盘菜单项】**：`dev_notify_menu.go` / `dev_notify_menu_prod.go` 及 `addDevMenuItems` 的调用点已删除（连同「测试提示（仅开发）」「预览悬停提示（仅开发）」）。
+    原因：悬停提示改为**收到消息主动弹出**之后，验提示不再需要假消息 —— 单聊里随便发一条真消息就能同时看到闪烁、提示音、托盘气泡与窗口标题；留着这个菜单项反而多出一套「构建标签 + 生产空实现」的维护面，且它伪造的未读状态会与真实状态混在一起（例如它造的未读会被焦点钩子清掉，容易让人误判成功能不生效）。
+    因此计划正文里所有「点『测试提示（仅开发）』」的验收步骤**均已失效**，手工验收改为用真实消息触发。生产构建本来就没有这些项，用户可见行为不变。
+10. **未读数从托盘 tooltip 改到窗口标题**（`ActTooltip` → `ActWindowTitle`）：Windows 下 Wails 启用了 `NOTIFYICON_VERSION_4`，该系统模式会抑制标准 tooltip，实测悬停毫无反应（连初始的 `SwarmLink` 都不显示）。因此删掉 `tray.SetTooltip` 相关代码，改由 `win.SetTitle` 承载 `SwarmLink · N 条未读`；决策层的规则表与测试不变，只换了渲染位置。详见设计文档 §9。
 11. **本轮踩到的工具坑（写给后来者）**：不要用 PowerShell 的 `Get-Content`/`-replace`/`WriteAllText` 去改含中文的 Go 文件 —— 它按 ANSI 读、按 UTF-8 写，会把中文双重编码成乱码（连 `fmt.Sprintf` 的格式串都会被破坏），而新文件不在 git 里、无法回滚。改代码一律用编辑工具。
 12. **悬停提示改为自建原生实现**（`internal/adapters/notify/hovertip_{windows,other}.go`）：Wails 的 `SetTooltip` 在 Windows 上无效（原因见设计文档 §9），而需求是「QQ 式：悬停看到是谁发来的」，只能自己做。用系统的 `tooltips_class32` 控件而非自绘窗口。落地时间踩到两个 Win32 坑，**都已写进代码注释**：
     - **`TOOLINFOW` 的 `cbSize` 必须是 64**：x64 下加上 `lpReserved` 就是 72，控件只接受它「认识」的尺寸，`TTM_ADDTOOLW` 返回 0 且**不给任何错误码**，表现为「悬停毫无反应」。用一次性探针遍历 6 种 cbSize 才定位到（72 拒绝 / 64 及更小接受）。
     - **窗口属于创建它的线程**：Go 的 goroutine 会在 OS 线程间迁移，实测「同一个 goroutine 里先 `CreateWindowEx` 再 `SendMessage`」会**永久阻塞**（测试挂了 10 分钟）。因此 `HoverTip` 自建专用线程（`LockOSThread` + `GetMessage` 泵 + 自动重置事件唤醒），所有窗口操作都在那条线程上，外部调用者不必关心线程。
     - 决策层新增 `HoverText()`（拉取语义）与「最近发送者」状态；`ActTooltip` 早已改名为 `ActWindowTitle`（见第 10 条），两者并存：标题给计数，悬停给「谁+什么内容」。
     - 另附：`write_to_file` 在 Windows 上会写成 CRLF，而本仓库既有文件是 LF → 新建文件会被 `gofmt -l` 标记。已把本次新建文件按字节归一为 LF（不是文本替换，是纯字节 CRLF→LF），并修掉了 `services_test.go` 一处真实的 gofmt 对齐问题。
+13. **悬停提示的三个平台坑（都靠一次性探针定位，不是猜的）+ 收到消息主动弹出**：
+    - **系统不发悬停事件，除非图标有非空 tooltip**：`NIN_POPUPOPEN` 只在「有一份本该显示的提示可被替代」时才发。应用一度删掉了 `tray.SetTooltip`，结果悬停一个事件都收不到；加回那行（虽然它在界面上看不到）后事件立刻到达。**删掉它会静默失效**，代码里已写明。
+    - **提示框不能盖住光标/托盘图标**：弹在光标处 → 光标「移到」新窗口上 → shell 判定离开图标 → 立刻 `NIN_POPUPCLOSE`（实测 ENTER 之后 29ms 就是 LEAVE）。改为弹在光标**上方 110px** 后，悬停时长恢复成用户的真实停留时间（实测 4.2s / 10s）。
+    - **`TTM_SETMAXTIPWIDTH` 会让提示框塌成 6×4**：它把控件切进自动换行模式，换行宽度取自 tool 矩形，而跟踪型 tool 的矩形是退化的。同一段代码只改这一项：设了 → 6×4（文字溢出边框，看不见）；不设 → 189×21。**所有 Win32 调用都返回成功、窗口 visible=1、日志无错误**，只能靠断言尺寸发现 —— 已补 `TestHoverTipPlumbing` 的尺寸断言，并把该常量加回去复验过（测试立刻红：`提示框尺寸 = 6x4`）。
+    - **新增「收到消息主动弹出」**：`ActShowPopup` 由决策层在入站消息时产生（传输事件刻意不弹），组合根用 `HoverTip.ShowNearNotificationArea` 弹在通知区域上方 4 秒。位置自己算（`Shell_TrayWnd` → `TrayNotifyWnd` → 其上 120px + 夹进屏幕），并有测试断言气泡**尺寸正常且不越界**。

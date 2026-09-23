@@ -176,7 +176,7 @@ func TestHandleChatDropsBrokenImageButStillAcks(t *testing.T) {
 	cases := map[string]string{
 		"不是 JSON":   "这是一段普通文字",
 		"base64 非法": `{"v":1,"mime":"image/jpeg","w":1,"h":1,"b64":"!!!bad!!!"}`,
-		"超出体积上限":  `{"v":1,"mime":"image/jpeg","w":1,"h":1,"b64":"` + huge + `"}`,
+		"超出体积上限":    `{"v":1,"mime":"image/jpeg","w":1,"h":1,"b64":"` + huge + `"}`,
 	}
 
 	for name, content := range cases {

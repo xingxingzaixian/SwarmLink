@@ -35,6 +35,14 @@ const (
 	// （窗口在任务栏时），且不依赖任何平台细节。
 	ActWindowTitle
 
+	// ActShowPopup 让组合根把 Text 作为「新消息气泡」主动弹在托盘附近。
+	//
+	// 与 ActWindowTitle 同时产生：标题给计数（常驻、可见于任务栏），
+	// 气泡给「谁发来的」（消息到达即弹、几秒后自动消失，QQ 的做法）。
+	// 位置由组合根决定：悬停时可以用光标位置，主动弹出时光标在别处，
+	// 必须自己去找通知区域。
+	ActShowPopup
+
 	ActHideToTray // 关闭请求 → 隐藏窗口、保持进程
 	ActAllowQuit  // 关闭请求 → 放行退出
 )
@@ -167,7 +175,9 @@ func (n *NotifyApp) OnChatMessage(m message.Message) []Act {
 	n.rememberSenderLocked(m)
 	acts := n.startFlashLocked(e)
 	acts = append(acts, n.soundActsLocked(s)...)
-	return append(acts, Act{Kind: ActWindowTitle, Text: n.titleLocked()})
+	acts = append(acts, Act{Kind: ActWindowTitle, Text: n.titleLocked()})
+	// 消息到达即主动弹「谁发来的」——不必等用户去悬停托盘
+	return append(acts, Act{Kind: ActShowPopup, Text: n.hoverTextLocked()})
 }
 
 // HoverText 是鼠标悬停在托盘图标上时要显示的内容（QQ 式：谁发来的、说了什么）。
