@@ -136,7 +136,9 @@ export function createMockApi(): SwarmApi {
     maxActiveConns: 32,
     idleTimeoutSec: 300,
     requireAuth: true,
-    encryption: 'off'
+    encryption: 'off',
+    notifySound: true,
+    notifyMinimizeToTray: true
   }
 
   const diagnostics: Diagnostics = {
@@ -299,6 +301,12 @@ export function createMockApi(): SwarmApi {
     },
     async downloadDir() {
       return settings.downloadDir
+    },
+    // 浏览器里没有托盘也没有提示决策，收下即可 ——
+    // 保留这个调用点是为了让「上报当前会话」这条链路在 mock 模式下
+    // 也被真实执行到（例如 watch 写错了会在这里报错）。
+    async setActiveConversation() {
+      // 空实现：mock 里没有提示决策，收下即可
     },
     async runSelfCheck(): Promise<SelfCheck> {
       const n = settings.seeds.length

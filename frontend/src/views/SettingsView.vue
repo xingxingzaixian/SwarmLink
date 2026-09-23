@@ -5,10 +5,13 @@
  * 不复用旧的整页布局：弹层里没有整屏可用，因此把动作（保存）做成吸底条，
  * 保证滚动到任何位置都能落盘，而不用先滚回顶部。
  */
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 
 import Icon from '../components/Icon.vue'
 import { getApi, type SelfCheck, type Settings } from '../api'
+import { useUiStore } from '../stores/ui'
+
+const ui = useUiStore()
 
 const settings = ref<Settings | null>(null)
 const interfaces = ref<string[]>([])
@@ -81,6 +84,27 @@ function lines(v: string): string[] {
   return v.split('\n').map((s) => s.trim()).filter(Boolean)
 }
 
+/**
+ * 托盘菜单改了配置 → 只回读那两个提示开关。
+ *
+ * 刻意不整份重载：用户可能正在编辑种子清单等字段，整份 load() 会把没保存的
+ * 输入冲掉。而提示开关没有「编辑中」状态（点一下即生效），回读是安全的。
+ */
+watch(
+  () => ui.configRevision,
+  async () => {
+    if (!settings.value) return
+    try {
+      const api = await getApi()
+      const fresh = await api.getSettings()
+      settings.value.notifySound = fresh.notifySound
+      settings.value.notifyMinimizeToTray = fresh.notifyMinimizeToTray
+    } catch {
+      /* 回读失败就维持现状，用户仍可手动保存 */
+    }
+  }
+)
+
 onMounted(load)
 </script>
 
@@ -104,6 +128,22 @@ onMounted(load)
             <input v-model="settings.autoOpen" type="checkbox" />
             <span>接收完成后自动打开</span>
           </label>
+        </section>
+
+        <section>
+          <h4>提示</h4>
+          <label class="check">
+            <input v-model="settings.notifySound" type="checkbox" />
+            <span>新消息提示音</span>
+          </label>
+          <label class="check">
+            <input v-model="settings.notifyMinimizeToTray" type="checkbox" />
+            <span>关闭时最小化到托盘</span>
+          </label>
+          <p class="note">
+            右键托盘图标也有这两项，与这里是同一份配置，改哪边都一样。
+            关掉提示音只影响声音，托盘图标闪烁与未读计数照常工作。
+          </p>
         </section>
 
         <section>

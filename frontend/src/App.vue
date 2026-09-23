@@ -14,7 +14,7 @@
  * 布局本身只决定「什么占据主视线的哪一块」，不做任何业务判断。
  * 所有跨栏联动（发文件后右栏切进度、左栏点人开会话）都走 store。
  */
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 import ChatView from './views/ChatView.vue'
 import ContactPanel from './components/ContactPanel.vue'
@@ -55,6 +55,29 @@ onMounted(async () => {
     void peers.refresh()
   }, 3000)
 })
+
+/**
+ * 把「用户正在看哪个会话」告诉 Go。
+ *
+ * 提示决策靠它区分「正看着这个会话来消息（不打扰）」与「别的会话来消息
+ * （响铃 + 闪烁）」—— 只有前端知道用户在看哪个会话，窗口焦点 Go 侧自己能读。
+ *
+ * 用 watch 而不是在 open() 里调用：切会话的路径不止一条（点联系人、点会话
+ * 列表、对方先开口自动建会话），挂在状态变化上就不会漏。
+ * 上报失败只当没发生：提示是附加能力，绝不能影响聊天本身。
+ */
+watch(
+  () => chat.activeConvId,
+  async (convId) => {
+    try {
+      const api = await getApi()
+      await api.setActiveConversation(convId ?? '')
+    } catch {
+      /* 忽略：没有托盘/提示决策的环境（浏览器 mock）也会走到这里 */
+    }
+  },
+  { immediate: true }
+)
 
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)

@@ -27,6 +27,7 @@
 import {
   ChatService,
   GroupService,
+  NotifyService,
   PeerService,
   SettingsService,
   TransferService
@@ -73,6 +74,9 @@ export const realApi: SwarmApi = {
   listInterfaces: async () => list(await SettingsService.ListInterfaces()),
   downloadDir: async () => SettingsService.DownloadDir(),
   runSelfCheck: async () => toSelfCheck(await SettingsService.RunSelfCheck()),
+  setActiveConversation: async (convId) => {
+    await NotifyService.SetActiveConversation(convId)
+  },
 
   sendMessage: async (peerId, text) => ChatService.SendMessage(peerId, text),
   history: async (peerId, limit, before) => list(await ChatService.History(peerId, limit, before)),

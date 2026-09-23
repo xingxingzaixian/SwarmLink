@@ -86,6 +86,21 @@ export const useUiStore = defineStore('ui', () => {
   const toast = ref('')
   let toastTimer: number | undefined
 
+  /**
+   * 配置被「非设置页」的入口改过的次数。
+   *
+   * 存在的理由：提示开关有两个入口（设置页、托盘菜单）。托盘改完后端会推
+   * config:changed，但设置页持有的是自己那份快照 —— 不重读就会出现
+   * 「设置页显示已关、实际还在响」，而用户接着点一次「保存」又会把托盘那次
+   * 改动覆盖回去。用一个自增计数把这次变化告诉设置页，比引入一个全局
+   * settings store 便宜得多。
+   */
+  const configRevision = ref(0)
+
+  function bumpConfigRevision(): void {
+    configRevision.value++
+  }
+
   function openPanel(kind: Exclude<PanelKind, ''>): void {
     panel.value = kind
   }
@@ -156,6 +171,8 @@ export const useUiStore = defineStore('ui', () => {
     toggleTheme,
     pathInputVisible,
     toast,
+    configRevision,
+    bumpConfigRevision,
     openPanel,
     closePanel,
     focusTransfer,

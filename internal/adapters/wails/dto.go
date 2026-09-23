@@ -198,6 +198,10 @@ type SettingsDTO struct {
 	IdleTimeoutSec  int      `json:"idleTimeoutSec"`
 	RequireAuth     bool     `json:"requireAuth"`
 	Encryption      string   `json:"encryption"`
+
+	// 提示行为（设置页与托盘菜单共用同一份配置，两个入口不会不一致）。
+	NotifySound          bool `json:"notifySound"`
+	NotifyMinimizeToTray bool `json:"notifyMinimizeToTray"`
 }
 
 // SelfCheckDTO 是部署前置条件（P-1 / P-2）自检结果。

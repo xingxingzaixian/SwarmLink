@@ -209,6 +209,9 @@ export function registerEvents(): void {
 
   on(EV.configChanged, () => {
     debug.push({ topic: 'config.changed', at: Date.now() })
+    // 提示开关也能从托盘菜单改：让打开着的设置页重新读一遍，
+    // 否则两处显示会不一致，用户再点一次保存还会把托盘那次改动覆盖掉。
+    useUiStore().bumpConfigRevision()
   })
 }
 

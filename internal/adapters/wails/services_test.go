@@ -82,8 +82,8 @@ func (r *memTransferRepo) FindResumable(identity.NodeID, string) (transfer.Job, 
 
 func (r *memTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error { return nil }
 
-func (r *memTransferRepo) ListActive() ([]transfer.Job, error)                 { return nil, nil }
-func (r *memTransferRepo) ListRecent(limit int) ([]transfer.Job, error)         { return nil, nil }
+func (r *memTransferRepo) ListActive() ([]transfer.Job, error)          { return nil, nil }
+func (r *memTransferRepo) ListRecent(limit int) ([]transfer.Job, error) { return nil, nil }
 func (r *memTransferRepo) PurgeFinished(keep int, olderThan time.Time) (int, error) {
 	return 0, nil
 }
@@ -254,11 +254,11 @@ func writeTestBMP(t *testing.T) string {
 func TestSendImageAcceptsGIFAndBMP(t *testing.T) {
 	cases := map[string]func(*testing.T) string{
 		"gif 保留动图类型": writeTestGIF,
-		"bmp 能解码":     writeTestBMP,
+		"bmp 能解码":    writeTestBMP,
 	}
 	wantMIME := map[string]string{
 		"gif 保留动图类型": "image/gif",
-		"bmp 能解码":     "image/jpeg", // BMP 没有值得保留的特性，统一转 JPEG
+		"bmp 能解码":    "image/jpeg", // BMP 没有值得保留的特性，统一转 JPEG
 	}
 
 	for name, make := range cases {
@@ -292,6 +292,39 @@ func TestSendImagePersistsImageDTO(t *testing.T) {
 	}
 	if _, err := message.DecodeInlineImage(dto.Content); err != nil {
 		t.Fatalf("DTO.content 不是合法的内联图片: %v", err)
+	}
+}
+
+// 前端上报的「当前会话」必须真的落到决策器的环境快照里。
+//
+// 这条一旦断了，表现是「用户正看着 A 会话，A 来消息却仍然响铃」——
+// 属于最容易被当成「功能没做对」的那种缺陷，因此单独锁一次。
+func TestNotifyServiceTracksActiveConversation(t *testing.T) {
+	got := ""
+	svc := &NotifyService{d: Deps{SetActiveConv: func(id string) { got = id }}}
+
+	if err := svc.SetActiveConversation("conv-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "conv-1" {
+		t.Fatalf("当前会话 = %q，期望 conv-1", got)
+	}
+
+	// 没有开着会话时前端会传空串：不能把它当错误。
+	if err := svc.SetActiveConversation(""); err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("空会话未生效：%q", got)
+	}
+}
+
+// 组合根没注入回调时不能 panic：NotifyService 是薄壳，
+// 缺注入只意味着「提示决策拿不到当前会话」，不该拖垮前端调用。
+func TestNotifyServiceWithoutCallbackIsSafe(t *testing.T) {
+	svc := &NotifyService{d: Deps{}}
+	if err := svc.SetActiveConversation("conv-1"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -357,9 +390,9 @@ func TestSendImageBytesWorks(t *testing.T) {
 func TestSendImageBytesRejectsBadPayload(t *testing.T) {
 	svc := newChatService(t)
 	cases := map[string]string{
-		"空数据":     "",
+		"空数据":       "",
 		"非法 base64": "这不是 base64",
-		"不是图片":    base64.StdEncoding.EncodeToString([]byte("plain text")),
+		"不是图片":      base64.StdEncoding.EncodeToString([]byte("plain text")),
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {

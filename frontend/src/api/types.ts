@@ -153,6 +153,10 @@ export interface Settings {
   idleTimeoutSec: number
   requireAuth: boolean
   encryption: string
+  /** 新消息 / 传输事件是否发声。 */
+  notifySound: boolean
+  /** 点关闭按钮时把窗口收进托盘而不是退出。 */
+  notifyMinimizeToTray: boolean
 }
 
 /** 前端可调用的后端能力。 */
@@ -162,6 +166,15 @@ export interface SwarmApi {
   saveSettings(s: Settings): Promise<string[]>
   listInterfaces(): Promise<string[]>
   downloadDir(): Promise<string>
+
+  /**
+   * 上报「用户当前正在看哪个会话」（没有打开会话时传空串）。
+   *
+   * 提示决策需要它来区分两种情形：正看着这个会话来消息 → 不打扰；
+   * 别的会话来消息 → 响铃 + 闪烁。窗口的可见性与焦点由 Go 侧直接读，
+   * 只有这一项前端才知道。
+   */
+  setActiveConversation(convId: string): Promise<void>
   /**
    * 部署前置条件自检（P-1 / P-2）。
    *

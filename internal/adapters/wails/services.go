@@ -59,17 +59,22 @@ type Deps struct {
 	// SeedSnapshot 由组合根注入（避免本包依赖 udp 适配器的具体类型）。
 	SeedSnapshot func() []SeedDTO
 
+	// SetActiveConv 由组合根注入：前端上报「用户正在看哪个会话」，
+	// 提示决策据此区分「正看着这个会话（不打扰）」与「别的会话来消息（要提示）」。
+	SetActiveConv func(convID string)
+
 	Cfg       *config.Config
 	ConfigDir string
 }
 
-// ServiceSet 是注册给 Wails 的五个服务。
+// ServiceSet 是注册给 Wails 的服务集合。
 type ServiceSet struct {
 	Settings *SettingsService
 	Chat     *ChatService
 	Transfer *TransferService
 	Peer     *PeerService
 	Group    *GroupService
+	Notify   *NotifyService
 }
 
 // NewServices 构造服务集合。
@@ -80,6 +85,7 @@ func NewServices(d Deps) *ServiceSet {
 		Transfer: &TransferService{d: d},
 		Peer:     &PeerService{d: d},
 		Group:    &GroupService{d: d},
+		Notify:   &NotifyService{d: d},
 	}
 }
 
@@ -122,6 +128,9 @@ func (s *SettingsService) Get() SettingsDTO {
 		IdleTimeoutSec:  int(c.Connection.IdleConnTimeout.Std() / time.Second),
 		RequireAuth:     c.Security.RequireAuth,
 		Encryption:      c.Security.Encryption,
+
+		NotifySound:          c.Notify.Sound,
+		NotifyMinimizeToTray: c.Notify.MinimizeToTray,
 	}
 }
 
@@ -154,6 +163,11 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	if in.Encryption != "" {
 		c.Security.Encryption = in.Encryption
 	}
+	// 提示开关【无条件】赋值：bool 没有「未填」这一说，跳过赋值会让
+	// 设置页永远关不掉提示音。前端产物是嵌进同一个二进制发布的，
+	// 不存在「老前端不带这两个字段」的版本错配。
+	c.Notify.Sound = in.NotifySound
+	c.Notify.MinimizeToTray = in.NotifyMinimizeToTray
 
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -782,4 +796,24 @@ func toGroupDTO(g group.Group, self identity.NodeID) GroupDTO {
 		Members:   members,
 		CreatedAt: g.CreatedAt.UnixMilli(),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// NotifyService
+// ---------------------------------------------------------------------------
+
+// NotifyService 只承载「前端告诉 Go 当前在看哪个会话」这一件事。
+//
+// 为什么不塞进 ChatService：它和聊天读写无关，只是提示决策的一个环境输入；
+// 挂在 ChatService 上会让「聊天」这个已经很重的服务再多一个不相关的职责。
+// 窗口可见性与焦点由 Go 侧直接读 Wails，不需要前端上报。
+type NotifyService struct{ d Deps }
+
+// SetActiveConversation 记录前端当前打开的会话 id（未打开任何会话时传空串）。
+func (s *NotifyService) SetActiveConversation(convID string) error {
+	if s.d.SetActiveConv == nil {
+		return nil // 未注入（例如单测）：静默忽略，不影响前端调用
+	}
+	s.d.SetActiveConv(convID)
+	return nil
 }

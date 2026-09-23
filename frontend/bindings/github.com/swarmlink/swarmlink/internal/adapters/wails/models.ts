@@ -146,6 +146,12 @@ export interface SettingsDTO {
     "idleTimeoutSec": number;
     "requireAuth": boolean;
     "encryption": string;
+
+    /**
+     * 提示行为（设置页与托盘菜单共用同一份配置，两个入口不会不一致）。
+     */
+    "notifySound": boolean;
+    "notifyMinimizeToTray": boolean;
 }
 
 /**

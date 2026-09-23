@@ -100,6 +100,19 @@ type Config struct {
 		RequireAuth bool   `toml:"require_auth"`
 		Encryption  string `toml:"encryption"` // off | prefer | require（v1.1 启用）
 	} `toml:"security"`
+
+	// Notify 是提示行为设置。
+	//
+	// 这两个 bool 的默认值是 true，靠 Default() + unmarshal 得到：
+	// Load 先把 Default() 填进去再解析文件，文件里没有 [notify] 段时保留 true。
+	// 【不要】在 applyDefaults 里用 `if !c.Notify.Sound` 之类的回填 ——
+	// false 是用户的合法选择，那样写会让「关掉开关」重启后自己打开。
+	Notify struct {
+		// Sound 控制新消息 / 传输事件是否发声。
+		Sound bool `toml:"sound"`
+		// MinimizeToTray 为真时，点关闭按钮把窗口收进托盘而不是退出。
+		MinimizeToTray bool `toml:"minimize_to_tray"`
+	} `toml:"notify"`
 }
 
 // Default 返回带默认值的配置。
@@ -140,6 +153,11 @@ func Default() *Config {
 
 	c.Security.RequireAuth = true // 强烈建议保持 true
 	c.Security.Encryption = "off"
+
+	// 提示默认全开：收进托盘与提示音是「桌面聊天工具的默认预期」，
+	// 让用户先去设置里找开关才能收到消息提醒，是更差的第一印象。
+	c.Notify.Sound = true
+	c.Notify.MinimizeToTray = true
 
 	return c
 }
