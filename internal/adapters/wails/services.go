@@ -24,8 +24,8 @@ import (
 
 // autostartFuncs 存储自动启动函数（全局变量，避免暴露给 Wails 绑定）
 var autostartFuncs struct {
-	enable   func() error
-	disable  func() error
+	enable    func() error
+	disable   func() error
 	isEnabled func() (bool, error)
 }
 
