@@ -85,7 +85,7 @@ function lines(v: string): string[] {
 }
 
 /**
- * 托盘菜单改了配置 → 只回读那两个提示开关。
+ * 托盘菜单改了配置 → 只回读那三个提示开关。
  *
  * 刻意不整份重载：用户可能正在编辑种子清单等字段，整份 load() 会把没保存的
  * 输入冲掉。而提示开关没有「编辑中」状态（点一下即生效），回读是安全的。
@@ -99,6 +99,7 @@ watch(
       const fresh = await api.getSettings()
       settings.value.notifySound = fresh.notifySound
       settings.value.notifyMinimizeToTray = fresh.notifyMinimizeToTray
+      settings.value.autoStart = fresh.autoStart
     } catch {
       /* 回读失败就维持现状，用户仍可手动保存 */
     }
@@ -140,8 +141,12 @@ onMounted(load)
             <input v-model="settings.notifyMinimizeToTray" type="checkbox" />
             <span>关闭时最小化到托盘</span>
           </label>
+          <label class="check">
+            <input v-model="settings.autoStart" type="checkbox" />
+            <span>开机自启动</span>
+          </label>
           <p class="note">
-            右键托盘图标也有这两项，与这里是同一份配置，改哪边都一样。
+            右键托盘图标也有提示音和托盘设置，与这里是同一份配置，改哪边都一样。
             关掉提示音只影响声音，托盘图标闪烁与未读计数照常工作。
           </p>
         </section>

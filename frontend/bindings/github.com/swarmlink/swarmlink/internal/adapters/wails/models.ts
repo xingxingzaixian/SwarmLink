@@ -153,6 +153,7 @@ export interface SettingsDTO {
      */
     "notifySound": boolean;
     "notifyMinimizeToTray": boolean;
+    "autoStart": boolean;
 }
 
 /**

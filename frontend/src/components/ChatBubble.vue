@@ -14,8 +14,9 @@ import { computed, ref } from 'vue'
 import Avatar from './Avatar.vue'
 import Icon from './Icon.vue'
 import type { Message } from '../api/types'
-import { clockTime } from '../utils/format'
+import { bubbleTime } from '../utils/format'
 import { imageBox, imageSrc, parseImageContent } from '../utils/image'
+import { useTransferStore } from '../stores/transfer'
 
 const props = withDefaults(
   defineProps<{
@@ -36,7 +37,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ (e: 'zoom', m: Message): void }>()
 
-const time = computed(() => clockTime(props.message.sentAt))
+const time = computed(() => bubbleTime(props.message.sentAt))
 
 const isImage = computed(() => props.message.msgType === 'image')
 const isFile = computed(() => props.message.msgType === 'file')
@@ -74,6 +75,32 @@ const fileInfo = computed(() => {
   }
 })
 
+// 获取传输任务状态
+const transfers = useTransferStore()
+const transferJob = computed(() => {
+  if (!fileInfo.value?.jobId) return null
+  return transfers.jobs.value.find((j) => j.jobId === fileInfo.value.jobId)
+})
+
+// 文件传输状态文本
+const transferStatus = computed(() => {
+  const job = transferJob.value
+  if (!job) return '正在传输...'
+  if (job.status === 'done') return '传输完成'
+  if (job.status === 'failed') return '传输失败'
+  if (job.status === 'cancelled') return '已取消'
+  if (job.status === 'paused') return '已暂停'
+  if (job.status === 'queued') return '排队中'
+  return '正在传输...'
+})
+
+// 文件所在路径
+const filePath = computed(() => {
+  const job = transferJob.value
+  if (!job) return ''
+  return job.localPath || ''
+})
+
 /**
  * 解码失败（b64 合法但不是图片、或数据被截断）也要落到占位块。
  *
@@ -104,6 +131,18 @@ const stateText = computed(() => {
       return props.message.state
   }
 })
+
+// 点击文件名打开所在文件夹
+async function openFileLocation() {
+  if (!filePath.value) return
+  try {
+    const api = (await import('../api')).then((m) => m.getApi())
+    const apiInstance = await api()
+    await apiInstance.revealFile(filePath.value)
+  } catch (e: any) {
+    console.error('打开文件位置失败:', e)
+  }
+}
 </script>
 
 <template>
@@ -124,6 +163,9 @@ const stateText = computed(() => {
       <div v-if="showSender && !out && first" class="who">{{ senderName }}</div>
 
       <div class="bubble" :class="{ 'bubble-image': isImage, 'bubble-file': isFile }">
+        <!-- 时间显示在内容上面 -->
+        <div class="bubble-time">{{ time }}</div>
+
         <template v-if="isImage">
           <img
             v-if="image && !broken"
@@ -143,14 +185,19 @@ const stateText = computed(() => {
           <div class="file-message">
             <Icon name="file" :size="32" />
             <div class="file-info">
-              <div class="file-name">{{ fileInfo?.fileName || '文件' }}</div>
-              <div class="file-meta">正在传输...</div>
+              <div 
+                class="file-name" 
+                :class="{ clickable: filePath }"
+                @click="openFileLocation"
+              >
+                {{ fileInfo?.fileName || '文件' }}
+              </div>
+              <div class="file-meta">{{ transferStatus }}</div>
             </div>
           </div>
         </template>
         <div v-else class="text">{{ message.content }}</div>
         <div class="meta">
-          <span class="time">{{ time }}</span>
           <Icon
             v-if="stateIcon"
             :name="stateIcon"
@@ -226,6 +273,18 @@ const stateText = computed(() => {
   color: var(--t3);
 }
 
+/* 气泡顶部时间 */
+.bubble-time {
+  font-size: 10px;
+  color: var(--t2);
+  margin-bottom: 4px;
+  user-select: none;
+}
+
+.row.out .bubble-time {
+  color: rgba(255, 255, 255, 0.9);
+}
+
 /* 收到消息 = 浅色「纸面」+ 深字。
    这是深色玻璃界面上唯一能把「别人的话」和「背景」彻底分开的做法：
    若也做成半透明白霜，长文本会跟着背景色漂移，越读越累。
@@ -292,6 +351,20 @@ const stateText = computed(() => {
   font-weight: 500;
 }
 
+.file-name.clickable {
+  text-decoration: underline;
+  cursor: pointer;
+  color: var(--brand);
+}
+
+.file-name.clickable:hover {
+  opacity: 0.8;
+}
+
+.row.out .file-name.clickable {
+  color: rgba(255, 255, 255, 0.9);
+}
+
 .file-meta {
   font-size: var(--fs-xs);
   color: var(--t3);
@@ -327,18 +400,6 @@ const stateText = computed(() => {
   justify-content: flex-end;
   gap: 4px;
   margin-top: 2px;
-}
-
-/* 纸面上的时间戳要用深灰，不能沿用深色面板上的白字档 */
-.time {
-  font-size: 10px;
-  color: #5b5273;
-  font-variant-numeric: tabular-nums;
-  user-select: none;
-}
-
-.row.out .time {
-  color: rgba(255, 255, 255, 0.76);
 }
 
 .state {

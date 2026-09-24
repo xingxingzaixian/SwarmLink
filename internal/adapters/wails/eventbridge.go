@@ -42,6 +42,10 @@ const (
 	// 载荷：{ paths: []string, target: string }，target 是命中的
 	// data-file-drop-target 属性值，由前端决定「这次投放算发给谁」。
 	EventFilesDropped = "file:dropped"
+	// EventSecondInstanceLaunched 表示有第二个实例尝试启动（单实例模式下）。
+	//
+	// 载荷：{ args: []string, workingDir: string }
+	EventSecondInstanceLaunched = "second-instance:launched"
 )
 
 // ProgressThrottle 是进度事件的最小间隔。

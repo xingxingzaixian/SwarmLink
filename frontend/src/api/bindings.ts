@@ -77,6 +77,9 @@ export const realApi: SwarmApi = {
   setActiveConversation: async (convId) => {
     await NotifyService.SetActiveConversation(convId)
   },
+  autoStartEnable: async () => SettingsService.AutoStartEnable(),
+  autoStartDisable: async () => SettingsService.AutoStartDisable(),
+  autoStartIsEnabled: async () => SettingsService.AutoStartIsEnabled(),
 
   sendMessage: async (peerId, text) => ChatService.SendMessage(peerId, text),
   history: async (peerId, limit, before) => list(await ChatService.History(peerId, limit, before)),

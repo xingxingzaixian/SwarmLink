@@ -50,7 +50,6 @@ type SeedsSection struct {
 type Config struct {
 	General struct {
 		DisplayName string `toml:"display_name"`
-		AutoStart   bool   `toml:"auto_start"`
 	} `toml:"general"`
 
 	Download struct {
@@ -113,6 +112,12 @@ type Config struct {
 		// MinimizeToTray 为真时，点关闭按钮把窗口收进托盘而不是退出。
 		MinimizeToTray bool `toml:"minimize_to_tray"`
 	} `toml:"notify"`
+
+	// Startup 是启动相关设置。
+	Startup struct {
+		// AutoStart 控制是否开机自启动。
+		AutoStart bool `toml:"auto_start"`
+	} `toml:"startup"`
 }
 
 // Default 返回带默认值的配置。
@@ -158,6 +163,9 @@ func Default() *Config {
 	// 让用户先去设置里找开关才能收到消息提醒，是更差的第一印象。
 	c.Notify.Sound = true
 	c.Notify.MinimizeToTray = true
+
+	// 开机自启动默认关闭：避免用户第一次启动就被系统启动吓到
+	c.Startup.AutoStart = false
 
 	return c
 }

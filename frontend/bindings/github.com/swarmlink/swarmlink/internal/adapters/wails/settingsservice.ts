@@ -18,6 +18,27 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * AutoStartDisable 禁用开机自启动
+ */
+export function AutoStartDisable(): $CancellablePromise<void> {
+    return $Call.ByID(1399028536);
+}
+
+/**
+ * AutoStartEnable 启用开机自启动
+ */
+export function AutoStartEnable(): $CancellablePromise<void> {
+    return $Call.ByID(3724637387);
+}
+
+/**
+ * AutoStartIsEnabled 检查开机自启动是否已启用
+ */
+export function AutoStartIsEnabled(): $CancellablePromise<boolean> {
+    return $Call.ByID(215484709);
+}
+
+/**
  * DownloadDir 返回当前接收目录。
  */
 export function DownloadDir(): $CancellablePromise<string> {

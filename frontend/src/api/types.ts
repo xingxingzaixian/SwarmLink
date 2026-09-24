@@ -158,6 +158,8 @@ export interface Settings {
   notifySound: boolean
   /** 点关闭按钮时把窗口收进托盘而不是退出。 */
   notifyMinimizeToTray: boolean
+  /** 开机自启动。 */
+  autoStart: boolean
 }
 
 /** 前端可调用的后端能力。 */
@@ -183,6 +185,11 @@ export interface SwarmApi {
    * 「跨网段发现不到人」的根因九成在这两条前提上，静态提示没用，必须实探。
    */
   runSelfCheck(): Promise<SelfCheck>
+
+  // 开机自启动
+  autoStartEnable(): Promise<void>
+  autoStartDisable(): Promise<void>
+  autoStartIsEnabled(): Promise<boolean>
 
   // 单聊
   sendMessage(peerId: string, text: string): Promise<Message>

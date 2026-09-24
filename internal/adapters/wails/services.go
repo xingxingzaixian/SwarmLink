@@ -22,6 +22,13 @@ import (
 	"github.com/swarmlink/swarmlink/internal/infra/imagecodec"
 )
 
+// autostartFuncs 存储自动启动函数（全局变量，避免暴露给 Wails 绑定）
+var autostartFuncs struct {
+	enable   func() error
+	disable  func() error
+	isEnabled func() (bool, error)
+}
+
 // ConnInspector 是诊断面板所需的连接信息（由 tcp.Manager 实现）。
 type ConnInspector interface {
 	SessionCount() int
@@ -89,6 +96,13 @@ func NewServices(d Deps) *ServiceSet {
 	}
 }
 
+// SetAutostartFuncs 设置自动启动函数（由组合根在 app 创建后调用）
+func SetAutostartFuncs(enable, disable func() error, isEnabled func() (bool, error)) {
+	autostartFuncs.enable = enable
+	autostartFuncs.disable = disable
+	autostartFuncs.isEnabled = isEnabled
+}
+
 // ---------------------------------------------------------------------------
 // SettingsService
 // ---------------------------------------------------------------------------
@@ -131,6 +145,7 @@ func (s *SettingsService) Get() SettingsDTO {
 
 		NotifySound:          c.Notify.Sound,
 		NotifyMinimizeToTray: c.Notify.MinimizeToTray,
+		AutoStart:            c.Startup.AutoStart,
 	}
 }
 
@@ -141,6 +156,7 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	c.General.DisplayName = in.DisplayName
 	c.Download.DefaultDir = in.DownloadDir
 	c.Download.AutoOpen = in.AutoOpen
+	c.Startup.AutoStart = in.AutoStart
 	c.Discovery.Seeds.List = append([]string(nil), in.Seeds...)
 	if in.SeedsPerRefresh > 0 {
 		c.Discovery.Seeds.SeedsPerRefresh = in.SeedsPerRefresh
@@ -176,6 +192,11 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 		return nil, err
 	}
 
+	// 自动启动设置变更时同步到系统（配置文件已保存，这里只同步系统设置）
+	if err := s.syncAutostart(in.AutoStart); err != nil {
+		return nil, err
+	}
+
 	// 端口/网卡类改动无法热生效
 	restart := make([]string, 0, 4)
 	if in.TCPPort != c.Network.TCPPort {
@@ -191,6 +212,17 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 		restart = append(restart, "max_active_conns")
 	}
 	return restart, nil
+}
+
+// syncAutostart 同步自动启动设置到系统（不修改配置文件）
+func (s *SettingsService) syncAutostart(enable bool) error {
+	if autostartFuncs.enable == nil || autostartFuncs.disable == nil {
+		return nil
+	}
+	if enable {
+		return autostartFuncs.enable()
+	}
+	return autostartFuncs.disable()
 }
 
 // DownloadDir 返回当前接收目录。
@@ -235,6 +267,48 @@ func (s *SettingsService) RunSelfCheck() SelfCheckDTO {
 		out.Seeds = s.d.SeedSnapshot()
 	}
 	return out
+}
+
+// AutoStartEnable 启用开机自启动
+func (s *SettingsService) AutoStartEnable() error {
+	s.cfg.Startup.AutoStart = true
+	if err := config.Save(s.dir, s.cfg); err != nil {
+		return err
+	}
+	// 调用 Wails 的自动启动 API
+	if autostartFuncs.enable != nil {
+		if err := autostartFuncs.enable(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AutoStartDisable 禁用开机自启动
+func (s *SettingsService) AutoStartDisable() error {
+	s.cfg.Startup.AutoStart = false
+	if err := config.Save(s.dir, s.cfg); err != nil {
+		return err
+	}
+	// 调用 Wails 的自动启动 API
+	if autostartFuncs.disable != nil {
+		if err := autostartFuncs.disable(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AutoStartIsEnabled 检查开机自启动是否已启用
+func (s *SettingsService) AutoStartIsEnabled() (bool, error) {
+	if autostartFuncs.isEnabled == nil {
+		return s.cfg.Startup.AutoStart, nil
+	}
+	enabled, err := autostartFuncs.isEnabled()
+	if err != nil {
+		return s.cfg.Startup.AutoStart, err
+	}
+	return enabled, nil
 }
 
 // ---------------------------------------------------------------------------

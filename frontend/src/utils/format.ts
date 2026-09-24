@@ -47,6 +47,21 @@ export function clockTime(ms: number): string {
 }
 
 /**
+ * 气泡顶部时间：当天显示时分，否则显示年月日时分。
+ */
+export function bubbleTime(ms: number): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const diff = dayDiff(ms)
+  if (diff <= 0) {
+    // 当天只显示时分
+    return clockTime(ms)
+  }
+  // 其他情况显示年月日时分
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clockTime(ms)}`
+}
+
+/**
  * 列表行右侧的时间（QQ 的收敛规则）：
  * 今天给时分，昨天给「昨天」，今年给月日，跨年给年月日。
  */

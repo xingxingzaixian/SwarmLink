@@ -57,6 +57,31 @@ func (e wailsEmitter) Emit(name string, data any) {
 	e.app.Event.Emit(name, data)
 }
 
+// autostartAdapter 把 Wails 的 *application.App 适配成自动启动接口
+type autostartAdapter struct {
+	app *application.App
+}
+
+func (a *autostartAdapter) AutostartEnable() error {
+	return a.app.Autostart.Enable()
+}
+
+func (a *autostartAdapter) AutostartDisable() error {
+	return a.app.Autostart.Disable()
+}
+
+func (a *autostartAdapter) AutostartIsEnabled() (bool, error) {
+	return a.app.Autostart.IsEnabled()
+}
+
+// 单实例加密密钥（固定值，用于识别同一应用的不同实例）
+var singleInstanceKey = [32]byte{
+	0x53, 0x77, 0x61, 0x72, 0x6d, 0x4c, 0x69, 0x6e,
+	0x6b, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+}
+
 func main() {
 	// 1. 先起后端：网络/存储起不来时，GUI 必须明确报错而不是静默半死。
 	node, err := bootstrap.Start(context.Background(), bootstrap.Options{Level: slog.LevelInfo})
@@ -81,6 +106,16 @@ func main() {
 		activeConvMu.RLock()
 		defer activeConvMu.RUnlock()
 		return activeConvID
+	}
+
+	// 定义窗口显示函数（需要在单实例回调中使用）
+	var win *application.WebviewWindow
+	showWindow := func() {
+		if win != nil {
+			win.Show()
+			win.Restore()
+			win.Focus()
+		}
 	}
 
 	// 2. 构造服务（纯 Go，不依赖 Wails）
@@ -123,7 +158,8 @@ func main() {
 	})
 
 	// 3. 创建应用：服务在 Options 里注册，Wails 会静态分析并生成 TypeScript 绑定。
-	app := application.New(application.Options{
+	var app *application.App
+	app = application.New(application.Options{
 		Name:        "SwarmLink",
 		Description: "无中心内网 P2P 聊天与文件分享工具",
 		Services: []application.Service{
@@ -140,7 +176,44 @@ func main() {
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
+		// 使用 Wails 内置的单实例功能
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID:      "com.swarmlink.app",
+			EncryptionKey: singleInstanceKey,
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+				slog.Info("检测到第二个实例启动", "args", data.Args, "workingDir", data.WorkingDir)
+				// 激活已有实例的窗口
+				showWindow()
+				// 通知前端有新实例启动（可选）
+				app.Event.Emit(wadapter.EventSecondInstanceLaunched, map[string]any{
+					"args":       data.Args,
+					"workingDir": data.WorkingDir,
+				})
+			},
+			AdditionalData: map[string]string{
+				"launchtime": time.Now().Local().String(),
+			},
+		},
 	})
+
+	// 注入自动启动适配器到服务层（用于自动启动功能）
+	autostart := &autostartAdapter{app: app}
+	wadapter.SetAutostartFuncs(
+		autostart.AutostartEnable,
+		autostart.AutostartDisable,
+		autostart.AutostartIsEnabled,
+	)
+
+	// 启动时检查自动启动配置并同步到系统
+	if node.Cfg.Startup.AutoStart {
+		if err := app.Autostart.Enable(); err != nil {
+			slog.Warn("启用开机自启动失败", "err", err)
+		}
+	} else {
+		if err := app.Autostart.Disable(); err != nil {
+			slog.Warn("禁用开机自启动失败", "err", err)
+		}
+	}
 
 	// 4. 领域事件 → 前端事件（含按 job 的 4 Hz 进度节流与调试面板馈送）
 	bridge := wadapter.NewBridge(node.Bus, node.Clk, wailsEmitter{app: app})
@@ -148,7 +221,7 @@ func main() {
 	defer bridge.Stop()
 
 	// 5. 主窗口
-	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
+	win = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:  "SwarmLink",
 		Width:  1180,
 		Height: 760,
@@ -186,8 +259,6 @@ func main() {
 		})
 	})
 
-	// ------------------------------------------------------------ 托盘与提示
-	//
 	// 「什么时候提示、提示成什么样」全部由 capp.NotifyApp 决策（零 Wails 依赖、
 	// 有表驱动单测）；这里只做三件事：提供环境快照、把动作翻译成 Wails 调用、
 	// 接上事件源。适配器之间不互相引用，接线只在组合根发生。
@@ -243,12 +314,6 @@ func main() {
 	// 没有 szTip 就没有「本该显示的提示」可被替代，系统也就没必要通知应用。
 	// 去掉这一行，托盘悬停提示会静默失效（表现为「只闪烁，不弹提示」）。
 	tray.SetTooltip("SwarmLink")
-
-	showWindow := func() {
-		win.Show()
-		win.Restore()
-		win.Focus()
-	}
 
 	// 提示气泡：QQ 式「谁发来的、说了什么」。
 	//
@@ -333,6 +398,18 @@ func main() {
 			node.Cfg.Notify.Sound = on
 		case notifyOptTray:
 			node.Cfg.Notify.MinimizeToTray = on
+		case notifyOptAutoStart:
+			node.Cfg.Startup.AutoStart = on
+			// 同步到系统
+			if on {
+				if err := app.Autostart.Enable(); err != nil {
+					slog.Warn("启用开机自启动失败", "err", err)
+				}
+			} else {
+				if err := app.Autostart.Disable(); err != nil {
+					slog.Warn("禁用开机自启动失败", "err", err)
+				}
+			}
 		}
 		if err := config.Save(node.ConfigDir, node.Cfg); err != nil {
 			slog.Warn("保存提示设置失败", "err", err)
@@ -353,6 +430,10 @@ func main() {
 	trayItem := menu.AddCheckbox("关闭时最小化到托盘", true).SetChecked(node.Cfg.Notify.MinimizeToTray)
 	trayItem.OnClick(func(*application.Context) {
 		setNotifyOption(notifyOptTray, trayItem.Checked())
+	})
+	autoStartItem := menu.AddCheckbox("开机自启动", true).SetChecked(node.Cfg.Startup.AutoStart)
+	autoStartItem.OnClick(func(*application.Context) {
+		setNotifyOption(notifyOptAutoStart, autoStartItem.Checked())
 	})
 	menu.AddSeparator()
 	menu.Add("退出").OnClick(func(*application.Context) { app.Quit() })
@@ -428,12 +509,13 @@ func blinkTray(tray *application.SystemTray) {
 	}
 }
 
-// notifyOption 标识托盘菜单里的两个提示开关。
+// notifyOption 标识托盘菜单里的提示开关。
 type notifyOption int
 
 const (
 	notifyOptSound notifyOption = iota
 	notifyOptTray
+	notifyOptAutoStart
 )
 
 const (
