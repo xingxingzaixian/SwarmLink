@@ -33,9 +33,11 @@ const (
 type MsgType string
 
 const (
-	MsgTypeText MsgType = "text"
+	MsgTypeText  MsgType = "text"
 	// MsgTypeImage 的 content 是 InlineImage 的 JSON 信封（见 inline_image.go）。
 	MsgTypeImage MsgType = "image"
+	// MsgTypeFile 的 content 是文件传输的 job_id。
+	MsgTypeFile MsgType = "file"
 )
 
 // Message 是单聊/群聊共用的消息实体。

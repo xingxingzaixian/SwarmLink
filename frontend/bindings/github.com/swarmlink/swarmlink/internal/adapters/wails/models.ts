@@ -61,6 +61,7 @@ export interface MessageDTO {
     "content": string;
     "msgType": string;
     "fileId"?: string;
+    "jobId"?: string;
     "state": string;
     "sentAt": number;
     "recvAt"?: number;

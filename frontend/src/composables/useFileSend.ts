@@ -5,6 +5,7 @@ import { pickFiles, pickImages } from '../api/dialog'
 import { useChatStore } from '../stores/chat'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
+import { baseName } from '../utils/format'
 
 /**
  * 「把文件发给当前会话对象」这一动作的唯一实现。
@@ -28,12 +29,24 @@ export function useFileSend() {
     ui.focusTransfer()
     sending.value = true
     try {
-      const ok = await transfers.sendFiles(peerId, paths)
-      if (ok === paths.length) {
-        ui.notify(paths.length === 1 ? '已开始发送' : `已开始发送 ${ok} 个文件`)
-      } else {
-        // 后端现在会把「路径不存在 / 是目录 / 空文件」同步报回来，要透传给用户
-        ui.notify(transfers.error || `已发起 ${ok}/${paths.length} 个文件`)
+      const jobIds: string[] = []
+      for (const path of paths) {
+        try {
+          const jobId = await transfers.sendFile(peerId, path)
+          jobIds.push(jobId)
+          
+          // 发送文件消息到聊天窗口
+          const conv = chat.activeConversation
+          if (conv) {
+            await chat.sendFile(conv, jobId, baseName(path))
+          }
+        } catch (e: any) {
+          ui.notify(String(e?.message ?? e) || `发送文件失败: ${baseName(path)}`)
+        }
+      }
+      
+      if (jobIds.length > 0) {
+        ui.notify(jobIds.length === 1 ? '已开始发送' : `已开始发送 ${jobIds.length} 个文件`)
       }
     } finally {
       sending.value = false

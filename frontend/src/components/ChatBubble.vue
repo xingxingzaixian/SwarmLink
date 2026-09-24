@@ -39,6 +39,7 @@ const emit = defineEmits<{ (e: 'zoom', m: Message): void }>()
 const time = computed(() => clockTime(props.message.sentAt))
 
 const isImage = computed(() => props.message.msgType === 'image')
+const isFile = computed(() => props.message.msgType === 'file')
 
 /**
  * 图片消息的内容解析。
@@ -51,6 +52,27 @@ const image = computed(() => (isImage.value ? parseImageContent(props.message.co
 const box = computed(() =>
   image.value ? imageBox(image.value, 220) : { width: 220, height: 140 }
 )
+
+/**
+ * 文件消息的内容解析。
+ *
+ * content 是 JSON: {"job_id":"xxx","file_name":"xxx"}
+ */
+const fileInfo = computed(() => {
+  if (!isFile.value) return null
+  try {
+    const parsed = JSON.parse(props.message.content)
+    return {
+      jobId: parsed.job_id || '',
+      fileName: parsed.file_name || '未知文件'
+    }
+  } catch {
+    return {
+      jobId: '',
+      fileName: '文件消息'
+    }
+  }
+})
 
 /**
  * 解码失败（b64 合法但不是图片、或数据被截断）也要落到占位块。
@@ -86,7 +108,10 @@ const stateText = computed(() => {
 
 <template>
   <div class="row" :class="{ out, tail }" :title="stateText">
+    <!-- 自己的消息显示"我"字头像 -->
+    <div v-if="out" class="ava self-avatar" :class="{ hidden: !tail }">我</div>
     <Avatar
+      v-else
       class="ava"
       :class="{ hidden: !tail }"
       :seed="senderSeed || message.senderId"
@@ -98,7 +123,7 @@ const stateText = computed(() => {
     <div class="col">
       <div v-if="showSender && !out && first" class="who">{{ senderName }}</div>
 
-      <div class="bubble" :class="{ 'bubble-image': isImage }">
+      <div class="bubble" :class="{ 'bubble-image': isImage, 'bubble-file': isFile }">
         <template v-if="isImage">
           <img
             v-if="image && !broken"
@@ -112,6 +137,15 @@ const stateText = computed(() => {
           />
           <div v-else class="shot-broken" :style="{ width: box.width, height: box.height }">
             图片显示失败
+          </div>
+        </template>
+        <template v-else-if="isFile">
+          <div class="file-message">
+            <Icon name="file" :size="32" />
+            <div class="file-info">
+              <div class="file-name">{{ fileInfo?.fileName || '文件' }}</div>
+              <div class="file-meta">正在传输...</div>
+            </div>
           </div>
         </template>
         <div v-else class="text">{{ message.content }}</div>
@@ -157,6 +191,22 @@ const stateText = computed(() => {
 
 .ava.hidden {
   visibility: hidden;
+}
+
+/* 自己的头像：显示"我"字 */
+.self-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #c93a82, #9c1f60);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  flex-shrink: 0;
 }
 
 .col {
@@ -218,6 +268,37 @@ const stateText = computed(() => {
   /* 文字气泡靠 pre-wrap 保留换行；图片气泡里没有文字，
      留着它只会把模板换行渲染成额外空隙。 */
   white-space: normal;
+}
+
+/* 文件气泡：展示文件图标和文件名 */
+.bubble-file {
+  padding: 10px 14px;
+}
+
+.file-message {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-name {
+  font-size: var(--fs-md);
+  font-weight: 500;
+}
+
+.file-meta {
+  font-size: var(--fs-xs);
+  color: var(--t3);
+}
+
+.row.out .file-meta {
+  color: rgba(255, 255, 255, 0.76);
 }
 
 .shot {

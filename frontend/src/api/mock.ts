@@ -366,6 +366,22 @@ export function createMockApi(): SwarmApi {
     async saveImage() {
       // 降级预览里没有原生保存对话框，调用方会退化成浏览器下载
     },
+    async sendFileMessage(peerId, jobId, fileName) {
+      const convId = directConvId(self.nodeId, peerId)
+      const m: Message = {
+        msgId: `mock-file-${Date.now()}`,
+        convId,
+        senderId: self.nodeId,
+        direction: 'out',
+        content: JSON.stringify({ job_id: jobId, file_name: fileName }),
+        msgType: 'file',
+        state: 'pending',
+        sentAt: Date.now()
+      }
+      push(convId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
+    },
     async conversations(): Promise<Conversation[]> {
       const peerOf = (convId: string): Peer | undefined =>
         peers.find((p) => directConvId(self.nodeId, p.nodeId) === convId)
@@ -471,6 +487,21 @@ export function createMockApi(): SwarmApi {
     async groupSendImageBytes(groupId, name) {
       const m = mockImageMessage(groupId, self.nodeId, 'out', name || '群里的图片')
       m.state = 'pending'
+      push(groupId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
+    },
+    async groupSendFile(groupId, jobId, fileName) {
+      const m: Message = {
+        msgId: `mock-g-file-${Date.now()}`,
+        convId: groupId,
+        senderId: self.nodeId,
+        direction: 'out',
+        content: JSON.stringify({ job_id: jobId, file_name: fileName }),
+        msgType: 'file',
+        state: 'pending',
+        sentAt: Date.now()
+      }
       push(groupId, m)
       window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
       return m

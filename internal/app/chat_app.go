@@ -65,10 +65,20 @@ func (a *ChatApp) SendImage(ctx context.Context, peerID identity.NodeID, content
 	return a.send(ctx, peerID, content, message.MsgTypeImage)
 }
 
+// SendFile 发送单聊文件消息。
+//
+// content 是 job_id：这条消息不携带文件本身，只是通知对端
+// 「我正在发送一个文件，你可以在传输面板查看进度」。
+func (a *ChatApp) SendFile(ctx context.Context, peerID identity.NodeID, jobID string, fileName string) (message.Message, error) {
+	// 用 JSON 编码 job_id 和文件名，方便前端解析
+	payload := fmt.Sprintf(`{"job_id":"%s","file_name":"%s"}`, jobID, fileName)
+	return a.send(ctx, peerID, payload, message.MsgTypeFile)
+}
+
 // send 是文本与图片共用的发送实现。
 //
-// 「入库成功才算发送」这个顺序由本方法显式编排 —— 事件总线不承载需要事务的路径。
-// 抽成公共实现是为了让两类消息不会各自漂移出一套检查与重发策略。
+// 「入库成功就算发送完成」：网络连接建立与实际发送在后台异步进行，
+// 失败时由 outbox 重发机制兜底。这样即使对方不在线，消息也能立即显示。
 func (a *ChatApp) send(ctx context.Context, peerID identity.NodeID, content string, msgType message.MsgType) (message.Message, error) {
 	now := a.clk.Now()
 	msg := message.Message{
@@ -84,9 +94,12 @@ func (a *ChatApp) send(ctx context.Context, peerID identity.NodeID, content stri
 	if err := a.store.AppendOutgoing(msg, now); err != nil {
 		return msg, fmt.Errorf("chat: persist outgoing: %w", err)
 	}
-	if err := a.trySend(ctx, peerID, msg); err != nil && a.lg != nil {
-		a.lg.Info("chat: initial send deferred to outbox", "msg_id", msg.MsgID, "err", err)
-	}
+	// 异步尝试发送：即使连接失败也不阻塞响应，消息会进入 outbox 重发
+	go func() {
+		if err := a.trySend(context.Background(), peerID, msg); err != nil && a.lg != nil {
+			a.lg.Info("chat: initial send deferred to outbox", "msg_id", msg.MsgID, "err", err)
+		}
+	}()
 	return msg, nil
 }
 
@@ -142,6 +155,7 @@ func (a *ChatApp) HandleChat(sess ports.Session, f protocol.Frame) error {
 		}
 		content = sanitized
 	}
+	// 文件消息的 content 是 JSON，不需要特殊处理，直接存储即可
 
 	m := message.Message{
 		MsgID:     c.MsgID,

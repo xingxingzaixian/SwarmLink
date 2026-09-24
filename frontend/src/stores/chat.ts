@@ -206,6 +206,23 @@ export const useChatStore = defineStore('chat', () => {
     bump(conv.convId, m.sentAt)
   }
 
+  /**
+   * 发送文件消息。
+   *
+   * 与文本发送共用 upsert/bump：文件消息同样会等到 chat:delivered 事件回来，
+   * 走同一条回填路径。
+   */
+  async function sendFile(conv: Conversation, jobId: string, fileName: string): Promise<void> {
+    const api = await getApi()
+    const m =
+      conv.kind === 'group'
+        ? await api.groupSendFile(conv.convId, jobId, fileName)
+        : await api.sendFileMessage(conv.peerId ?? '', jobId, fileName)
+    upsert(conv.convId, m)
+    previews.value = { ...previews.value, [conv.convId]: m }
+    bump(conv.convId, m.sentAt)
+  }
+
   /** 送达确认（由 chat:delivered 事件驱动）。 */
   function markDelivered(msgId: string): void {
     // 先记账：这条消息可能还没进列表（事件早于发送返回值），
@@ -292,6 +309,7 @@ export const useChatStore = defineStore('chat', () => {
     send,
     sendImage,
     sendImageBytes,
+    sendFile,
     markDelivered
   }
 })

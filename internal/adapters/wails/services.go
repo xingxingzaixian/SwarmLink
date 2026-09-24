@@ -344,6 +344,28 @@ func (s *ChatService) SaveImage(msgID, destPath string) error {
 	return nil
 }
 
+// SendFileMessage 发送文件消息（通知聊天窗口有文件传输）。
+//
+// jobId 是传输任务的 ID，fileName 是文件名。这条消息不携带文件本身，
+// 只是通知对端「我正在发送一个文件，你可以在传输面板查看进度」。
+func (s *ChatService) SendFileMessage(peerID, jobID, fileName string) (MessageDTO, error) {
+	id, err := identity.ParseNodeID(peerID)
+	if err != nil {
+		return MessageDTO{}, fmt.Errorf("无效的 NodeID: %w", err)
+	}
+	if jobID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少传输任务 id")
+	}
+	if fileName == "" {
+		return MessageDTO{}, fmt.Errorf("缺少文件名")
+	}
+	msg, err := s.d.Chat.SendFile(context.Background(), id, jobID, fileName)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
 // decodeImageBytes 把前端传来的 base64 图片数据解码成字节。
 func decodeImageBytes(dataB64 string) ([]byte, error) {
 	if dataB64 == "" {
@@ -755,6 +777,27 @@ func (s *GroupService) SendImageBytes(groupID, name, dataB64 string) (MessageDTO
 		return MessageDTO{}, withImageSource(err, name)
 	}
 	msg, err := s.d.Group.SendGroupImage(context.Background(), groupID, content)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
+// SendFile 群发文件消息（通知群成员有文件传输）。
+//
+// 注意：v1.0 群聊的文件传输实际上不支持点对点传输，
+// 这条消息只是通知群成员「我正在发送一个文件」。
+func (s *GroupService) SendFile(groupID, jobID, fileName string) (MessageDTO, error) {
+	if groupID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少群 id")
+	}
+	if jobID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少传输任务 id")
+	}
+	if fileName == "" {
+		return MessageDTO{}, fmt.Errorf("缺少文件名")
+	}
+	msg, err := s.d.Group.SendGroupFile(context.Background(), groupID, jobID, fileName)
 	if err != nil {
 		return MessageDTO{}, err
 	}

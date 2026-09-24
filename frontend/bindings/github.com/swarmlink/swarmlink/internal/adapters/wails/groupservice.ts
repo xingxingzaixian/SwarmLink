@@ -43,6 +43,16 @@ export function List(): $CancellablePromise<$models.GroupDTO[] | null> {
 }
 
 /**
+ * SendFile 群发文件消息（通知群成员有文件传输）。
+ * 
+ * 注意：v1.0 群聊的文件传输实际上不支持点对点传输，
+ * 这条消息只是通知群成员「我正在发送一个文件」。
+ */
+export function SendFile(groupID: string, jobID: string, fileName: string): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(1822531511, groupID, jobID, fileName);
+}
+
+/**
  * SendImage 群发一张本地图片（与单聊同一套压缩与内联格式）。
  */
 export function SendImage(groupID: string, path: string): $CancellablePromise<$models.MessageDTO> {

@@ -38,6 +38,16 @@ export function SaveImage(msgID: string, destPath: string): $CancellablePromise<
 }
 
 /**
+ * SendFileMessage 发送文件消息（通知聊天窗口有文件传输）。
+ * 
+ * jobId 是传输任务的 ID，fileName 是文件名。这条消息不携带文件本身，
+ * 只是通知对端「我正在发送一个文件，你可以在传输面板查看进度」。
+ */
+export function SendFileMessage(peerID: string, jobID: string, fileName: string): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(447188419, peerID, jobID, fileName);
+}
+
+/**
  * SendImage 发送一张本地图片：读文件 → 压缩 → 内联进消息。
  * 
  * 为什么压缩放在这里（而不是前端）：前端拿到的是路径或 Blob，压缩需要解码 + 缩放 + 体积控制，

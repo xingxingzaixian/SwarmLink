@@ -34,6 +34,7 @@ export interface Message {
   content: string
   msgType: string
   fileId?: string
+  jobId?: string
   state: 'pending' | 'sent' | 'delivered' | 'failed' | string
   sentAt: number
   recvAt?: number
@@ -193,6 +194,8 @@ export interface SwarmApi {
   sendImageBytes(peerId: string, name: string, dataB64: string): Promise<Message>
   /** 把一条图片消息另存到指定路径。 */
   saveImage(msgId: string, destPath: string): Promise<void>
+  /** 发送文件消息（通知聊天窗口有文件传输）。 */
+  sendFileMessage(peerId: string, jobId: string, fileName: string): Promise<Message>
 
   // 传输
   sendFile(peerId: string, path: string): Promise<string>
@@ -218,6 +221,7 @@ export interface SwarmApi {
   groupHistory(groupId: string, limit: number, before: number): Promise<Message[]>
   groupSendImage(groupId: string, path: string): Promise<Message>
   groupSendImageBytes(groupId: string, name: string, dataB64: string): Promise<Message>
+  groupSendFile(groupId: string, jobId: string, fileName: string): Promise<Message>
 }
 
 /** 后端推送的事件名（与 internal/adapters/wails/eventbridge.go 保持一致）。 */

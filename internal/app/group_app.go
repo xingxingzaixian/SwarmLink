@@ -216,6 +216,15 @@ func (a *GroupApp) SendGroupImage(ctx context.Context, groupID, content string) 
 	return a.send(ctx, groupID, content, message.MsgTypeImage)
 }
 
+// SendGroupFile 发送群聊文件消息（content 为 job_id 和文件名的 JSON）。
+//
+// 与文本走同一条扇出链路：通知群成员有文件传输，但实际传输仍然是
+// 点对点的（群聊的文件传输在 v1.0 中不支持）。
+func (a *GroupApp) SendGroupFile(ctx context.Context, groupID, jobID, fileName string) (message.Message, error) {
+	payload := fmt.Sprintf(`{"job_id":"%s","file_name":"%s"}`, jobID, fileName)
+	return a.send(ctx, groupID, payload, message.MsgTypeFile)
+}
+
 // send 是群文本与群图片共用的发送实现。
 func (a *GroupApp) send(ctx context.Context, groupID, content string, msgType message.MsgType) (message.Message, error) {
 	g, ok := a.groups.Get(groupID)
@@ -327,6 +336,7 @@ func (a *GroupApp) HandleGroupMsg(sess ports.Session, f protocol.Frame) error {
 		}
 		content = sanitized
 	}
+	// 文件消息的 content 是 JSON，不需要特殊处理，直接存储即可
 
 	m := message.Message{
 		MsgID:     gm.MsgID,

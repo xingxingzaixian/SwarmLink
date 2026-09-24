@@ -23,6 +23,7 @@ type MessageDTO struct {
 	Content   string `json:"content"`
 	MsgType   string `json:"msgType"`
 	FileID    string `json:"fileId,omitempty"`
+	JobID     string `json:"jobId,omitempty"`
 	State     string `json:"state"`
 	SentAt    int64  `json:"sentAt"`
 	RecvAt    int64  `json:"recvAt,omitempty"`
