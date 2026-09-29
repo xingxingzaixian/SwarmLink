@@ -372,6 +372,9 @@ func (m *Manager) remove(s *session, reason string) {
 
 func (m *Manager) publishOnline(s *session) {
 	if m.bus != nil {
+		if m.lg != nil {
+			m.lg.Info("tcp: publishing peer online event", "peer_id", s.peerID.String(), "addr", s.RemoteAddr())
+		}
 		m.bus.Publish(eventbus.TopicPeerOnline, eventbus.PeerOnline{
 			NodeID: s.peerID.String(),
 			Addr:   s.RemoteAddr(),

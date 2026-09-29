@@ -15,6 +15,25 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * ClearConversation 清空一个会话的聊天区：消息不删除，只是不再显示。
+ * 
+ * 参数是 convID 而不是 peerID：清空点是会话级概念，单聊与群聊无差别，
+ * 而前端手里就是 convId（它也可能是群 ID）。
+ */
+export function ClearConversation(convID: string): $CancellablePromise<void> {
+    return $Call.ByID(429917914, convID);
+}
+
+/**
+ * ClearedAt 返回会话清空点的毫秒时间戳；0 表示未清空。
+ * 
+ * 前端据此决定「查看历史」按钮是否可点（0 = 没有可恢复的东西）。
+ */
+export function ClearedAt(convID: string): $CancellablePromise<number> {
+    return $Call.ByID(573363981, convID);
+}
+
+/**
  * Conversations 返回会话列表（按最近消息时间倒序）。
  * 
  * 目前直接从节点目录 + 消息推导，避免为 UI 单独维护一张表。
@@ -28,6 +47,13 @@ export function Conversations(): $CancellablePromise<$models.ConversationDTO[] |
  */
 export function History(peerID: string, limit: number, before: number): $CancellablePromise<$models.MessageDTO[] | null> {
     return $Call.ByID(4168301964, peerID, limit, before);
+}
+
+/**
+ * RestoreConversation 撤销清空，让被隐藏的消息重新显示（幂等）。
+ */
+export function RestoreConversation(convID: string): $CancellablePromise<void> {
+    return $Call.ByID(1757720493, convID);
 }
 
 /**

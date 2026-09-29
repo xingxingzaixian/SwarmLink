@@ -23,10 +23,24 @@ export const useChatStore = defineStore('chat', () => {
   const loading = ref(false)
   const error = ref('')
 
+  /**
+   * 每个会话的「清空点」（毫秒；缺省/0 = 未清空）。
+   *
+   * 这是【视图规则】，不参与任何后端查询：被清空的消息仍在
+   * `messagesByConv` 里，所以撤销清空时无需重新请求，界面立刻恢复。
+   * 由此也带来一条纪律 —— 清空点绝不能拿去当 History 的参数，
+   * 否则左栏预览（复用同一个 History）会跟着一起空掉。
+   */
+  const clearedAt = ref<Record<string, number>>({})
+
   /** 送达状态账本：让「事件先到」与「消息先到」两种顺序都收敛到已完成。 */
   const delivery = createDeliveryLedger()
 
-  const activeMessages = computed(() => messagesByConv.value[activeConvId.value] ?? [])
+  const activeMessages = computed(() =>
+    (messagesByConv.value[activeConvId.value] ?? []).filter(
+      (m) => m.sentAt > (clearedAt.value[activeConvId.value] ?? 0)
+    )
+  )
   const activeConversation = computed(
     () => conversations.value.find((c) => c.convId === activeConvId.value) ?? null
   )
@@ -94,7 +108,8 @@ export const useChatStore = defineStore('chat', () => {
   async function open(conv: Conversation): Promise<void> {
     activeConvId.value = conv.convId
     delete unread.value[conv.convId]
-    await loadHistory(conv)
+    // 两件事都要等：只等历史会让「已清空的会话」先闪一下全部消息再消失
+    await Promise.all([loadHistory(conv), loadClearedAt(conv.convId)])
   }
 
   async function loadHistory(conv: Conversation): Promise<void> {
@@ -113,6 +128,49 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  /**
+   * 拉取某会话的清空点。
+   *
+   * 失败按「未清空」（0）处理：宁可多显示消息，也不要让用户的聊天记录
+   * 因为一次读错误而看起来丢了。
+   */
+  async function loadClearedAt(convId: string): Promise<void> {
+    if (!convId) return
+    try {
+      const api = await getApi()
+      const at = await api.clearedAt(convId)
+      clearedAt.value = { ...clearedAt.value, [convId]: at }
+    } catch {
+      /* 读不到就当作未清空 */
+    }
+  }
+
+  /** 清空一个会话的聊天区：消息不删除，只是不再显示。 */
+  async function clearConversation(conv: Conversation): Promise<void> {
+    const api = await getApi()
+    await api.clearConversation(conv.convId)
+    // 以后端返回的值为准，而不是本地 Date.now()：两者差一点就会让
+    // 「刚发的最后一条」处在边界上，出现「清空后还剩一条」的怪象。
+    await loadClearedAt(conv.convId)
+  }
+
+  /** 撤销清空，让被隐藏的消息重新显示。 */
+  async function restoreConversation(conv: Conversation): Promise<void> {
+    const api = await getApi()
+    await api.restoreConversation(conv.convId)
+    await loadClearedAt(conv.convId)
+  }
+
+  /** 某会话的清空点（毫秒；0 = 未清空）。 */
+  function clearedAtOf(convId: string): number {
+    return clearedAt.value[convId] ?? 0
+  }
+
+  /** 某会话是否处于「已清空」状态。 */
+  function isCleared(convId: string): boolean {
+    return clearedAtOf(convId) > 0
   }
 
   function upsert(convId: string, m: Message): void {
@@ -303,6 +361,12 @@ export const useChatStore = defineStore('chat', () => {
     open,
     openPeer,
     loadHistory,
+    clearedAt,
+    loadClearedAt,
+    clearConversation,
+    restoreConversation,
+    clearedAtOf,
+    isCleared,
     previewOf,
     unreadOf,
     receive,

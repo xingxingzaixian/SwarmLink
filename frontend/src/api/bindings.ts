@@ -93,6 +93,14 @@ export const realApi: SwarmApi = {
   sendFileMessage: async (peerId, jobId, fileName) =>
     ChatService.SendFileMessage(peerId, jobId, fileName),
 
+  clearConversation: async (convId) => {
+    await ChatService.ClearConversation(convId)
+  },
+  restoreConversation: async (convId) => {
+    await ChatService.RestoreConversation(convId)
+  },
+  clearedAt: async (convId) => ChatService.ClearedAt(convId),
+
   sendFile: async (peerId, path) => TransferService.SendFile(peerId, path),
   transfers: async () => list(await TransferService.List()),
   revealFile: async (path) => {

@@ -161,6 +161,9 @@ func (a *PeerApp) Start() {
 		if err := a.dir.Upsert(p); err != nil && a.lg != nil {
 			a.lg.Warn("peer directory upsert failed", "err", err)
 		}
+		if a.lg != nil {
+			a.lg.Info("peer: marked online from connection", "peer_id", id.String(), "addr", ev.Addr)
+		}
 	})
 
 	a.bus.Subscribe(eventbus.TopicPeerOffline, func(payload any) {

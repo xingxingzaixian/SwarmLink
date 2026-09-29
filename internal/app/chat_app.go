@@ -8,6 +8,7 @@ import (
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
+	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
@@ -67,12 +68,20 @@ func (a *ChatApp) SendImage(ctx context.Context, peerID identity.NodeID, content
 
 // SendFile 发送单聊文件消息。
 //
-// content 是 job_id：这条消息不携带文件本身，只是通知对端
-// 「我正在发送一个文件，你可以在传输面板查看进度」。
+// content 只带 job_id 与文件名：这条消息不携带文件本身，只是让两端的
+// 聊天框都出现一张文件卡片（实际传输由 TransferApp 的独立通道完成）。
+//
+// 用 EncodeJSON 而不是手写 fmt.Sprintf：文件名里的一个英文引号就能把
+// 拼出来的 JSON 变成坏数据，而接收方解析失败只表现为「文件名不见了」。
 func (a *ChatApp) SendFile(ctx context.Context, peerID identity.NodeID, jobID string, fileName string) (message.Message, error) {
-	// 用 JSON 编码 job_id 和文件名，方便前端解析
-	payload := fmt.Sprintf(`{"job_id":"%s","file_name":"%s"}`, jobID, fileName)
-	return a.send(ctx, peerID, payload, message.MsgTypeFile)
+	payload, err := protocol.EncodeJSON(message.FileMessageContent{
+		JobID:    jobID,
+		FileName: fileName,
+	})
+	if err != nil {
+		return message.Message{}, fmt.Errorf("chat: encode file content: %w", err)
+	}
+	return a.send(ctx, peerID, string(payload), message.MsgTypeFile)
 }
 
 // send 是文本与图片共用的发送实现。
@@ -101,6 +110,43 @@ func (a *ChatApp) send(ctx context.Context, peerID identity.NodeID, content stri
 		}
 	}()
 	return msg, nil
+}
+
+// ClearConversation 记录会话的清空点：早于它的消息不再出现在聊天区。
+//
+// 【不删数据】：消息仍在库里，RestoreConversation 之后原样回来。
+// 时间取本机时钟 —— 清空点是本机视图偏好，不需要与其他节点对齐。
+func (a *ChatApp) ClearConversation(ctx context.Context, convID string) error {
+	if convID == "" {
+		return fmt.Errorf("chat: conv id 不能为空")
+	}
+	return a.store.SetConvCleared(convID, a.clk.Now())
+}
+
+// RestoreConversation 撤销清空点（幂等：没清空过也返回 nil）。
+func (a *ChatApp) RestoreConversation(ctx context.Context, convID string) error {
+	if convID == "" {
+		return fmt.Errorf("chat: conv id 不能为空")
+	}
+	return a.store.RemoveConvClear(convID)
+}
+
+// ClearedAt 返回会话清空点的毫秒时间戳；0 表示未清空。
+//
+// 读失败一律按「未清空」返回 0：宁可多显示消息，也不要让用户的
+// 聊天记录因为一次读错误而凭空消失。
+func (a *ChatApp) ClearedAt(ctx context.Context, convID string) (int64, error) {
+	if convID == "" {
+		return 0, nil
+	}
+	at, ok, err := a.store.ConvClearedAt(convID)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, nil
+	}
+	return at.UnixMilli(), nil
 }
 
 // Message 按 msg_id 取一条消息（「另存为」等按 id 回查的入口用）。
@@ -277,9 +323,18 @@ func (a *ChatApp) SweepOutbox(ctx context.Context) {
 
 // FlushTo 对端上线后立即冲刷其所有待确认消息。
 func (a *ChatApp) FlushTo(ctx context.Context, peerID identity.NodeID) {
+	if a.lg != nil {
+		a.lg.Info("chat: flushing outbox to peer", "peer_id", peerID.String())
+	}
 	entries, err := a.store.ListByConv(message.DirectConvID(a.self, peerID))
 	if err != nil {
+		if a.lg != nil {
+			a.lg.Warn("chat: list by conv failed", "conv_id", message.DirectConvID(a.self, peerID), "err", err)
+		}
 		return
+	}
+	if a.lg != nil {
+		a.lg.Info("chat: found pending messages", "peer_id", peerID.String(), "count", len(entries))
 	}
 	for _, e := range entries {
 		msg, ok := a.store.Get(e.MsgID)
@@ -292,24 +347,97 @@ func (a *ChatApp) FlushTo(ctx context.Context, peerID identity.NodeID) {
 	}
 }
 
+// MaybeConnectAndFlush 检查是否有待发送消息，如果有则主动建立连接并发送
+func (a *ChatApp) MaybeConnectAndFlush(ctx context.Context, peerID identity.NodeID) {
+	entries, err := a.store.ListByConv(message.DirectConvID(a.self, peerID))
+	if err != nil {
+		if a.lg != nil {
+			a.lg.Warn("chat: list by conv failed", "conv_id", message.DirectConvID(a.self, peerID), "err", err)
+		}
+		return
+	}
+	// 没有待发送消息，不需要主动连接
+	if len(entries) == 0 {
+		if a.lg != nil {
+			a.lg.Debug("chat: no pending messages, skip connect", "peer_id", peerID.String())
+		}
+		return
+	}
+	if a.lg != nil {
+		a.lg.Info("chat: found pending messages, establishing connection", "peer_id", peerID.String(), "count", len(entries))
+	}
+	// 主动建立连接（这会触发 FlushTo）
+	go a.FlushTo(ctx, peerID)
+}
+
 // Start 订阅 peer.online 以触发 outbox 冲刷。
 func (a *ChatApp) Start(ctx context.Context) {
 	if a.bus == nil {
+		if a.lg != nil {
+			a.lg.Warn("chat: event bus is nil, cannot subscribe to peer online")
+		}
 		return
 	}
+	if a.lg != nil {
+		a.lg.Info("chat: starting, subscribing to peer online events")
+	}
+	
+	// 订阅节点上线事件（TCP 连接建立时）
 	a.bus.Subscribe(eventbus.TopicPeerOnline, func(payload any) {
 		ev, ok := payload.(eventbus.PeerOnline)
 		if !ok {
+			if a.lg != nil {
+				a.lg.Warn("chat: peer online event type mismatch", "type", fmt.Sprintf("%T", payload))
+			}
 			return
 		}
 		id, err := identity.ParseNodeID(ev.NodeID)
 		if err != nil {
+			if a.lg != nil {
+				a.lg.Warn("chat: parse node id failed", "node_id", ev.NodeID, "err", err)
+			}
 			return
+		}
+		if a.lg != nil {
+			a.lg.Info("chat: peer online (TCP connected), flushing outbox", "peer_id", id.String())
 		}
 		go a.FlushTo(ctx, id)
 	})
+
+	// 订阅节点发现事件（UDP 广播收到通告时）
+	// 用于处理：对方启动后即使没有建立TCP连接，也要主动连接并发送离线消息
+	a.bus.Subscribe(eventbus.TopicPeerDiscovered, func(payload any) {
+		p, ok := payload.(peer.Peer)
+		if !ok {
+			if a.lg != nil {
+				a.lg.Warn("chat: peer discovered event type mismatch", "type", fmt.Sprintf("%T", payload))
+			}
+			return
+		}
+		// 只有对方重新上线（之前是离线状态）才主动连接
+		if p.State != peer.StateOnline && p.State != peer.StateDiscovered {
+			return
+		}
+		if a.lg != nil {
+			a.lg.Info("chat: peer discovered (UDP announce), checking for pending messages", "peer_id", p.NodeID.String())
+		}
+		go a.MaybeConnectAndFlush(ctx, p.NodeID)
+	})
+	if a.lg != nil {
+		a.lg.Info("chat: subscribed to peer online and discovered events")
+	}
 }
 
+// trySend 把一条消息发给对端。
+//
+// 文件消息【不再】有特殊分支：它和文本、图片走同一条投递路径
+// （outbox 重试 → ACK → 出队）。曾经这里把 file 消息转给本机的
+// TransferApp.HandleFileMessage「先检查文件还在不在」，结果是：
+//   - 消息从不经过 sess.Send，对端的聊天框永远看不到文件卡片；
+//   - 它永远拿不到 ACK，outbox 于是一直重试，每次重试都再产生一条
+//     假的「文件已被删除或移动」消息，源源不断发给对端。
+// 文件是否还在，由 TransferApp 在真正传输时判断（失败会发 transfer:error
+// 并在传输面板标红），不该由聊天消息来前置检查。
 func (a *ChatApp) trySend(ctx context.Context, peerID identity.NodeID, msg message.Message) error {
 	sess, err := a.session(ctx, peerID)
 	if err != nil {

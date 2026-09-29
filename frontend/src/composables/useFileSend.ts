@@ -2,10 +2,60 @@ import { ref } from 'vue'
 
 import { isMockMode } from '../api'
 import { pickFiles, pickImages } from '../api/dialog'
+import type { Conversation } from '../api/types'
 import { useChatStore } from '../stores/chat'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
 import { baseName } from '../utils/format'
+
+/** sendFilesWithMessages 的结果：成功数 + 逐个失败原因。 */
+export interface SendFilesResult {
+  sent: number
+  errors: string[]
+}
+
+/**
+ * 「把一个或多个文件发给某个会话对象」这一动作的**唯一**实现。
+ *
+ * 必须是一次调用完成两件事：
+ *   1. 让 TransferApp 真正开始传输（transfers.sendFile）；
+ *   2. 往会话里插一条文件消息，让【两端】的聊天框都出现文件卡片。
+ *
+ * 为什么强调「唯一」：这条链路曾经被两个入口各写一遍 —— 回形针那处调了
+ * 第 2 步，拖放那处只调了第 1 步。于是拖进去的文件只出现在右栏传输列表里，
+ * 聊天框静悄悄的，用户以为文件没发出去。
+ *
+ * 导出成模块级函数（而不是只留在 composable 里）就是为了让拖放这类
+ * 非组件场景也能走同一条路 —— 下一个入口不必再记得「还要发消息」。
+ */
+export async function sendFilesWithMessages(
+  conv: Conversation,
+  paths: string[]
+): Promise<SendFilesResult> {
+  const chat = useChatStore()
+  const transfers = useTransferStore()
+
+  const errors: string[] = []
+  let sent = 0
+
+  for (const path of paths) {
+    try {
+      const jobId = await transfers.sendFile(conv.peerId ?? '', path)
+      sent++
+
+      // 文件消息单独兜异常：传输已经跑起来了，卡片插不进去是「少一条记录」，
+      // 不该反过来把这次传输报成失败（那会让用户重复发送）。
+      try {
+        await chat.sendFile(conv, jobId, baseName(path))
+      } catch (e: any) {
+        errors.push(`文件消息未显示: ${baseName(path)}（${String(e?.message ?? e)}）`)
+      }
+    } catch (e: any) {
+      errors.push(String(e?.message ?? e) || `发送文件失败: ${baseName(path)}`)
+    }
+  }
+  return { sent, errors }
+}
 
 /**
  * 「把文件发给当前会话对象」这一动作的唯一实现。
@@ -16,37 +66,29 @@ import { baseName } from '../utils/format'
  */
 export function useFileSend() {
   const chat = useChatStore()
-  const transfers = useTransferStore()
   const ui = useUiStore()
 
   const sending = ref(false)
 
   async function sendPaths(paths: string[]): Promise<void> {
-    const peerId = chat.activePeerId
-    if (!peerId || !paths.length) return
+    if (!paths.length) return
+
+    // 没有会话就【必须】说出来。这里曾经是静默 return：用户点回形针、
+    // 选完文件，界面毫无反应，也没有任何提示 —— 看起来就像功能坏了。
+    const conv = chat.activeConversation
+    if (!conv?.peerId) {
+      ui.notify('先打开与某个联系人的会话，再发送文件')
+      return
+    }
 
     // 先切面板再发起：否则首个进度事件可能早于面板切换，看起来像没反应
     ui.focusTransfer()
     sending.value = true
     try {
-      const jobIds: string[] = []
-      for (const path of paths) {
-        try {
-          const jobId = await transfers.sendFile(peerId, path)
-          jobIds.push(jobId)
-          
-          // 发送文件消息到聊天窗口
-          const conv = chat.activeConversation
-          if (conv) {
-            await chat.sendFile(conv, jobId, baseName(path))
-          }
-        } catch (e: any) {
-          ui.notify(String(e?.message ?? e) || `发送文件失败: ${baseName(path)}`)
-        }
-      }
-      
-      if (jobIds.length > 0) {
-        ui.notify(jobIds.length === 1 ? '已开始发送' : `已开始发送 ${jobIds.length} 个文件`)
+      const { sent, errors } = await sendFilesWithMessages(conv, paths)
+      for (const msg of errors) ui.notify(msg)
+      if (sent > 0) {
+        ui.notify(sent === 1 ? '已开始发送' : `已开始发送 ${sent} 个文件`)
       }
     } finally {
       sending.value = false

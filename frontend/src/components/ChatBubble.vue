@@ -13,9 +13,11 @@ import { computed, ref } from 'vue'
 
 import Avatar from './Avatar.vue'
 import Icon from './Icon.vue'
+import { getApi } from '../api'
 import type { Message } from '../api/types'
 import { bubbleTime } from '../utils/format'
 import { imageBox, imageSrc, parseImageContent } from '../utils/image'
+import { parseFileContent, parseFileFailedContent } from '../utils/message'
 import { useTransferStore } from '../stores/transfer'
 
 const props = withDefaults(
@@ -41,6 +43,7 @@ const time = computed(() => bubbleTime(props.message.sentAt))
 
 const isImage = computed(() => props.message.msgType === 'image')
 const isFile = computed(() => props.message.msgType === 'file')
+const isFileFailed = computed(() => props.message.msgType === 'file_failed')
 
 /**
  * 图片消息的内容解析。
@@ -55,31 +58,28 @@ const box = computed(() =>
 )
 
 /**
- * 文件消息的内容解析。
+ * 文件消息与失败消息的内容解析。
  *
- * content 是 JSON: {"job_id":"xxx","file_name":"xxx"}
+ * 解析逻辑放在 utils/message.ts 里有测试兜着：这些字段名来自别人写下的
+ * 数据（历史版本用过三种写法），容错不该埋在组件里靠肉眼看。
  */
-const fileInfo = computed(() => {
-  if (!isFile.value) return null
-  try {
-    const parsed = JSON.parse(props.message.content)
-    return {
-      jobId: parsed.job_id || '',
-      fileName: parsed.file_name || '未知文件'
-    }
-  } catch {
-    return {
-      jobId: '',
-      fileName: '文件消息'
-    }
-  }
-})
+const fileInfo = computed(() => (isFile.value ? parseFileContent(props.message.content) : null))
+const fileFailed = computed(() =>
+  isFileFailed.value ? parseFileFailedContent(props.message.content) : null
+)
 
 // 获取传输任务状态
+//
+// 注意 transfers.jobs 是【数组】而不是 ref：Pinia 的 setup store 会把
+// 返回的 ref 自动解包（store.jobs 等价于 jobs.value）。这里写 `.value`
+// 会得到 undefined，进而在渲染函数里抛 TypeError —— 而渲染期的异常会被
+// Vue 吞掉并把整个气泡替换成一个空注释节点：文件消息看起来「根本没发出去」，
+// 状态文案则永远停在兜底值「正在传输...」。
 const transfers = useTransferStore()
 const transferJob = computed(() => {
-  if (!fileInfo.value?.jobId) return null
-  return transfers.jobs.value.find((j) => j.jobId === fileInfo.value.jobId)
+  const jobId = fileInfo.value?.jobId
+  if (!jobId) return null
+  return transfers.jobs.find((j) => j.jobId === jobId) ?? null
 })
 
 // 文件传输状态文本
@@ -132,13 +132,17 @@ const stateText = computed(() => {
   }
 })
 
-// 点击文件名打开所在文件夹
+// 点击文件名打开所在文件夹。
+//
+// 原写法 `(await import('../api')).then((m) => m.getApi())` 是坏的：命名空间
+// 对象上没有 then，拿到的也不是 API 实例 —— 点文件名只会在控制台留下一条
+// 「打开文件位置失败」。这里直接用静态导入的 getApi()。
 async function openFileLocation() {
-  if (!filePath.value) return
+  const path = filePath.value
+  if (!path) return
   try {
-    const api = (await import('../api')).then((m) => m.getApi())
-    const apiInstance = await api()
-    await apiInstance.revealFile(filePath.value)
+    const api = await getApi()
+    await api.revealFile(path)
   } catch (e: any) {
     console.error('打开文件位置失败:', e)
   }
@@ -162,7 +166,10 @@ async function openFileLocation() {
     <div class="col">
       <div v-if="showSender && !out && first" class="who">{{ senderName }}</div>
 
-      <div class="bubble" :class="{ 'bubble-image': isImage, 'bubble-file': isFile }">
+      <div
+        class="bubble"
+        :class="{ 'bubble-image': isImage, 'bubble-file': isFile || isFileFailed }"
+      >
         <!-- 时间显示在内容上面 -->
         <div class="bubble-time">{{ time }}</div>
 
@@ -193,6 +200,20 @@ async function openFileLocation() {
                 {{ fileInfo?.fileName || '文件' }}
               </div>
               <div class="file-meta">{{ transferStatus }}</div>
+            </div>
+          </div>
+        </template>
+        <!--
+          传输失败：这条消息曾经没有渲染分支，于是它以一段裸 JSON
+          （{"JobID":"","FileName":"","Reason":"文件已被删除或移动"}）的形式
+          直接糊在聊天框里 —— 既看不懂，也占满了屏幕。
+        -->
+        <template v-else-if="isFileFailed">
+          <div class="file-message failed">
+            <Icon name="alert" :size="32" />
+            <div class="file-info">
+              <div class="file-name">{{ fileFailed?.fileName || '文件' }}</div>
+              <div class="file-meta">{{ fileFailed?.reason || '发送失败' }}</div>
             </div>
           </div>
         </template>
@@ -372,6 +393,16 @@ async function openFileLocation() {
 
 .row.out .file-meta {
   color: rgba(255, 255, 255, 0.76);
+}
+
+/* 传输失败：用警示色与「正在传输」的文件卡片区分开，
+   否则用户看到的只是又一个文件条目，不会意识到它没发出去。
+   --err-ink 在深浅两套主题下都是「当前底色上的可读色」。 */
+.file-message.failed,
+.file-message.failed .file-name,
+.file-message.failed .file-meta,
+.row.out .file-message.failed .file-meta {
+  color: var(--err-ink);
 }
 
 .shot {

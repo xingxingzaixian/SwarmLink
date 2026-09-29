@@ -226,3 +226,41 @@ func TestTransferRepoResumable(t *testing.T) {
 		t.Fatalf("no active jobs expected, got %d", len(list))
 	}
 }
+
+// 与 sqlite 侧同一组断言：两个实现必须对等，否则 app 层测试（用 mem）通过
+// 而真实运行（用 sqlite）出错，是最难查的一类漂移。
+func TestConvClearRoundTripAndOverwrite(t *testing.T) {
+	m := NewMessages(clock.New())
+
+	if _, ok, err := m.ConvClearedAt("c1"); err != nil || ok {
+		t.Fatalf("未清空时应 ok=false，得到 ok=%v err=%v", ok, err)
+	}
+
+	if err := m.SetConvCleared("c1", time.UnixMilli(1_000)); err != nil {
+		t.Fatalf("SetConvCleared: %v", err)
+	}
+	got, ok, err := m.ConvClearedAt("c1")
+	if err != nil || !ok || got.UnixMilli() != 1_000 {
+		t.Fatalf("读回 = %v ok=%v err=%v，期望 1000/true", got, ok, err)
+	}
+
+	if err := m.SetConvCleared("c1", time.UnixMilli(2_000)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := m.ConvClearedAt("c1"); got.UnixMilli() != 2_000 {
+		t.Fatalf("二次清空未覆盖，仍是 %d", got.UnixMilli())
+	}
+
+	if _, ok, _ := m.ConvClearedAt("c2"); ok {
+		t.Fatal("清空 c1 不应影响 c2")
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := m.RemoveConvClear("c1"); err != nil {
+			t.Fatalf("RemoveConvClear(第 %d 次): %v", i+1, err)
+		}
+	}
+	if _, ok, _ := m.ConvClearedAt("c1"); ok {
+		t.Fatal("撤销后仍读到清空点")
+	}
+}

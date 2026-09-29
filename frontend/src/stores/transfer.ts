@@ -100,6 +100,14 @@ export const useTransferStore = defineStore('transfer', () => {
       return
     }
     const prev = jobs.value[i]
+    // 已结束的任务不再接受进度更新。
+    //
+    // 进度事件在前端被 requestAnimationFrame 合并（events/index.ts 的
+    // scheduleProgressFlush），而 transfer:done / transfer:error 是【同步】
+    // 应用的。于是帧内最后一条进度会晚于 done 落地，若无条件照收，
+    // 就会把「传输完成」打回「正在传输」—— 表现为「文件早就传完了，
+    // 气泡上还写着正在传输」，而且此后再没有任何事件能把它改回来。
+    if (!isActive(prev.status)) return
     jobs.value[i] = {
       ...prev,
       percent: p.percent,

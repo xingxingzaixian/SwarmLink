@@ -30,6 +30,9 @@ import type {
  * 因此右栏的「文件发送进度」在浏览器里也能被完整走查。
  */
 export function createMockApi(): SwarmApi {
+  /** 每会话的清空点（毫秒）；与后端一样，缺省 = 未清空。 */
+  const cleared = new Map<string, number>()
+
   const self: Self = {
     nodeId: 'aabbccddeeff0011', // 16 位 hex = 8 字节指纹
     displayName: '本机（预览模式）',
@@ -365,6 +368,15 @@ export function createMockApi(): SwarmApi {
     },
     async saveImage() {
       // 降级预览里没有原生保存对话框，调用方会退化成浏览器下载
+    },
+    async clearConversation(convId) {
+      cleared.set(convId, Date.now())
+    },
+    async restoreConversation(convId) {
+      cleared.delete(convId)
+    },
+    async clearedAt(convId) {
+      return cleared.get(convId) ?? 0
     },
     async sendFileMessage(peerId, jobId, fileName) {
       const convId = directConvId(self.nodeId, peerId)

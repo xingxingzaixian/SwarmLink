@@ -519,6 +519,26 @@ func (s *ChatService) History(peerID string, limit int, before int64) ([]Message
 	return out, nil
 }
 
+// ClearConversation 清空一个会话的聊天区：消息不删除，只是不再显示。
+//
+// 参数是 convID 而不是 peerID：清空点是会话级概念，单聊与群聊无差别，
+// 而前端手里就是 convId（它也可能是群 ID）。
+func (s *ChatService) ClearConversation(convID string) error {
+	return s.d.Chat.ClearConversation(context.Background(), convID)
+}
+
+// RestoreConversation 撤销清空，让被隐藏的消息重新显示（幂等）。
+func (s *ChatService) RestoreConversation(convID string) error {
+	return s.d.Chat.RestoreConversation(context.Background(), convID)
+}
+
+// ClearedAt 返回会话清空点的毫秒时间戳；0 表示未清空。
+//
+// 前端据此决定「查看历史」按钮是否可点（0 = 没有可恢复的东西）。
+func (s *ChatService) ClearedAt(convID string) (int64, error) {
+	return s.d.Chat.ClearedAt(context.Background(), convID)
+}
+
 // Conversations 返回会话列表（按最近消息时间倒序）。
 //
 // 目前直接从节点目录 + 消息推导，避免为 UI 单独维护一张表。

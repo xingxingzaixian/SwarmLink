@@ -204,6 +204,22 @@ export interface SwarmApi {
   /** 发送文件消息（通知聊天窗口有文件传输）。 */
   sendFileMessage(peerId: string, jobId: string, fileName: string): Promise<Message>
 
+  /**
+   * 清空一个会话的聊天区。
+   *
+   * 「清空」不是删除：只是记下一个清空点，早于它的消息不再显示。
+   * 因此这个操作随时可以被 restoreConversation 撤销。
+   */
+  clearConversation(convId: string): Promise<void>
+  /** 撤销清空，让被隐藏的消息重新显示。 */
+  restoreConversation(convId: string): Promise<void>
+  /**
+   * 会话清空点的毫秒时间戳；**0 表示未清空**。
+   *
+   * 前端用它做两件事：过滤聊天区消息、决定「查看历史」按钮是否可点。
+   */
+  clearedAt(convId: string): Promise<number>
+
   // 传输
   sendFile(peerId: string, path: string): Promise<string>
   transfers(): Promise<TransferJob[]>

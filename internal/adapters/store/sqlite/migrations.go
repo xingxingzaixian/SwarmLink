@@ -135,6 +135,21 @@ CREATE TABLE IF NOT EXISTS seed_nodes (
 );
 `,
 	},
+	{
+		version: 2,
+		name:    "conv_clears",
+		// 会话「清空点」：早于它的消息不再显示（消息本身不删除）。
+		//
+		// 独立一张表而不是塞进 conversations：清空是「本机视图偏好」，
+		// 与 conversations 那张由消息派生的表职责不同，混进去会让
+		// 「会话行的写入」与「视图偏好」互相牵制。
+		sql: `
+CREATE TABLE IF NOT EXISTS conv_clears (
+    conv_id    TEXT PRIMARY KEY,
+    cleared_at INTEGER NOT NULL
+);
+`,
+	},
 }
 
 func migrationChecksum(sql string) string {

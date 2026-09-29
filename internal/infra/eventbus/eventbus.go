@@ -9,19 +9,28 @@ import "sync"
 
 // Topic 常量集中定义，避免主题字符串散落（架构书 3.5）。
 const (
-	TopicPeerDiscovered   = "peer.discovered"
-	TopicPeerOnline       = "peer.online"
-	TopicPeerOffline      = "peer.offline"
-	TopicChatReceived     = "chat.received"
-	TopicChatDelivered    = "chat.delivered"
-	TopicGroupUpdated     = "group.updated"
-	TopicTransferState    = "transfer.state"
-	TopicTransferProgress = "transfer.progress"
-	TopicTransferDone     = "transfer.done"
-	TopicTransferError    = "transfer.error"
-	TopicNetError         = "net.error"
-	TopicConfigChanged    = "config.changed"
+	TopicPeerDiscovered     = "peer.discovered"
+	TopicPeerOnline         = "peer.online"
+	TopicPeerOffline        = "peer.offline"
+	TopicChatReceived       = "chat.received"
+	TopicChatDelivered      = "chat.delivered"
+	TopicGroupUpdated       = "group.updated"
+	TopicTransferState      = "transfer.state"
+	TopicTransferProgress  = "transfer.progress"
+	TopicTransferDone       = "transfer.done"
+	TopicTransferError     = "transfer.error"
+	TopicTransferFileFailed = "transfer.file_failed"
+	TopicNetError           = "net.error"
+	TopicConfigChanged      = "config.changed"
 )
+
+// TransferFileFailed 文件传输失败事件
+type TransferFileFailed struct {
+	JobID    string // 失败的任务ID
+	PeerID   string // 对方节点ID
+	FileName string // 文件名
+	Reason   string // 失败原因
+}
 
 type handler struct {
 	id uint64

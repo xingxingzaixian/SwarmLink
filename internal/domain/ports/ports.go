@@ -151,6 +151,19 @@ type ChatStore interface {
 	AppendOutgoing(m message.Message, nextTry time.Time) error
 	// Deliver 单事务把消息置为 delivered 并删除对应 outbox 记录。
 	Deliver(msgID string) error
+
+	// 会话「清空点」：早于它的消息不再出现在聊天区（消息本身【不删除】）。
+	//
+	// 三个方法都按 conv_id 操作：单聊与群聊共用一份实现（单聊 conv_id 含冒号、
+	// 群 ID 是纯 hex，形态天然不相交）。
+	//
+	// SetConvCleared 写入/覆盖清空点：用户清空后又聊几句再清空一次时，
+	// 边界必须【往前推】，所以覆盖是必须的语义而不是意外。
+	SetConvCleared(convID string, at time.Time) error
+	// ConvClearedAt 读取清空点；从未清空时返回 ok=false（这不是错误）。
+	ConvClearedAt(convID string) (time.Time, bool, error)
+	// RemoveConvClear 撤销清空（幂等：没有记录也返回 nil）。
+	RemoveConvClear(convID string) error
 }
 
 // ---------------------------------------------------------------------------

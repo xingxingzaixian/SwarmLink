@@ -1,3 +1,4 @@
+import { sendFilesWithMessages } from '../composables/useFileSend'
 import { useChatStore } from '../stores/chat'
 import { useDebugStore } from '../stores/debug'
 import { usePeersStore } from '../stores/peers'
@@ -62,11 +63,14 @@ async function handleFilesDropped(data: FilesDroppedEvent): Promise<void> {
   }
 
   ui.focusTransfer()
-  const ok = await transfers.sendFiles(peerId, files)
+  // 走与回形针完全相同的实现：拖放这条路径曾经只起了传输、没插文件消息，
+  // 于是聊天框里看不到任何文件信息（用户据此以为文件没发出去）。
+  const { sent, errors } = await sendFilesWithMessages(conv, files)
+  for (const msg of errors) ui.notify(msg)
   ui.notify(
-    ok === files.length
-      ? `已开始发送 ${ok} 个文件`
-      : `已发起 ${ok}/${files.length} 个文件，失败的请看右侧`
+    sent === files.length
+      ? `已开始发送 ${sent} 个文件`
+      : `已发起 ${sent}/${files.length} 个文件，失败的请看右侧`
   )
 }
 

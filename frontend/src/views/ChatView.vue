@@ -20,6 +20,7 @@ import { useChatStore } from '../stores/chat'
 import { useGroupStore } from '../stores/group'
 import { usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
+import { canClear, canRestore } from '../utils/clearView'
 import { dateLabel } from '../utils/format'
 
 const chat = useChatStore()
@@ -273,6 +274,37 @@ async function sendTypedPath(): Promise<void> {
   ui.hidePathInput()
   await sendPaths([p])
 }
+
+// ------------------------------------------------------------ 清空 / 查看历史
+
+/**
+ * 清空当前会话的聊天区。
+ *
+ * 刻意不做二次确认：这个动作【不删数据】，且「查看历史」就是它的撤销键。
+ * 加确认框反而会让用户以为自己在做危险操作。
+ */
+async function clearView(): Promise<void> {
+  const c = conv.value
+  if (!c) return
+  try {
+    await chat.clearConversation(c)
+    ui.notify('已清空当前聊天区（消息未删除，点「查看历史」可恢复）')
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || '清空失败')
+  }
+}
+
+/** 撤销清空：被隐藏的消息立刻回来（本地已有数据，不需要重新请求）。 */
+async function restoreView(): Promise<void> {
+  const c = conv.value
+  if (!c) return
+  try {
+    await chat.restoreConversation(c)
+    ui.notify('已恢复显示被清空的消息')
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || '恢复显示失败')
+  }
+}
 </script>
 
 <template>
@@ -316,6 +348,17 @@ async function sendTypedPath(): Promise<void> {
 
       <div v-else-if="!chat.activeMessages.length" class="empty">
         <div v-if="chat.loading">正在加载历史…</div>
+        <!--
+          「已清空」与「还没有消息」必须分开说：两者都是空屏，但前者
+          用户刚刚亲手清空过（他需要知道消息还在、以及怎么找回来），
+          后者则是一个从没聊过的新会话。
+        -->
+        <template v-else-if="conv && chat.isCleared(conv.convId)">
+          <div class="empty-title">已清空</div>
+          <div>
+            消息没有被删除 · 点上方「查看历史」可恢复显示
+          </div>
+        </template>
         <template v-else>
           <div class="empty-title">还没有消息</div>
           <div>
@@ -380,6 +423,26 @@ async function sendTypedPath(): Promise<void> {
             @close="emojiOpen = false"
           />
         </div>
+
+        <button
+          class="icon-btn"
+          :disabled="!conv || !canClear(chat.activeMessages.length)"
+          title="清空聊天区（不删除消息，可随时查看历史）"
+          aria-label="清空聊天区"
+          @click="clearView"
+        >
+          <Icon name="trash" :size="17" />
+        </button>
+
+        <button
+          class="icon-btn"
+          :disabled="!conv || !canRestore(chat.clearedAtOf(conv.convId))"
+          title="查看历史（恢复显示被清空的消息）"
+          aria-label="查看历史"
+          @click="restoreView"
+        >
+          <Icon name="clock" :size="17" />
+        </button>
 
         <span class="spacer" />
         <span class="hint">Enter 发送 · Shift + Enter 换行</span>

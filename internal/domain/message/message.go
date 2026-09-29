@@ -38,6 +38,8 @@ const (
 	MsgTypeImage MsgType = "image"
 	// MsgTypeFile 的 content 是文件传输的 job_id。
 	MsgTypeFile MsgType = "file"
+	// MsgTypeFileFailed 表示文件传输失败
+	MsgTypeFileFailed MsgType = "file_failed"
 )
 
 // Message 是单聊/群聊共用的消息实体。
@@ -52,6 +54,28 @@ type Message struct {
 	SentAt    time.Time
 	RecvAt    time.Time
 	State     State
+}
+
+// FileFailedContent 文件传输失败的内容。
+//
+// 字段名必须是 snake_case：这份 JSON 会原样存进消息、并投递给对端，
+// 由前端解析成「文件发送失败」卡片。曾经没有 tag，于是序列化出
+// JobID/FileName/Reason —— 前端一个字段都读不到，只能显示成一段裸 JSON。
+type FileFailedContent struct {
+	JobID    string `json:"job_id"`   // 失败的任务ID
+	FileName string `json:"file_name"` // 文件名
+	Reason   string `json:"reason"`   // 失败原因
+}
+
+// FileMessageContent 文件消息内容。
+//
+// 【不】含发送方的本地路径：这条消息会投递给对端，而本地路径在对方那里
+// 毫无用处（那是发送方磁盘上的位置），带上它只是把隐私送出网。
+// 真正的传输由 TransferApp 的独立通道完成，与本消息无关 —— 本消息只负责
+// 让两端的聊天框都出现一张文件卡片。
+type FileMessageContent struct {
+	JobID    string `json:"job_id"`    // 传输任务ID
+	FileName string `json:"file_name"` // 文件名
 }
 
 // NewID 生成 UUIDv7 —— 时间有序，便于 UI 排序与游标分页（ADR-004）。

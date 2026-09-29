@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"bytes"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestMigrationsAreReentrant(t *testing.T) {
 
 	// 表都建好了
 	for _, table := range []string{"conversations", "messages", "outbox", "groups",
-		"group_members", "peers", "transfer_jobs", "seed_nodes"} {
+		"group_members", "peers", "transfer_jobs", "seed_nodes", "conv_clears"} {
 		var name string
 		err := db2.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
 		if err != nil {
@@ -340,5 +341,89 @@ func TestGroupsRoundTrip(t *testing.T) {
 	}
 	if len(g.List()) != 1 {
 		t.Fatal("list failed")
+	}
+}
+
+// 老库升级：只应用过 v1 的数据库再次打开时，必须自动补上 v2。
+//
+// 这是最容易在真机上炸、却最容易在测试里漏的一条路径 —— 开发者的库
+// 早已是 v1，用户升级到本版本时走的正是这里（要么补建表，要么因为
+// checksum / 表已存在而启动失败）。
+func TestMigrateFromV1AppliesLaterVersions(t *testing.T) {
+	db, path := openTest(t)
+
+	// 把库退回「只应用过 v1」的样子：删掉 v2 的记录与它的表
+	if err := db.Write(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DROP TABLE conv_clears`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM schema_migrations WHERE version = 2`)
+		return err
+	}); err != nil {
+		t.Fatalf("退回 v1: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重新打开：v1 的 checksum 必须仍然匹配（证明 v1 没被改过），
+	// v2 必须被重新应用
+	reopened := openAt(t, path)
+	defer func() { _ = reopened.Close() }()
+
+	var n int
+	if err := reopened.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = 2`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("v2 没有被重新应用")
+	}
+	var name string
+	if err := reopened.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='conv_clears'`).Scan(&name); err != nil {
+		t.Fatalf("conv_clears 表没有补建: %v", err)
+	}
+}
+
+// 清空点必须能覆盖（用户清空 → 又聊了几句 → 再清空一次，边界要往前推），
+// 且各会话互不影响。
+//
+// 它是「软清空」的全部持久化状态：读错一次就会表现成「消息凭空消失」
+// 或「清空了却又回来」，因此逐条钉住。
+func TestConvClearRoundTripAndOverwrite(t *testing.T) {
+	db, _ := openTest(t)
+	m := NewMessages(db)
+
+	if _, ok, err := m.ConvClearedAt("c1"); err != nil || ok {
+		t.Fatalf("未清空时应 ok=false，得到 ok=%v err=%v", ok, err)
+	}
+
+	if err := m.SetConvCleared("c1", time.UnixMilli(1_000)); err != nil {
+		t.Fatalf("SetConvCleared: %v", err)
+	}
+	got, ok, err := m.ConvClearedAt("c1")
+	if err != nil || !ok || got.UnixMilli() != 1_000 {
+		t.Fatalf("读回 = %v ok=%v err=%v，期望 1000/true", got, ok, err)
+	}
+
+	if err := m.SetConvCleared("c1", time.UnixMilli(2_000)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := m.ConvClearedAt("c1"); got.UnixMilli() != 2_000 {
+		t.Fatalf("二次清空未覆盖，仍是 %d", got.UnixMilli())
+	}
+
+	if _, ok, _ := m.ConvClearedAt("c2"); ok {
+		t.Fatal("清空 c1 不应影响 c2")
+	}
+
+	// 撤销要幂等：连删两次都不报错
+	for i := 0; i < 2; i++ {
+		if err := m.RemoveConvClear("c1"); err != nil {
+			t.Fatalf("RemoveConvClear(第 %d 次): %v", i+1, err)
+		}
+	}
+	if _, ok, _ := m.ConvClearedAt("c1"); ok {
+		t.Fatal("撤销后仍读到清空点")
 	}
 }

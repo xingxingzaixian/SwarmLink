@@ -34,6 +34,8 @@ type Messages struct {
 	messages map[string]message.Message
 	outbox   map[string]ports.OutboxEntry
 	jobs     map[string]transfer.Job
+	// cleared 是会话「清空点」：早于它的消息不显示（消息不删除）。
+	cleared map[string]time.Time
 }
 
 var (
@@ -48,6 +50,7 @@ func NewMessages(clk ports.Clock) *Messages {
 		messages: make(map[string]message.Message),
 		outbox:   make(map[string]ports.OutboxEntry),
 		jobs:     make(map[string]transfer.Job),
+		cleared:  make(map[string]time.Time),
 	}
 }
 
@@ -199,6 +202,31 @@ func (s *Messages) Deliver(msgID string) error {
 		s.messages[msgID] = m
 	}
 	delete(s.outbox, msgID)
+	return nil
+}
+
+// SetConvCleared 写入/覆盖会话清空点（覆盖是必须的：清空后又聊几句再清空，
+// 边界要往前推）。
+func (s *Messages) SetConvCleared(convID string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleared[convID] = at
+	return nil
+}
+
+// ConvClearedAt 读取清空点；从未清空时返回 ok=false（这不是错误）。
+func (s *Messages) ConvClearedAt(convID string) (time.Time, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	at, ok := s.cleared[convID]
+	return at, ok, nil
+}
+
+// RemoveConvClear 撤销清空（幂等）。
+func (s *Messages) RemoveConvClear(convID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cleared, convID)
 	return nil
 }
 
