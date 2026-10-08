@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -355,6 +356,55 @@ func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
 			defer a.releaseStarting(job.JobID)
 			_, _ = a.sendFile(ctx, job.PeerID, job.LocalPath, job.JobID, false)
 		}(j)
+	}
+}
+
+// errAppInterrupted 标记「上次运行没走完」。
+//
+// 它不是对端的问题：用同一个错误值是为了让界面与日志里的措辞一致，
+// 而不是各写各的字符串。
+var errAppInterrupted = errors.New("传输被中断（应用已退出）")
+
+// Recover 收尾上一次运行留下的任务，并立刻试一轮等待中的任务。
+//
+// 两件事都只在启动时做一次：
+//  1. 崩溃残留的 active 任务 —— 它们既不会自己继续、也不会失败，
+//     界面上表现为「永远传输中」的僵尸行（ListActive 一直没人调用，
+//     这个洞是本次顺带补上的）；
+//  2. 等待中的任务 —— 退出期间对端可能已经上线，不该干等到下一个事件。
+func (a *TransferApp) Recover(ctx context.Context) {
+	if active, err := a.store.ListActive(); err == nil {
+		for _, j := range active {
+			switch j.Status {
+			case transfer.StateMetaExchange, transfer.StateTransferring, transfer.StateVerifying:
+			default:
+				continue
+			}
+			if j.Direction == transfer.DirectionSend {
+				// 发送侧：转入等待，随后由下面这一轮立刻重试。
+				// 续传起点由对端回传的位图决定（接收侧的临时文件与位图还在）。
+				a.markWaiting(j, j.JobID, j.PeerID, j.LocalPath, errAppInterrupted)
+				continue
+			}
+			// 接收侧：标失败即可 —— FindResumable 只排除 done/cancelled，
+			// failed 行照样会被对方的下一轮 FILE_META 继承并续传。
+			j.Status = transfer.StateFailed
+			j.Error = errAppInterrupted.Error()
+			j.WaitReason = transfer.WaitNone
+			j.NextTryAt = time.Time{}
+			j.UpdatedAt = a.clk.Now()
+			_ = a.store.UpsertJob(j)
+			if a.bus != nil {
+				a.bus.Publish(eventbus.TopicTransferError, eventbus.TransferError{
+					JobID: j.JobID, PeerID: j.PeerID.String(), Err: errAppInterrupted,
+				})
+			}
+		}
+	}
+
+	// 等待中的任务：无视退避立刻试一轮（退出期间对端可能已经上线了）。
+	if jobs, err := a.store.ListWaiting(); err == nil {
+		a.startJobs(ctx, jobs)
 	}
 }
 
