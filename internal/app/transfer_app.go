@@ -205,6 +205,11 @@ func (a *TransferApp) sendFile(
 			SessionAlive:  a.sessionAlive(peerID),
 			Err:           err,
 		}) {
+			if job.Direction == "" {
+				// 失败发生在任务建成之前（例如拿不到会话）：从本地文件补一份
+				// 完整任务，等待期照样能显示文件名与大小。
+				job = a.newWaitingJob(jobID, peerID, path, sizeOf(path))
+			}
 			job = a.markWaiting(job, jobID, peerID, path, err)
 			err = nil // 「等一会儿」不是错误
 			return
@@ -245,16 +250,12 @@ func (a *TransferApp) sendFile(
 	//    这是本次改动的核心：过去会先算完整文件 SHA-256 再拨号失败，
 	//    一个 10GB 文件为了"发不出去"要先读一整遍磁盘。
 	if !force && !a.peerReachable(peerID) {
-		job = a.newWaitingJob(jobID, peerID, path, statSize)
-		if uerr := a.store.UpsertJob(job); uerr != nil {
-			return job, uerr
-		}
+		fresh := a.newWaitingJob(jobID, peerID, path, statSize)
 		if a.lg != nil {
 			a.lg.Info("transfer: 对端离线，任务进入等待",
-				"job_id", jobID, "peer_id", peerID.String(), "file", job.FileName)
+				"job_id", jobID, "peer_id", peerID.String(), "file", fresh.FileName)
 		}
-		a.publishState(job, "", string(transfer.StateIdle), string(transfer.WaitPeerOffline))
-		return job, nil
+		return a.markWaiting(fresh, jobID, peerID, path, nil), nil
 	}
 
 	select {
@@ -851,6 +852,12 @@ func (a *TransferApp) publishRecvProgress(rj *recvJob) {
 func (a *TransferApp) session(ctx context.Context, peerID identity.NodeID) (ports.Session, error) {
 	if s, ok := a.conns.SessionOf(peerID); ok {
 		return s, nil
+	}
+	if a.dir == nil {
+		// 「立即重试」可以在没有任何目录的情况下被调用（测试与非标准装配）。
+		// 这里必须返回错误而不是让 nil 解引用把进程带走 —— 重试路径崩掉
+		// 比"这次没连上"严重得多。
+		return nil, fmt.Errorf("transfer: no known address for peer %s", peerID)
 	}
 	p, ok := a.dir.Get(peerID)
 	if !ok || p.LastAddr == "" {

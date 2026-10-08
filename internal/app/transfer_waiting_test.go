@@ -440,3 +440,146 @@ func TestWaitingBackoffEscalates(t *testing.T) {
 		t.Fatalf("第二次重试间隔 = %v，期望 4s（退避没有递增）", got.NextTryAt.Sub(fc.Now()))
 	}
 }
+
+// 早退路径（对端看起来离线，连哈希都不做）的退避同样必须递增。
+//
+// 这条守卫来自一个真实缺陷：早退路径每次都 newWaitingJob，而它把 RetryCount
+// 从 1 重新开始 —— 于是"每秒重试一次"永远停不下来，也永远到不了上限。
+func TestWaitingBackoffEscalatesOnOfflineShortcut(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	fc := clock.NewFake(time.Unix(1_700_000_000, 0))
+
+	// noConns + 空目录：永远走"对端离线"的早退路径
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, eventbus.New(), fc, nil)
+	a.ChunkSize = 1024
+
+	p := filepath.Join(t.TempDir(), "o.bin")
+	if err := os.WriteFile(p, bytes.Repeat([]byte{4}, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := a.newWaitingJob("job-offline-backoff", peerID, p, 4096)
+	j.RetryCount = 3
+	j.NextTryAt = fc.Now()
+	if err := repo.UpsertJob(j); err != nil {
+		t.Fatal(err)
+	}
+
+	a.SweepWaiting(context.Background())
+	waitUntil(t, 2*time.Second, "早退路径重新入等待", func() bool {
+		got, err := repo.GetJob("job-offline-backoff")
+		return err == nil && got.RetryCount == 4
+	})
+	got, _ := repo.GetJob("job-offline-backoff")
+	if want := fc.Now().Add(8 * time.Second); !got.NextTryAt.Equal(want) {
+		t.Fatalf("下一次重试时间 = %v（间隔 %v），期望 %v（backoff(4)=8s）",
+			got.NextTryAt, got.NextTryAt.Sub(fc.Now()), want)
+	}
+}
+
+// 取消：任务变 cancelled、清掉等待标记，于是 sweep 再也拾取不到它。
+func TestCancelJobStopsWaiting(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, eventbus.New(), clock.New(), nil)
+
+	p := filepath.Join(t.TempDir(), "x.bin")
+	if err := os.WriteFile(p, bytes.Repeat([]byte{1}, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := a.newWaitingJob("job-cancel", peerID, p, 4096)
+	if err := repo.UpsertJob(j); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.CancelJob("job-cancel"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	got, err := repo.GetJob("job-cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != transfer.StateCancelled {
+		t.Errorf("status = %q, want cancelled", got.Status)
+	}
+	if got.WaitReason != transfer.WaitNone || !got.NextTryAt.IsZero() {
+		t.Errorf("取消后必须清掉等待标记：%q / %v", got.WaitReason, got.NextTryAt)
+	}
+
+	// 取消之后 sweep 必须落空。
+	//
+	// 这里【不】断言 repo.ListWaiting() 为空：测试替身刻意不做领域过滤，
+	// 要验的正是"即便仓储把取消过的任务也递上来，调度层也不会动它"。
+	a.SweepWaiting(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	if got, _ := repo.GetJob("job-cancel"); got.RetryCount != 1 {
+		t.Errorf("取消后仍被自动重试（RetryCount = %d）", got.RetryCount)
+	}
+}
+
+// 不能取消已经在传的任务：当前 sender 没有中断点，假取消比拒绝更糟。
+func TestCancelJobRejectsRunningTransfer(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, eventbus.New(), clock.New(), nil)
+
+	running := transfer.Job{
+		JobID: "job-running", PeerID: peerID, Direction: transfer.DirectionSend,
+		Status: transfer.StateTransferring, ChunkSize: 1024, TotalChunks: 4, FileSize: 4096,
+	}
+	if err := repo.UpsertJob(running); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CancelJob("job-running"); err == nil {
+		t.Fatal("已在传输的任务必须拒绝取消")
+	}
+
+	// 「已经交给 goroutine、但状态还没写成 active」这个窗口同样必须拦住 ——
+	// 放行的后果是那个 goroutine 随后把状态写回"传输中"，取消变成假的。
+	waiting := a.newWaitingJob("job-claimed", peerID, "/tmp/claimed.bin", 4096)
+	if err := repo.UpsertJob(waiting); err != nil {
+		t.Fatal(err)
+	}
+	if !a.claimStarting("job-claimed") {
+		t.Fatal("抢占失败，测试前提不成立")
+	}
+	defer a.releaseStarting("job-claimed")
+	if err := a.CancelJob("job-claimed"); err == nil {
+		t.Fatal("已被交给 goroutine 的任务必须拒绝取消")
+	}
+}
+
+// 立即重试：把退避推到当下，并真的发起一次尝试（force 绕过"目录说离线"）。
+func TestRetryNowStartsAttempt(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	fc := clock.NewFake(time.Unix(1_700_000_000, 0))
+
+	// 目录为空（对端看起来离线）：force 必须照样真的拨一次
+	sess := &brokenSession{
+		peer: peerID, failFrom: 1, err: errors.New("use of closed network connection"),
+	}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, deadConns{sess: sess}, nil, eventbus.New(), fc, nil)
+	a.ChunkSize = 1024
+
+	p := filepath.Join(t.TempDir(), "r.bin")
+	if err := os.WriteFile(p, bytes.Repeat([]byte{2}, 2048), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	j := a.newWaitingJob("job-retry", peerID, p, 2048)
+	j.RetryCount = 5
+	j.NextTryAt = fc.Now().Add(time.Hour) // 退避还很久
+	if err := repo.UpsertJob(j); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.RetryNow(context.Background(), "job-retry"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	waitUntil(t, 2*time.Second, "立即重试真的发起了一次尝试", func() bool {
+		return countAttempted(repo) == 1
+	})
+	if got, _ := repo.GetJob("job-retry"); got.NextTryAt.After(fc.Now()) {
+		t.Errorf("下次重试时间没被推到当下：%v", got.NextTryAt.Sub(fc.Now()))
+	}
+}

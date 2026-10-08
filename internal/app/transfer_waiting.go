@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
@@ -157,26 +159,48 @@ func (a *TransferApp) newWaitingJob(jobID string, peerID identity.NodeID, path s
 	}
 }
 
-// markWaiting 把一个已有任务转入「等待对方上线」并落库。
+// markWaiting 把一个任务转入「等待对方上线」并落库。
+//
+// 【所有进入等待的路径都必须经过这里】：尝试次数递增、创建时间承接、
+// 清掉错误留痕、发状态事件，这几件事只写一遍 —— 少写一处就会出现
+// 「某条路径的退避永远停在第一档」或「等待任务在列表里乱序」。
 //
 // 不写 job.Error：那不是失败，把原因写进去只会让传输列表整行标红。
 // 原因交给日志（排障用）与 WaitReason（界面用）。
 func (a *TransferApp) markWaiting(job transfer.Job, jobID string, peerID identity.NodeID, path string, cause error) transfer.Job {
 	if job.JobID == "" {
-		job = a.newWaitingJob(jobID, peerID, path, sizeOf(path))
+		job.JobID = jobID
 	}
+	if job.LocalPath == "" {
+		job.LocalPath = path
+	}
+
+	// 承接历史：退避档位靠 RetryCount，列表顺序靠 CreatedAt，两者都不能丢。
+	// 取 max 而不是直接覆盖：调用方可能已经带上了历史（尝试中建的任务字面量），
+	// 也可能是全新构造的（早退路径的 newWaitingJob，计数从 1 开始）。
+	if prev, err := a.store.GetJob(job.JobID); err == nil {
+		if prev.RetryCount > job.RetryCount {
+			job.RetryCount = prev.RetryCount
+		}
+		if !prev.CreatedAt.IsZero() {
+			job.CreatedAt = prev.CreatedAt
+		}
+	}
+
 	from := string(job.Status)
-	next := job.RetryCount + 1
-	job.RetryCount = next
+	job.RetryCount++
 	job.Status = transfer.StateIdle
 	job.WaitReason = transfer.WaitPeerOffline
 	job.Error = ""
-	job.NextTryAt = a.clk.Now().Add(backoff(next, a.BaseBackoff, a.MaxBackoff))
+	job.NextTryAt = a.clk.Now().Add(backoff(job.RetryCount, a.BaseBackoff, a.MaxBackoff))
 	job.UpdatedAt = a.clk.Now()
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = job.UpdatedAt
+	}
 	_ = a.store.UpsertJob(job)
 	if a.lg != nil && cause != nil {
 		a.lg.Info("transfer: 对端不可达，转入等待",
-			"job_id", job.JobID, "peer_id", peerID.String(), "attempt", next, "err", cause)
+			"job_id", job.JobID, "peer_id", peerID.String(), "attempt", job.RetryCount, "err", cause)
 	}
 	a.publishState(job, from, string(transfer.StateIdle), string(transfer.WaitPeerOffline))
 	return job
@@ -312,6 +336,14 @@ func (a *TransferApp) startDue(ctx context.Context, jobs []transfer.Job) {
 func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
 	busy := a.busyPeers()
 	for _, j := range jobs {
+		// 只自动拉起「等对方上线」的任务。
+		//
+		// 仓储层（ListWaiting）已经过滤过一遍，这里再守一道：取消过的任务
+		// 只是状态变了，若某个实现漏了过滤，它就会被自动重试 —— 用户点了
+		// 「取消」之后文件自己又传起来，是最难解释的那类 bug。
+		if j.WaitReason != transfer.WaitPeerOffline {
+			continue
+		}
 		if busy[j.PeerID] {
 			continue
 		}
@@ -335,4 +367,63 @@ func (a *TransferApp) busyPeers() map[identity.NodeID]bool {
 		out[sj.job.PeerID] = true
 	}
 	return out
+}
+
+// CancelJob 取消一个【还没开始】的任务（等待中的那种）。返回错误表示不可取消。
+//
+// 只允许取消等待中的任务：真正在传的任务要取消，需要给每条任务一条取消信号，
+// 而当前 sender 是「一个任务一个 goroutine + 一条共享 ctx」，没有中断点。
+// 与其给一个点了不动的假取消（或者传了一半留下半截临时文件），不如明确拒绝。
+func (a *TransferApp) CancelJob(jobID string) error {
+	j, err := a.store.GetJob(jobID)
+	if err != nil {
+		return fmt.Errorf("transfer: 任务不存在: %w", err)
+	}
+	if j.Direction != transfer.DirectionSend {
+		return fmt.Errorf("transfer: 只能取消本机发出的任务")
+	}
+	if j.Status != transfer.StateIdle {
+		return fmt.Errorf("transfer: 传输已开始，无法取消")
+	}
+	if a.isStarting(jobID) {
+		// 已被交给 goroutine、但状态还没写成 active：此刻放行的话，
+		// 那个 goroutine 随后会把状态写回「传输中」，取消就成了假的。
+		return fmt.Errorf("transfer: 传输已开始，无法取消")
+	}
+
+	from := string(j.Status)
+	j.Status = transfer.StateCancelled
+	j.WaitReason = transfer.WaitNone
+	j.NextTryAt = time.Time{}
+	j.UpdatedAt = a.clk.Now()
+	if err := a.store.UpsertJob(j); err != nil {
+		return err
+	}
+	a.publishState(j, from, string(transfer.StateCancelled), "")
+	return nil
+}
+
+// RetryNow 立刻重试一条等待中的任务：不等退避，也不要求目录里显示在线
+// （目录可能滞后于现实）。
+func (a *TransferApp) RetryNow(ctx context.Context, jobID string) error {
+	j, err := a.store.GetJob(jobID)
+	if err != nil {
+		return fmt.Errorf("transfer: 任务不存在: %w", err)
+	}
+	if j.Status != transfer.StateIdle || j.WaitReason != transfer.WaitPeerOffline {
+		return fmt.Errorf("transfer: 该任务不在等待中")
+	}
+	j.NextTryAt = a.clk.Now()
+	j.UpdatedAt = j.NextTryAt
+	if err := a.store.UpsertJob(j); err != nil {
+		return err
+	}
+	if !a.claimStarting(jobID) {
+		return nil // 已经在传了，什么都不用做
+	}
+	go func() {
+		defer a.releaseStarting(jobID)
+		_, _ = a.sendFile(ctx, j.PeerID, j.LocalPath, j.JobID, true) // force：真拨一次
+	}()
+	return nil
 }
