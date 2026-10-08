@@ -167,6 +167,23 @@ ALTER TABLE transfer_jobs ADD COLUMN next_try_at INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS ix_transfer_waiting ON transfer_jobs(direction, status, next_try_at);
 `,
 	},
+	{
+		version: 4,
+		name:    "transfer_batch",
+		// 文件夹批次的三列。
+		//
+		// 为什么仍然只是加列：批次不是状态机里的概念（一批任务里每条的状态
+		// 各自独立），把它做成 status 取值只会让状态机与列表查询一起变复杂。
+		//
+		// is_dir 用 INTEGER 0/1：SQLite 没有布尔类型，并存的 0 同时是
+		// 「单文件」与「不是目录」两种含义的默认值，正好是我们想要的。
+		sql: `
+ALTER TABLE transfer_jobs ADD COLUMN batch_id TEXT    NOT NULL DEFAULT '';
+ALTER TABLE transfer_jobs ADD COLUMN rel_path TEXT    NOT NULL DEFAULT '';
+ALTER TABLE transfer_jobs ADD COLUMN is_dir   INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS ix_transfer_batch ON transfer_jobs(batch_id);
+`,
+	},
 }
 
 func migrationChecksum(sql string) string {

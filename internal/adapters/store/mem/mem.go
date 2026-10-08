@@ -318,7 +318,10 @@ func (s *Messages) ListActive() ([]transfer.Job, error) {
 	return out, nil
 }
 
-// ListWaiting 返回等待对方上线的发送任务（语义见 ports.TransferRepo.ListWaiting）。
+// ListWaiting 返回可以被自动拉起的发送任务（语义见 ports.TransferRepo.ListWaiting）。
+//
+// 取值集合与 SQL 实现【必须一致】：单进程测试跑的是这里，真实运行跑的是
+// sqlite —— 两处不一致会让「取消之后任务又自己跑起来」只在其中一边出现。
 func (s *Messages) ListWaiting() ([]transfer.Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -326,7 +329,26 @@ func (s *Messages) ListWaiting() ([]transfer.Job, error) {
 	for _, j := range s.jobs {
 		if j.Direction != transfer.DirectionSend ||
 			j.Status != transfer.StateIdle ||
-			j.WaitReason != transfer.WaitPeerOffline {
+			!j.WaitReason.AutoStartable() {
+			continue
+		}
+		j.Bitmap = j.Bitmap.Copy()
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].CreatedAt.Before(out[k].CreatedAt) })
+	return out, nil
+}
+
+// ListByBatch 返回同一批次的全部任务（语义见 ports.TransferRepo.ListByBatch）。
+//
+// 与 ListActive 的区别是决定性的：这里【包含】已结束的任务 ——
+// 文件夹卡片上要显示的是完整的 N 条，少一条数字就对不上。
+func (s *Messages) ListByBatch(batchID string) ([]transfer.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]transfer.Job, 0)
+	for _, j := range s.jobs {
+		if j.BatchID != batchID {
 			continue
 		}
 		j.Bitmap = j.Bitmap.Copy()

@@ -20,7 +20,8 @@ func NewTransfers(db *DB) *Transfers { return &Transfers{db: db} }
 
 const transferColumns = `job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
-                         window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at`
+                         window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at,
+                         batch_id, rel_path, is_dir`
 
 // UpsertJob 写入/更新传输任务。
 func (t *Transfers) UpsertJob(j transfer.Job) error {
@@ -28,8 +29,9 @@ func (t *Transfers) UpsertJob(j transfer.Job) error {
 		_, err := tx.Exec(`
 INSERT INTO transfer_jobs(job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
-                         window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at,
+                         batch_id, rel_path, is_dir)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(job_id) DO UPDATE SET
   file_name    = excluded.file_name,
   file_size    = excluded.file_size,
@@ -45,12 +47,16 @@ ON CONFLICT(job_id) DO UPDATE SET
   retry_count  = excluded.retry_count,
   wait_reason  = excluded.wait_reason,
   next_try_at  = excluded.next_try_at,
+  batch_id     = excluded.batch_id,
+  rel_path     = excluded.rel_path,
+  is_dir       = excluded.is_dir,
   error        = excluded.error,
   updated_at   = excluded.updated_at`,
 			j.JobID, j.PeerID.String(), j.FileName, j.FileSize, j.FileHash, j.ChunkSize, j.TotalChunks,
 			string(j.Direction), j.LocalPath, j.TempPath, j.Completed, j.Bitmap.Bytes(), j.Status.DBStatus(),
 			j.WindowSize, j.RetryCount, string(j.WaitReason), msOf(j.NextTryAt), j.Error,
 			msOf(j.CreatedAt), msOf(j.UpdatedAt),
+			j.BatchID, j.RelPath, j.IsDir,
 		)
 		return err
 	})
@@ -111,15 +117,44 @@ WHERE status NOT IN ('done','cancelled') ORDER BY created_at`)
 	return out, rows.Err()
 }
 
-// ListWaiting 返回等待对方上线的发送任务（语义见 ports.TransferRepo.ListWaiting）。
+// ListWaiting 返回可以被自动拉起的发送任务（语义见 ports.TransferRepo.ListWaiting）。
+//
+// 取值集合来自 WaitReason.AutoStartable()：等待对方上线的，以及文件夹批次里
+// 排队的。用户取消过的（明确写了 WaitNone）【必须】落在这个集合之外 ——
+// 被自动拉起就等于「取消了又自己跑起来」。
 //
 // 「是否到点」刻意不在 SQL 里判：到点判断要用 ports.Clock，留在应用层
 // 才能用 clock.Fake 做确定性测试。
 func (t *Transfers) ListWaiting() ([]transfer.Job, error) {
 	rows, err := t.db.Query(`
 SELECT `+transferColumns+` FROM transfer_jobs
-WHERE direction = 'send' AND status = 'queued' AND wait_reason = ?
-ORDER BY created_at`, string(transfer.WaitPeerOffline))
+WHERE direction = 'send' AND status = 'queued' AND wait_reason IN (?, ?)
+ORDER BY created_at`,
+		string(transfer.WaitPeerOffline), string(transfer.WaitQueued))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []transfer.Job
+	for rows.Next() {
+		item, err := scanTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ListByBatch 返回同一批次的全部任务（语义见 ports.TransferRepo.ListByBatch）。
+//
+// 按 created_at 升序：枚举顺序即发送顺序，界面上的文件顺序与之一致。
+func (t *Transfers) ListByBatch(batchID string) ([]transfer.Job, error) {
+	rows, err := t.db.Query(`
+SELECT `+transferColumns+` FROM transfer_jobs
+WHERE batch_id = ?
+ORDER BY created_at`, batchID)
 	if err != nil {
 		return nil, err
 	}
@@ -209,12 +244,15 @@ func scanTransfer(s rowScanner) (transfer.Job, error) {
 		nextTryAt  int64
 		createdAt  int64
 		updatedAt  int64
+		batchID    string
+		relPath    string
+		isDir      int64
 	)
 	if err := s.Scan(
 		&out.JobID, &peerID, &out.FileName, &out.FileSize, &out.FileHash, &out.ChunkSize,
 		&out.TotalChunks, &direction, &out.LocalPath, &tempPath, &out.Completed, &bitmap,
 		&status, &out.WindowSize, &out.RetryCount, &waitReason, &nextTryAt, &errMsg,
-		&createdAt, &updatedAt,
+		&createdAt, &updatedAt, &batchID, &relPath, &isDir,
 	); err != nil {
 		return out, err
 	}
@@ -228,6 +266,11 @@ func scanTransfer(s rowScanner) (transfer.Job, error) {
 	out.WaitReason = transfer.WaitReason(waitReason)
 	// next_try_at 用 timeOf 还原（msOf 的逆运算：0 ↔ 零值时间）。
 	out.NextTryAt = timeOf(nextTryAt)
+	// batch_id / rel_path 是 NOT NULL 的 TEXT，直接扫成 string 即可；
+	// is_dir 是 INTEGER 0/1（SQLite 没有布尔类型）。
+	out.BatchID = batchID
+	out.RelPath = relPath
+	out.IsDir = isDir != 0
 	out.Error = nullString(errMsg)
 	out.Bitmap = transfer.NewChunkBitmapFromBytes(bitmap)
 	out.Bitmap.EnsureLen(out.TotalChunks)

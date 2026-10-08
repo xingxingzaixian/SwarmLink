@@ -18,13 +18,27 @@ const (
 // WaitReason 说明一个【还没开始】的任务在等什么。
 //
 // 空串 = 不在等待。它必须落库而不只是内存标记：sweep 只允许自动拉起
-// WaitPeerOffline 的任务 —— 将来加了「用户暂停」时，它绝不能被自动重试。
+// AutoStartable 的任务 —— 用户取消过的（WaitNone）绝不能被自动重试。
 type WaitReason string
 
 const (
 	WaitNone        WaitReason = ""
 	WaitPeerOffline WaitReason = "peer_offline"
+	// WaitQueued 表示「排在文件夹批次队列里，轮到就传」。
+	//
+	// 与 WaitPeerOffline 一样属于「我们自己会拉起」的任务：文件夹的每个文件
+	// 都是一条独立任务，靠这个原因排队，由既有调度按序开跑。
+	WaitQueued WaitReason = "queued"
 )
+
+// AutoStartable 报告该等待原因是否属于「可以自动拉起」的一类。
+//
+// 这个判断同时被仓储（ListWaiting 的 SQL）与应用层（startJobs 的守卫）使用。
+// 两处各写一遍迟早会分叉，而分叉的方向是「用户取消过的任务自己又跑起来」——
+// 那是这个功能最不能出的问题，因此收敛成一个方法。
+func (r WaitReason) AutoStartable() bool {
+	return r == WaitPeerOffline || r == WaitQueued
+}
 
 // DefaultChunkSize 是默认分块大小（架构书 4.8：LAN 1MB / 跨网段 256KB / 默认 512KB）。
 const DefaultChunkSize int64 = 512 * 1024
@@ -50,9 +64,19 @@ type Job struct {
 	// 前者说明在等谁，后者说明什么时候可以再试。
 	WaitReason WaitReason
 	NextTryAt  time.Time
-	Error      string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// 文件夹批次（BatchID 非空时才有意义）。单文件传输时三者都是零值，
+	// 因此老路径的行为一个字都不变。
+	//
+	// RelPath 是【发送方看到的】相对路径（含根名，如 `照片/2024/a.jpg`）：
+	// 接收端靠它还原目录树，发送端靠它显示「这是文件夹里的哪个文件」。
+	// IsDir 是空目录占位条目：零字节、无分块，只用于在接收端建出目录。
+	BatchID string
+	RelPath string
+	IsDir   bool
+
+	Error     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // ChunkCount 计算总块数（向上取整）。

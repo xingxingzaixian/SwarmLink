@@ -105,6 +105,12 @@ type TransferRepo interface {
 	// 【不要】用 ListActive 代替：那个语义是「未结束」，把 failed/paused/
 	// verifying 都算进来，拿它驱动自动重试会把不该重试的任务一起拉起来。
 	ListWaiting() ([]transfer.Job, error)
+	// ListByBatch 返回同一文件夹批次的全部任务（按 created_at 升序）。
+	//
+	// 单独一个方法而不是复用 ListActive：批次聚合进度与「取消全部」都要看到
+	// 已结束的任务 —— 用户在一个 32 个文件的文件夹卡片上看到的必须是完整的
+	// 32 条，不能因为其中 30 条已经传完就只剩 2 条。
+	ListByBatch(batchID string) ([]transfer.Job, error)
 	// ListRecent 返回最近更新的若干任务，【包含】已结束的。
 	//
 	// 与 ListActive 必须分开：ListActive 只服务「续传 / 还有哪些在跑」，

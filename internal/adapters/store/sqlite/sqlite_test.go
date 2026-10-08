@@ -352,6 +352,152 @@ func TestJobWaitingFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// 批次字段必须能落库再读回来：目录树还原、批次聚合进度、整体取消都靠它们。
+func TestJobBatchFieldsRoundTrip(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+
+	peerID := mkID(9)
+	job := transfer.Job{
+		JobID: "job-batch-1", PeerID: peerID, FileName: "a.jpg", FileSize: 1024,
+		ChunkSize: 512, TotalChunks: 2, Direction: transfer.DirectionSend,
+		LocalPath: `C:\照片\2024\a.jpg`, Bitmap: transfer.NewChunkBitmap(2),
+		Status: transfer.StateIdle, WaitReason: transfer.WaitQueued,
+		BatchID: "batch-1", RelPath: "照片/2024/a.jpg",
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(2, 0),
+	}
+	if err := tr.UpsertJob(job); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := tr.GetJob(job.JobID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.BatchID != "batch-1" {
+		t.Errorf("batch_id = %q, want batch-1", got.BatchID)
+	}
+	if got.RelPath != "照片/2024/a.jpg" {
+		t.Errorf("rel_path = %q, want 原样读回", got.RelPath)
+	}
+	if got.IsDir {
+		t.Error("普通文件的 is_dir 必须为 false")
+	}
+
+	// 空目录条目：is_dir 必须真的存成 1，否则接收端不会建目录
+	dirJob := job
+	dirJob.JobID = "job-batch-2"
+	dirJob.FileName = "空的"
+	dirJob.FileSize = 0
+	dirJob.TotalChunks = 0
+	dirJob.RelPath = "照片/空的"
+	dirJob.IsDir = true
+	if err := tr.UpsertJob(dirJob); err != nil {
+		t.Fatalf("upsert dir: %v", err)
+	}
+	gotDir, err := tr.GetJob("job-batch-2")
+	if err != nil {
+		t.Fatalf("get dir: %v", err)
+	}
+	if !gotDir.IsDir {
+		t.Error("is_dir 读回为 false：空目录会在接收端丢失")
+	}
+
+	// 更新回零值也必须干净（与 wait_reason 同一条零值往返要求）
+	dirJob.IsDir = false
+	dirJob.BatchID = ""
+	dirJob.RelPath = ""
+	if err := tr.UpsertJob(dirJob); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	back, err := tr.GetJob("job-batch-2")
+	if err != nil {
+		t.Fatalf("get back: %v", err)
+	}
+	if back.IsDir || back.BatchID != "" || back.RelPath != "" {
+		t.Errorf("零值往返失败：isDir=%v batch=%q rel=%q", back.IsDir, back.BatchID, back.RelPath)
+	}
+}
+
+// ListByBatch 是批次聚合与整体取消的唯一查询入口。
+func TestListByBatch(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	peerID := mkID(10)
+
+	base := transfer.Job{
+		PeerID: peerID, ChunkSize: 512, Direction: transfer.DirectionSend,
+		Status: transfer.StateIdle, WaitReason: transfer.WaitQueued,
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}
+	for _, spec := range []struct{ jobID, rel string }{
+		{"j1", "照片/a.txt"}, {"j2", "照片/b.txt"}, {"j3", "照片/子/c.txt"},
+	} {
+		j := base
+		j.JobID, j.BatchID, j.RelPath = spec.jobID, "b1", spec.rel
+		if err := tr.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := base
+	other.JobID, other.BatchID, other.RelPath = "j9", "b2", "别的/x.txt"
+	if err := tr.UpsertJob(other); err != nil {
+		t.Fatal(err)
+	}
+	single := base
+	single.JobID = "j10" // 单文件：BatchID/RelPath 都是空串
+	if err := tr.UpsertJob(single); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := tr.ListByBatch("b1")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("条数 = %d，期望 3（不能把别的批或单文件算进来）", len(got))
+	}
+	if got[0].RelPath != "照片/a.txt" {
+		t.Errorf("首条 rel_path = %q，期望按创建顺序", got[0].RelPath)
+	}
+}
+
+// 批次排队任务必须被 ListWaiting 一起返回，否则对方上线后整批不会自动开始；
+// 而「用户取消过」的任务一个都不能进来。
+func TestListWaitingIncludesQueued(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	peerID := mkID(11)
+
+	mk := func(jobID string, reason transfer.WaitReason) {
+		if err := tr.UpsertJob(transfer.Job{
+			JobID: jobID, PeerID: peerID, ChunkSize: 512, Direction: transfer.DirectionSend,
+			Status: transfer.StateIdle, WaitReason: reason,
+			CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("w1", transfer.WaitPeerOffline)
+	mk("w2", transfer.WaitQueued)
+	mk("w3", transfer.WaitNone) // 用户取消过 → 绝不能被自动拉起
+
+	got, err := tr.ListWaiting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, j := range got {
+		ids[j.JobID] = true
+	}
+	if !ids["w1"] || !ids["w2"] {
+		t.Errorf("ListWaiting 漏了可自动拉起的任务：%v", ids)
+	}
+	if ids["w3"] {
+		t.Error("WaitNone（用户取消）的任务不能被 ListWaiting 返回")
+	}
+}
+
 // 清理策略必须放过「等待对方上线」的任务。
 //
 // 它们的状态是 queued，不在 done/failed/cancelled 里。这条用例把它钉住：

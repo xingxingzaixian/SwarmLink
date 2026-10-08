@@ -71,6 +71,21 @@ func (s *stubTransferRepo) all() []transfer.Job {
 func (s *stubTransferRepo) ListActive() ([]transfer.Job, error)  { return s.all(), nil }
 func (s *stubTransferRepo) ListWaiting() ([]transfer.Job, error) { return s.all(), nil }
 
+// ListByBatch 刻意【不】像上面两个那样返回全部。
+//
+// 整体取消的语义完全依赖「只动这一批」：一个什么都返回的替身，会让
+// 「取消 b1 却把 b2 的任务也停了」这种错误在测试里照样通过 ——
+// 那种测试比没有测试更糟。
+func (s *stubTransferRepo) ListByBatch(batchID string) ([]transfer.Job, error) {
+	out := make([]transfer.Job, 0)
+	for _, j := range s.all() {
+		if j.BatchID == batchID {
+			out = append(out, j)
+		}
+	}
+	return out, nil
+}
+
 func (s *stubTransferRepo) ListRecent(limit int) ([]transfer.Job, error) {
 	return s.all(), nil
 }
