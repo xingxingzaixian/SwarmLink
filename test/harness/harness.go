@@ -155,6 +155,8 @@ func New(name string, opts Options) (*Node, error) {
 
 	peerApp.Start()
 	chatApp.Start(ctx)
+	// 与生产装配一致：对端上线（peer.online / peer.discovered）会唤醒等待中的传输
+	transferApp.Start(ctx)
 
 	n := &Node{
 		Name: name, KP: kp,

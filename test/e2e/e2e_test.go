@@ -239,6 +239,134 @@ func TestFileTransferResumesAfterInterruption(t *testing.T) {
 	}
 }
 
+// 对方离线时发文件 → 任务进入等待 → 对方上线后自动传完（无需任何用户操作）。
+//
+// 这是本次改动的核心验收：全过程不需要再点一次「发送」。
+func TestFileTransferWaitsForPeerOnline(t *testing.T) {
+	a := newNode(t, "alice", harness.Options{ChunkSize: 64 * 1024})
+	b := newNode(t, "bob", harness.Options{ChunkSize: 64 * 1024})
+
+	src, data := randomFile(t, 1<<20+1234) // 约 1 MB，尾块不整
+
+	// 此刻 a 还不知道有 b（没有 Link）：发起发送应当落成「等待对方上线」
+	job, err := a.TransferApp.SendFileAs(context.Background(), b.ID(), src, "job-offline-1")
+	if err != nil {
+		t.Fatalf("离线发起不该报错: %v", err)
+	}
+	if job.Status != transfer.StateIdle || job.WaitReason != transfer.WaitPeerOffline {
+		t.Fatalf("job = %s/%s, want idle/peer_offline", job.Status, job.WaitReason)
+	}
+
+	// 对方上线（等价于收到 UDP 通告）→ 自动开跑，不需要再调 SendFile
+	if err := harness.Link(a, b); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, 15*time.Second, "transfer to complete automatically", func() bool {
+		a.Tick() // 兜底节拍（正常路径由 peer.discovered 立刻唤醒）
+		j, err := a.Messages.GetJob("job-offline-1")
+		return err == nil && j.Status == transfer.StateDone
+	})
+
+	got, err := os.ReadFile(filepath.Join(b.DownloadDir, "payload.bin"))
+	if err != nil {
+		t.Fatalf("read received file: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("received content mismatch: want %d bytes got %d", len(data), len(got))
+	}
+}
+
+// 传到一半对方掉线 → 进入等待 → 对方再次通告后按位图续传完成。
+//
+// 与上一条的区别：这里的等待是【传输中断】引起的，而不是发起时就离线。
+func TestFileTransferWaitsWhenPeerDrops(t *testing.T) {
+	a := newNode(t, "alice", harness.Options{ChunkSize: 64 * 1024})
+	b := newNode(t, "bob", harness.Options{ChunkSize: 64 * 1024})
+	if err := harness.Link(a, b); err != nil {
+		t.Fatal(err)
+	}
+	// 让接收侧更频繁地回 ACK（ACK 时顺带落盘位图），
+	// 这样中断后一定存在可续传的位图。
+	b.TransferApp.AckEveryChunks = 4
+	b.TransferApp.AckInterval = 5 * time.Millisecond
+	b.TransferApp.FlushEveryChunks = 4
+
+	// 8 MB = 128 块：足够大，保证「掐断」一定发生在传输途中
+	src, data := randomFile(t, 8<<20)
+
+	go func() {
+		_, _ = a.TransferApp.SendFileAs(context.Background(), b.ID(), src, "job-drop-1")
+	}()
+
+	// 等确实传了一部分，再掐断发送侧到对端的会话。
+	//
+	// 这里也要 Tick：首轮尝试可能因为拨号时序失败而转入等待，
+	// 没有节拍就永远停在等待上（那会让"等不到块"看起来像别的问题）。
+	waitFor(t, 10*time.Second, "first chunks to arrive",
+		func() bool {
+			a.Tick()
+			if jobs, err := b.Messages.ListActive(); err == nil {
+				for _, j := range jobs {
+					if j.Direction == transfer.DirectionRecv && j.Completed > 0 {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		func() string {
+			j, err := a.Messages.GetJob("job-drop-1")
+			if err != nil {
+				return "发送侧任务还没落库"
+			}
+			return fmt.Sprintf("发送侧 status=%s waitReason=%s retry=%d err=%q",
+				j.Status, j.WaitReason, j.RetryCount, j.Error)
+		})
+	if j, err := a.Messages.GetJob("job-drop-1"); err == nil && j.Status == transfer.StateDone {
+		// 本机太快，还没来得及掐断就传完了：这条路径已由 app 层单测覆盖
+		t.Skip("传输在掐断之前就完成了（本机回环太快）")
+	}
+	if err := a.Conn.Close(b.ID()); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+
+	// 掉线必须变成「等待对方上线」，而不是失败
+	waitFor(t, 15*time.Second, "job to wait for peer",
+		func() bool {
+			a.Tick()
+			j, err := a.Messages.GetJob("job-drop-1")
+			return err == nil && j.Status == transfer.StateIdle && j.WaitReason == transfer.WaitPeerOffline
+		},
+		// 失败时把最后观测到的状态带出来：「没进等待态」光看"超时"没法定位
+		func() string {
+			j, err := a.Messages.GetJob("job-drop-1")
+			if err != nil {
+				return "任务还没落库"
+			}
+			return fmt.Sprintf("status=%s waitReason=%s retry=%d err=%q",
+				j.Status, j.WaitReason, j.RetryCount, j.Error)
+		})
+
+	// 对端再次通告（生产里就是它的下一轮 announce）→ 自动续传完成
+	if err := harness.Link(a, b); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "resumed transfer to complete", func() bool {
+		a.Tick()
+		j, err := a.Messages.GetJob("job-drop-1")
+		return err == nil && j.Status == transfer.StateDone
+	})
+
+	got, err := os.ReadFile(filepath.Join(b.DownloadDir, "payload.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("content mismatch after resume")
+	}
+}
+
 // TestCrossSubnetConvergenceViaSeed 是「跨网段能力进 v1.0」这个决定的验收物。
 //
 // 构造两个互不广播的域（A 域 {a1}，B 域 {b1,b2}）与一颗同时可达两域的种子；
