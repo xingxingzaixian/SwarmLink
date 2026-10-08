@@ -17,7 +17,14 @@
 - 所有命令都在仓库根目录 `d:\code\OpenSource\swarm-link` 执行（前端命令先 `cd frontend`）。
 - 提交信息沿用仓库风格：`feat(transfer): 中文描述`、`feat(chat): …`、`docs: …`。**每个 Task 结束都提交**（分任务的提交历史是回滚锚点）。
 - **提交纪律（重要）**：本计划所有 `git add` 都写成**显式文件列表**，不要用 `git add <目录>` —— 工作区里有不属于本功能的未跟踪文件（`frontend/tests/message.test.ts`、`swarmlink-1.png`、`swarmlink-2.png`）与一个被改动过的 `frontend/package-lock.json`，目录级 add 会把它们扫进本功能的提交。
-- **既有失败基线（2026-10-08 实测）**：`go test ./internal/infra/fsutil/... ./internal/adapters/keystore/...` 有 **3 个与本次无关的失败** —— `fsutil` 的 `TestSanitizeFileNameRejectsUnsafeNames`，`keystore` 的 `TestLoadOrCreateIsStableAndPersists` / `TestLoadOrCreateCreatesDirWith0700`。本次会改 `fsutil`（新增文件），但**不要去修那个既有失败**；判断"是否弄坏了什么"时只看这三个之外的输出。
+- **既有失败基线（2026-10-08 实测，Task 1 后修正）**：`go test -tags wails ./...` 有 **4 个与本次无关的失败**，全部属于「文件名安全化」那条既有工作线 —— `internal/infra/fsutil` 的 `TestSanitizeFileNameRejectsUnsafeNames`、`internal/adapters/filesink` 的 `TestCreateRejectsUnsafeName`、`internal/adapters/keystore` 的 `TestLoadOrCreateIsStableAndPersists` / `TestLoadOrCreateCreatesDirWith0700`。本次会改 `fsutil` 与 `filesink`，但**不要去修这些既有失败**；判断"是否弄坏了什么"时只看它们之外的输出。
+- **验证必须跑全仓，不能只跑「受影响的包」**（Task 1 的教训）：给 `ports` 里的接口加一个方法，会波及【所有】实现者，包括散落在各测试文件里的测试替身 —— 只跑 `store`/`domain`/`app` 会漏掉 `internal/adapters/wails` 里那个替身，结果是 `go build` 通过而 `go vet ./internal/...` 与 `go test ./...` 全红。因此每个 Task 的验证命令固定为：
+
+  ```
+  go test -tags wails ./... -count=1
+  ```
+
+  只有在开发中的快速反馈阶段才用 `-run` 缩小范围。
 - 前端 `npm run typecheck` 当前**是干净的**，必须一直保持干净。前端测试用 `npm run test`（Node 内置 test runner，`node --test "tests/**/*.test.ts"`，**不是** vitest）。
 - 绑定产物 `frontend/bindings/` 已入库。重新生成的正确命令（`-ts` 与 `-i` 不能省，cmd.exe 下必须双引号）：
 
