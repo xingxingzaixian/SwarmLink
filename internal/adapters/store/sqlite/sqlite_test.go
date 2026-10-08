@@ -352,6 +352,49 @@ func TestJobWaitingFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// 与 mem 侧同一组断言：两个实现必须对等，否则 app 层测试（用 mem）通过
+// 而真实运行（用 sqlite）出错，是最难查的一类漂移。
+func TestListWaitingFiltersByReasonAndDirection(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	peerID := mkID(7)
+
+	base := transfer.Job{
+		PeerID: peerID, FileName: "f.bin", FileSize: 4096, ChunkSize: 1024,
+		TotalChunks: 4, LocalPath: "/tmp/f.bin", Bitmap: transfer.NewChunkBitmap(4),
+	}
+	mk := func(id string, st transfer.State, reason transfer.WaitReason, dir transfer.Direction, at int64) transfer.Job {
+		j := base
+		j.JobID, j.Status, j.WaitReason, j.Direction = id, st, reason, dir
+		j.CreatedAt, j.UpdatedAt = time.Unix(at, 0), time.Unix(at, 0)
+		return j
+	}
+
+	for _, j := range []transfer.Job{
+		mk("wait-first", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionSend, 10),
+		mk("wait-second", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionSend, 20),
+		mk("idle-no-reason", transfer.StateIdle, transfer.WaitNone, transfer.DirectionSend, 30),
+		mk("running", transfer.StateTransferring, transfer.WaitNone, transfer.DirectionSend, 40),
+		mk("wait-recv", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionRecv, 50),
+		mk("failed", transfer.StateFailed, transfer.WaitNone, transfer.DirectionSend, 60),
+	} {
+		if err := tr.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := tr.ListWaiting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListWaiting 返回 %d 条，want 2：%+v", len(got), got)
+	}
+	if got[0].JobID != "wait-first" || got[1].JobID != "wait-second" {
+		t.Fatalf("ListWaiting 顺序 = %q/%q，want wait-first/wait-second（按 created_at）", got[0].JobID, got[1].JobID)
+	}
+}
+
 func TestGroupsRoundTrip(t *testing.T) {
 	db, _ := openTest(t)
 	g := NewGroups(db)

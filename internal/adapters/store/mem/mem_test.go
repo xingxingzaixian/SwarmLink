@@ -188,6 +188,46 @@ func TestGroupsRepo(t *testing.T) {
 	}
 }
 
+// ListWaiting 只认「发送方向 + 等待对方上线」，且按创建时间返回。
+//
+// 这条守卫的意义：sweep 拿它去自动重试，多返回一条就是把不该动的任务
+// 一起拉起来；顺序错了则慢来的文件插队，用户看到的传输次序与发起次序不符。
+func TestListWaitingFiltersByReasonAndDirection(t *testing.T) {
+	m := NewMessages(clock.New())
+	peerID := mkID(7)
+
+	mk := func(id string, st transfer.State, reason transfer.WaitReason, dir transfer.Direction, at int64) transfer.Job {
+		j := newJob(id, peerID, "hash-"+id)
+		j.Status, j.WaitReason, j.Direction = st, reason, dir
+		j.CreatedAt, j.UpdatedAt = time.Unix(at, 0), time.Unix(at, 0)
+		return j
+	}
+
+	for _, j := range []transfer.Job{
+		mk("wait-first", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionSend, 10),
+		mk("wait-second", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionSend, 20),
+		mk("idle-no-reason", transfer.StateIdle, transfer.WaitNone, transfer.DirectionSend, 30),
+		mk("running", transfer.StateTransferring, transfer.WaitNone, transfer.DirectionSend, 40),
+		mk("wait-recv", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionRecv, 50),
+		mk("failed", transfer.StateFailed, transfer.WaitNone, transfer.DirectionSend, 60),
+	} {
+		if err := m.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := m.ListWaiting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListWaiting 返回 %d 条，want 2：%+v", len(got), got)
+	}
+	if got[0].JobID != "wait-first" || got[1].JobID != "wait-second" {
+		t.Fatalf("ListWaiting 顺序 = %q/%q，want wait-first/wait-second（按创建时间）", got[0].JobID, got[1].JobID)
+	}
+}
+
 func TestTransferRepoResumable(t *testing.T) {
 	m := NewMessages(clock.New())
 	peerID := mkID(7)

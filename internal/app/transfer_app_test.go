@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -37,8 +38,29 @@ func (s *stubTransferRepo) FindResumable(identity.NodeID, string) (transfer.Job,
 
 func (s *stubTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error { return nil }
 
-func (s *stubTransferRepo) ListActive() ([]transfer.Job, error)          { return nil, nil }
-func (s *stubTransferRepo) ListRecent(limit int) ([]transfer.Job, error) { return nil, nil }
+// all 返回 stub 里按 job_id 排序的全部任务。
+//
+// 两个列表方法都刻意【不】按领域语义过滤：测试要能塞进任意状态的任务，
+// 由被测代码自己判断该不该动它 —— 过滤写在 stub 里等于把被测逻辑
+// 抄一遍，测试就变成自己验证自己。
+func (s *stubTransferRepo) all() []transfer.Job {
+	out := make([]transfer.Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		if j.JobID == "" {
+			continue
+		}
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].JobID < out[k].JobID })
+	return out
+}
+
+func (s *stubTransferRepo) ListActive() ([]transfer.Job, error)  { return s.all(), nil }
+func (s *stubTransferRepo) ListWaiting() ([]transfer.Job, error) { return s.all(), nil }
+
+func (s *stubTransferRepo) ListRecent(limit int) ([]transfer.Job, error) {
+	return s.all(), nil
+}
 
 func (s *stubTransferRepo) PurgeFinished(keep int, olderThan time.Time) (int, error) {
 	return 0, nil

@@ -100,6 +100,11 @@ type TransferRepo interface {
 	// SaveBitmap 批量落盘，避免每块一次事务（P1-9）。
 	SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed int64) error
 	ListActive() ([]transfer.Job, error)
+	// ListWaiting 返回「等待对方上线」的发送任务（重启恢复与周期性 sweep 用）。
+	//
+	// 【不要】用 ListActive 代替：那个语义是「未结束」，把 failed/paused/
+	// verifying 都算进来，拿它驱动自动重试会把不该重试的任务一起拉起来。
+	ListWaiting() ([]transfer.Job, error)
 	// ListRecent 返回最近更新的若干任务，【包含】已结束的。
 	//
 	// 与 ListActive 必须分开：ListActive 只服务「续传 / 还有哪些在跑」，

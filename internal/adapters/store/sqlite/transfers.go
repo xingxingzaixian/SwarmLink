@@ -111,6 +111,31 @@ WHERE status NOT IN ('done','cancelled') ORDER BY created_at`)
 	return out, rows.Err()
 }
 
+// ListWaiting 返回等待对方上线的发送任务（语义见 ports.TransferRepo.ListWaiting）。
+//
+// 「是否到点」刻意不在 SQL 里判：到点判断要用 ports.Clock，留在应用层
+// 才能用 clock.Fake 做确定性测试。
+func (t *Transfers) ListWaiting() ([]transfer.Job, error) {
+	rows, err := t.db.Query(`
+SELECT `+transferColumns+` FROM transfer_jobs
+WHERE direction = 'send' AND status = 'queued' AND wait_reason = ?
+ORDER BY created_at`, string(transfer.WaitPeerOffline))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []transfer.Job
+	for rows.Next() {
+		item, err := scanTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // ListRecent 返回最近更新的若干任务，包含已结束的（界面的传输记录用）。
 //
 // 见 ports.TransferRepo.ListRecent：它和 ListActive 的语义完全不同，

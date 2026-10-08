@@ -318,6 +318,24 @@ func (s *Messages) ListActive() ([]transfer.Job, error) {
 	return out, nil
 }
 
+// ListWaiting 返回等待对方上线的发送任务（语义见 ports.TransferRepo.ListWaiting）。
+func (s *Messages) ListWaiting() ([]transfer.Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]transfer.Job, 0)
+	for _, j := range s.jobs {
+		if j.Direction != transfer.DirectionSend ||
+			j.Status != transfer.StateIdle ||
+			j.WaitReason != transfer.WaitPeerOffline {
+			continue
+		}
+		j.Bitmap = j.Bitmap.Copy()
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].CreatedAt.Before(out[k].CreatedAt) })
+	return out, nil
+}
+
 // ListRecent 返回最近更新的若干任务，包含已结束的（界面的传输记录用）。
 //
 // 语义见 ports.TransferRepo.ListRecent：与 ListActive 相反，这里【不】排除
