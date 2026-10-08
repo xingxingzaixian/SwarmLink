@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,9 +15,17 @@ import (
 )
 
 // stubTransferRepo 只记录落库，够本测试断言「失败也要留痕」。
-type stubTransferRepo struct{ jobs map[string]transfer.Job }
+//
+// 必须自带互斥：传输是「一个任务一个 goroutine」的，而测试往往在另一个
+// goroutine 里轮询状态 —— 裸 map 在 -race 下就是数据竞争。
+type stubTransferRepo struct {
+	mu   sync.Mutex
+	jobs map[string]transfer.Job
+}
 
 func (s *stubTransferRepo) UpsertJob(j transfer.Job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.jobs == nil {
 		s.jobs = map[string]transfer.Job{}
 	}
@@ -25,6 +34,8 @@ func (s *stubTransferRepo) UpsertJob(j transfer.Job) error {
 }
 
 func (s *stubTransferRepo) GetJob(jobID string) (transfer.Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	j, ok := s.jobs[jobID]
 	if !ok {
 		return transfer.Job{}, errors.New("not found")
@@ -44,6 +55,8 @@ func (s *stubTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error
 // 由被测代码自己判断该不该动它 —— 过滤写在 stub 里等于把被测逻辑
 // 抄一遍，测试就变成自己验证自己。
 func (s *stubTransferRepo) all() []transfer.Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]transfer.Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		if j.JobID == "" {

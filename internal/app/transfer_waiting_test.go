@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/swarmlink/swarmlink/internal/adapters/store/mem"
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
+	"github.com/swarmlink/swarmlink/internal/domain/peer"
+	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/domain/protocol"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
@@ -157,5 +162,150 @@ func TestSendFileMissingFileStillFails(t *testing.T) {
 	}
 	if j.Status != transfer.StateFailed {
 		t.Errorf("status = %q, want failed", j.Status)
+	}
+}
+
+// ---------- 「传一半掉线」用的假连接与轮询辅助 ----------
+
+// brokenSession 从第 failFrom 帧起开始失败：用来模拟「传一半对方掉线」。
+//
+// 为什么不复用现成的 stubSession：它永远成功，而这条用例要的正是
+// 「走到发块循环之后才开始失败」—— 元数据阶段就失败是另一条路径
+// （等 FILE_META_ACK 超时），覆盖不到 runSender 里的写失败。
+type brokenSession struct {
+	peer     identity.NodeID
+	failFrom int
+	err      error
+
+	mu    sync.Mutex
+	sends int
+}
+
+func (s *brokenSession) PeerID() identity.NodeID { return s.peer }
+
+func (s *brokenSession) Send(protocol.Frame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sends++
+	if s.sends >= s.failFrom {
+		return s.err
+	}
+	return nil
+}
+
+func (s *brokenSession) Recv() (protocol.Frame, error) {
+	return protocol.Frame{}, errors.New("test: 不读")
+}
+func (s *brokenSession) RTT() time.Duration { return 0 }
+func (s *brokenSession) Close() error       { return nil }
+
+func (s *brokenSession) sent() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sends
+}
+
+// deadConns：Dial 仍能给出会话（第一次拨号是成功的），但 SessionOf 恒 false ——
+// 等价于「会话已经不在管理器里了」，也就是对方掉线之后的样子。
+type deadConns struct{ sess ports.Session }
+
+func (c deadConns) Dial(context.Context, identity.NodeID, string) (ports.Session, error) {
+	return c.sess, nil
+}
+func (c deadConns) Accept(context.Context) (ports.Session, error) { return c.sess, nil }
+func (c deadConns) SessionOf(identity.NodeID) (ports.Session, bool) {
+	return nil, false
+}
+func (c deadConns) Broadcast(protocol.Frame, ...identity.NodeID) error { return nil }
+func (c deadConns) Close(identity.NodeID) error                        { return nil }
+
+// waitUntil 轮询直到条件成立；超时给出可读的失败原因（不靠 sleep 猜时序）。
+func waitUntil(t *testing.T, d time.Duration, desc string, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("等待超时：%s", desc)
+}
+
+// 传一半对方掉线：任务必须转入等待（而不是 failed），且不报错。
+func TestMidTransferDisconnectWaitsForPeer(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	bus := eventbus.New()
+	states := make(chan eventbus.TransferState, 8)
+	bus.Subscribe(eventbus.TopicTransferState, func(p any) {
+		if ev, ok := p.(eventbus.TransferState); ok {
+			states <- ev
+		}
+	})
+	bus.Subscribe(eventbus.TopicTransferError, func(p any) {
+		ev, _ := p.(eventbus.TransferError)
+		t.Errorf("等待不是失败，不该发 transfer:error（%v）", ev.Err)
+	})
+
+	clk := clock.New()
+	// 目录里对端仍显示在线：模拟的正是「目录还没更新，但连接已经断了」
+	peers := mem.NewPeers(clk)
+	err := peers.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastAddr: "127.0.0.1:9", LastSeen: clk.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &brokenSession{
+		peer:     peerID,
+		failFrom: 3, // 第 1 帧 FILE_META 通过，之后开始失败
+		err:      errors.New("write tcp: use of closed network connection"),
+	}
+
+	a := NewTransferApp(identity.NodeID{}, repo, nil, deadConns{sess: sess}, peers, bus, clk, nil)
+	a.ChunkSize = 1024
+
+	path := filepath.Join(t.TempDir(), "half.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{9}, 8*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const jobID = "job-mid-drop"
+	go func() {
+		_, _ = a.SendFileAs(context.Background(), peerID, path, jobID)
+	}()
+
+	// 等发送侧发出 FILE_META 并登记任务，再喂一个空位图 ACK 让它进入发块循环
+	waitUntil(t, 2*time.Second, "发送侧登记并发出 FILE_META", func() bool {
+		return a.getSender(jobID) != nil
+	})
+	bm := transfer.NewChunkBitmap(transfer.ChunkCount(8*1024, a.ChunkSize))
+	payload, err := protocol.EncodeJSON(protocol.FileMetaAck{
+		JobID: jobID, CompletedBitmap: bm.EncodeBase64(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.HandleFileMetaAck(sess, protocol.New(protocol.TypeFileMetaAck, payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 发块循环里写失败 → 转入等待
+	waitUntil(t, 3*time.Second, "任务转入等待对方上线", func() bool {
+		j, err := repo.GetJob(jobID)
+		return err == nil && j.Status == transfer.StateIdle && j.WaitReason == transfer.WaitPeerOffline
+	})
+	if got := sess.sent(); got < 3 {
+		t.Errorf("只发了 %d 帧就被判定掉线，说明没有真的走到发块阶段", got)
+	}
+
+	select {
+	case ev := <-states:
+		if ev.Reason != string(transfer.WaitPeerOffline) {
+			t.Errorf("state 事件 reason = %q，期望 peer_offline", ev.Reason)
+		}
+	default:
+		t.Fatal("转入等待必须发 transfer.state")
 	}
 }
