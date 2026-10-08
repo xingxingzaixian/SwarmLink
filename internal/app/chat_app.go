@@ -381,7 +381,7 @@ func (a *ChatApp) Start(ctx context.Context) {
 	if a.lg != nil {
 		a.lg.Info("chat: starting, subscribing to peer online events")
 	}
-	
+
 	// 订阅节点上线事件（TCP 连接建立时）
 	a.bus.Subscribe(eventbus.TopicPeerOnline, func(payload any) {
 		ev, ok := payload.(eventbus.PeerOnline)
@@ -436,6 +436,7 @@ func (a *ChatApp) Start(ctx context.Context) {
 //   - 消息从不经过 sess.Send，对端的聊天框永远看不到文件卡片；
 //   - 它永远拿不到 ACK，outbox 于是一直重试，每次重试都再产生一条
 //     假的「文件已被删除或移动」消息，源源不断发给对端。
+//
 // 文件是否还在，由 TransferApp 在真正传输时判断（失败会发 transfer:error
 // 并在传输面板标红），不该由聊天消息来前置检查。
 func (a *ChatApp) trySend(ctx context.Context, peerID identity.NodeID, msg message.Message) error {

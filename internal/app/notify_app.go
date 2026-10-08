@@ -44,6 +44,16 @@ const (
 	// 必须自己去找通知区域。
 	ActShowPopup
 
+	// ActSystemNotify 让组合根发一条【系统通知】（进 Windows 通知中心 /
+	// macOS 通知中心 / Linux D-Bus）。
+	//
+	// 与 ActShowPopup 二选一，不是叠加：系统通知本身就能被看到、能进通知中心、
+	// 能点击回跳，再叠一个自建气泡就是同一条消息提示两次。
+	// 什么时候用哪一个由 NotifyEnv.SystemNotifyOK 决定，本层不关心平台细节。
+	//
+	// 载荷：Title = 发送者名字，Text = 内容预览，ConvID = 点击时要打开的会话。
+	ActSystemNotify
+
 	ActHideToTray // 关闭请求 → 隐藏窗口、保持进程
 	ActAllowQuit  // 关闭请求 → 放行退出
 )
@@ -52,6 +62,14 @@ const (
 type Act struct {
 	Kind ActKind
 	Text string
+
+	// 以下三个字段只对 ActSystemNotify 有意义（其余动作只读 Kind/Text）。
+	//
+	// 为什么走「值」而不是让组合根自己去查：提示内容（谁发来的、说了什么）
+	// 本来就是决策层的知识，这里已经算好了；让组合根再算一遍必然算得不一致。
+	Title  string // 通知标题（发送者名字）
+	ConvID string // 点击通知要打开的会话
+	Silent bool   // 用户关了提示音：通知也不要发声
 }
 
 // NotifyEnv 是决策所需的环境快照（窗口状态是 Wails 的事，这里只读值）。
@@ -61,6 +79,12 @@ type NotifyEnv struct {
 	ActiveConvID  string
 	// TrayOK 表示托盘图标是否真的建起来了：它是「关闭 = 收进托盘」的前提。
 	TrayOK bool
+	// SystemNotifyOK 表示系统通知（通知中心）当前可用。
+	//
+	// 为真时新消息走系统通知，为假时回落到自建托盘气泡。
+	// 本层只读这一个 bool：为什么不可用（平台不支持、服务起不来、
+	// 第一次发送就失败）是适配器的事。
+	SystemNotifyOK bool
 }
 
 // NotifySettings 是决策所需的设置快照。
@@ -180,10 +204,50 @@ func (n *NotifyApp) OnChatMessage(m message.Message) []Act {
 	n.unread++
 	n.rememberSenderLocked(m)
 	acts := n.startFlashLocked(e)
-	acts = append(acts, n.soundActsLocked(s)...)
-	acts = append(acts, Act{Kind: ActWindowTitle, Text: n.titleLocked()})
-	// 消息到达即主动弹「谁发来的」——不必等用户去悬停托盘
+	// 消息到达即主动告知「谁发来的」——不必等用户去悬停托盘。
+	// 用系统通知还是自建气泡，由 alertActsLocked 按可用性二选一。
+	acts = append(acts, n.alertActsLocked(e, s, m)...)
+	return append(acts, Act{Kind: ActWindowTitle, Text: n.titleLocked()})
+}
+
+// alertActsLocked 产出「怎么让人注意到这条消息」这部分动作。
+// 需要持有 n.mu。
+//
+// 系统通知优先：它自带声音、进通知中心、可点击回跳；
+// 不可用（平台不支持 / 服务起不来 / 发送失败）时才回落到原始的
+// 「自建提示音 + 托盘气泡」组合。
+//
+// 两者【互斥】是刻意的：并列会出现「同一条消息，系统通知和气泡各弹一次」，
+// 而系统通知本来就比气泡更强（能回看、能点击），没有保底的必要。
+func (n *NotifyApp) alertActsLocked(e NotifyEnv, s NotifySettings, m message.Message) []Act {
+	if e.SystemNotifyOK {
+		return []Act{n.systemNotifyLocked(m, s)}
+	}
+	acts := n.soundActsLocked(s)
 	return append(acts, Act{Kind: ActShowPopup, Text: n.hoverTextLocked()})
+}
+
+// systemNotifyLocked 组装系统通知的内容。需要持有 n.mu。
+//
+// 发送者与预览直接复用悬停提示那一份（rememberSenderLocked 刚写过，
+// 首条就是本条消息）：两处各算一遍，迟早会出现「气泡写着张三、通知写着李四」。
+func (n *NotifyApp) systemNotifyLocked(m message.Message, s NotifySettings) Act {
+	name, preview := hoverUnknownName, hoverEmptyPreview
+	if len(n.senders) > 0 {
+		name, preview = n.senders[0].name, n.senders[0].preview
+	}
+	if n.unread > 1 {
+		// 通知是一句话，不是消息列表；但「还有几条」必须给出来。
+		// 未读总数（而不是本会话条数）与窗口标题保持一致。
+		preview = fmt.Sprintf("%s（共 %d 条未读）", preview, n.unread)
+	}
+	return Act{
+		Kind:   ActSystemNotify,
+		Title:  name,
+		Text:   preview,
+		ConvID: m.ConvID,
+		Silent: !s.Sound,
+	}
 }
 
 // HoverText 是鼠标悬停在托盘图标上时要显示的内容（QQ 式：谁发来的、说了什么）。

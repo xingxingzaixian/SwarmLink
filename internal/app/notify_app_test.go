@@ -218,6 +218,132 @@ func titleOf(acts []Act) string {
 	return ""
 }
 
+// systemNotifyOf 取出系统通知动作。
+func systemNotifyOf(acts []Act) (Act, bool) {
+	for _, a := range acts {
+		if a.Kind == ActSystemNotify {
+			return a, true
+		}
+	}
+	return Act{}, false
+}
+
+// 系统通知可用时：发系统通知，且【不再】弹气泡、不再自己响 ——
+// 通知自带声音与通知中心，叠加就是同一条消息提示两次。
+func TestIncomingMessagePrefersSystemNotify(t *testing.T) {
+	env := NotifyEnv{SystemNotifyOK: true}
+	set := NotifySettings{Sound: true}
+	n, _ := newNotifyFixtureNamed(t, &env, &set, names(map[string]string{testPeerHex: "张三"}))
+
+	acts := n.OnChatMessage(inboundFrom(t, testPeerHex, "你好", message.MsgTypeText))
+
+	act, ok := systemNotifyOf(acts)
+	if !ok {
+		t.Fatalf("系统通知可用时应产生系统通知动作（动作=%v）", kinds(acts))
+	}
+	if act.Title != "张三" {
+		t.Errorf("通知标题 = %q，期望发送者名字", act.Title)
+	}
+	if act.Text != "你好" {
+		t.Errorf("通知正文 = %q，期望 %q", act.Text, "你好")
+	}
+	if act.ConvID != "c1" {
+		t.Errorf("通知会话 = %q，期望 c1（点击要能回到这个会话）", act.ConvID)
+	}
+	if act.Silent {
+		t.Error("提示音开关打开时通知不该静音")
+	}
+	if _, ok := popupOf(acts); ok {
+		t.Errorf("系统通知与托盘气泡必须二选一，不能同时出现：%v", kinds(acts))
+	}
+	if has(acts, ActPlaySound) {
+		t.Error("声音应交给系统通知，否则会响两声")
+	}
+	// 未读与标题计数照旧：通知中心是「看过即散」，常驻计数还得靠窗口标题
+	if n.Unread() != 1 {
+		t.Errorf("未读 = %d，期望 1", n.Unread())
+	}
+	if got := titleOf(acts); got != "SwarmLink · 1 条未读" {
+		t.Errorf("窗口标题 = %q，期望带未读计数", got)
+	}
+}
+
+// 提示音开关关掉时，系统通知也要静音（否则「关了提示音还在响」）
+func TestSystemNotifyHonoursSoundSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sound      bool
+		wantSilent bool
+	}{
+		{"开关打开 → 通知发声", true, false},
+		{"开关关闭 → 通知静音", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := NotifyEnv{SystemNotifyOK: true}
+			set := NotifySettings{Sound: tc.sound}
+			n, _ := newNotifyFixture(t, &env, &set)
+
+			act, ok := systemNotifyOf(n.OnChatMessage(inbound("c1")))
+			if !ok {
+				t.Fatal("应产生系统通知动作")
+			}
+			if act.Silent != tc.wantSilent {
+				t.Errorf("Silent = %v，期望 %v", act.Silent, tc.wantSilent)
+			}
+		})
+	}
+}
+
+// 未读不止一条时，通知正文要带上总数：Windows 的 toast 无法按 ID 替换，
+// 逐条弹出的通知里只有正文能表达「还有几条」。
+func TestSystemNotifyBodyCarriesUnreadCount(t *testing.T) {
+	env := NotifyEnv{SystemNotifyOK: true}
+	set := NotifySettings{}
+	n, _ := newNotifyFixtureNamed(t, &env, &set, names(map[string]string{testPeerHex: "张三"}))
+
+	n.OnChatMessage(inboundFrom(t, testPeerHex, "第一条", message.MsgTypeText))
+	act, ok := systemNotifyOf(n.OnChatMessage(inboundFrom(t, testPeerHex, "第二条", message.MsgTypeText)))
+	if !ok {
+		t.Fatal("应产生系统通知动作")
+	}
+	if !strings.HasPrefix(act.Text, "第二条") {
+		t.Errorf("通知正文 = %q，期望以最新那条开头", act.Text)
+	}
+	if !strings.Contains(act.Text, "共 2 条未读") {
+		t.Errorf("通知正文 = %q，期望带上未读总数", act.Text)
+	}
+}
+
+// 系统通知不可用时必须退回「气泡 + 提示音」：降级路径不能只是不响。
+func TestFallsBackToPopupWhenSystemNotifyUnavailable(t *testing.T) {
+	env := NotifyEnv{SystemNotifyOK: false}
+	set := NotifySettings{Sound: true}
+	n, _ := newNotifyFixtureNamed(t, &env, &set, names(map[string]string{testPeerHex: "张三"}))
+
+	acts := n.OnChatMessage(inboundFrom(t, testPeerHex, "你好", message.MsgTypeText))
+
+	if _, ok := systemNotifyOf(acts); ok {
+		t.Errorf("不可用时不该产生系统通知动作：%v", kinds(acts))
+	}
+	if _, ok := popupOf(acts); !ok {
+		t.Errorf("不可用时应回落到托盘气泡：%v", kinds(acts))
+	}
+	if !has(acts, ActPlaySound) {
+		t.Error("不可用时声音要自己响")
+	}
+}
+
+// 「正看着这个会话」这条规则与用哪种通知方式无关：系统通知可用也不该打扰。
+func TestSystemNotifyStillSilentWhenWatchingConversation(t *testing.T) {
+	env := NotifyEnv{WindowVisible: true, WindowFocused: true, ActiveConvID: "c1", SystemNotifyOK: true}
+	set := NotifySettings{Sound: true}
+	n, _ := newNotifyFixture(t, &env, &set)
+
+	if acts := n.OnChatMessage(inbound("c1")); len(acts) != 0 {
+		t.Fatalf("正看着该会话时不该有任何通知动作：%v", kinds(acts))
+	}
+}
+
 func inbound(convID string) message.Message {
 	return message.Message{MsgID: "m1", ConvID: convID, Direction: message.DirectionIn}
 }

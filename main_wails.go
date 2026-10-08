@@ -6,6 +6,10 @@
 // internal/adapters/wails 里以纯 Go 实现，因此 Wails beta 期的 API 波动
 // 只需要在这里适配一次（架构书 7.5：锁定 v3.0.0-beta.24，升级作为独立任务）。
 //
+// 例外是系统通知（internal/adapters/systemnotify）：它只能经由 Wails 的
+// notifications 服务获得，没有「纯 Go 实现」这一说。因此那里的对外接口
+// 刻意只收基本类型，Wails 的选项结构体不外泄，组合根依旧不必认识它。
+//
 // 构建步骤（在仓库根目录执行）：
 //
 //	wails3 generate bindings -f "-tags wails" -clean .
@@ -29,6 +33,7 @@ import (
 
 	"github.com/swarmlink/swarmlink/internal/adapters/config"
 	"github.com/swarmlink/swarmlink/internal/adapters/notify"
+	"github.com/swarmlink/swarmlink/internal/adapters/systemnotify"
 	wadapter "github.com/swarmlink/swarmlink/internal/adapters/wails"
 	// capp 是 internal/app 的别名：本文件里 `app` 这个名字已经被 Wails 的
 	// application.App 占用了，直接 import 成 app 会被局部变量遮蔽。
@@ -157,7 +162,16 @@ func main() {
 		ConfigDir:     node.ConfigDir,
 	})
 
+	// 系统通知：一个 Wails 服务，但在本文件里只用它自己的两个方法（Send / OnActivated）。
+	//
+	// Available() 会随「启动失败」「发送失败」翻成 false，决策层据此回落到
+	// 自建托盘气泡 —— 因此这里不需要知道它为什么不可用，也不需要重试。
+	sysNotify := systemnotify.New()
+
 	// 3. 创建应用：服务在 Options 里注册，Wails 会静态分析并生成 TypeScript 绑定。
+	//
+	// 系统通知也在这里注册：它必须由 Wails 启动（ServiceStartup 会准备
+	// 平台侧的通知通道），而适配器保证「启动失败只降级、不让应用起不来」。
 	var app *application.App
 	app = application.New(application.Options{
 		Name:        "SwarmLink",
@@ -169,6 +183,7 @@ func main() {
 			application.NewService(services.Peer),
 			application.NewService(services.Group),
 			application.NewService(services.Notify),
+			application.NewService(sysNotify),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -194,6 +209,16 @@ func main() {
 				"launchtime": time.Now().Local().String(),
 			},
 		},
+	})
+
+	// 用户点了系统通知：把窗口叫到前台，并让前端切到对应会话。
+	//
+	// 两件事都必须做：只切会话而窗口还在后台等于没反应；只叫窗口则用户
+	// 还得自己去找是哪个人发来的 —— 通知里本来就知道。
+	// convID 经 NotificationOptions.Data 随通知发出去、点击时原样回来。
+	sysNotify.OnActivated(func(convID string) {
+		showWindow()
+		app.Event.Emit(wadapter.EventSystemNotifyActivated, map[string]any{"convId": convID})
 	})
 
 	// 注入自动启动适配器到服务层（用于自动启动功能）
@@ -274,6 +299,9 @@ func main() {
 			WindowFocused: win.IsFocused(),
 			ActiveConvID:  readActiveConv(),
 			TrayOK:        trayOK.Load(),
+			// 现取现用：可用性会在发送失败时被适配器翻成 false，
+			// 下一条消息就该走气泡了。
+			SystemNotifyOK: sysNotify.Available(),
 		}
 	}
 	settingsSnapshot := func() capp.NotifySettings {
@@ -385,6 +413,20 @@ func main() {
 				win.SetTitle(a.Text)
 			case capp.ActShowPopup:
 				showPopup(a.Text)
+			case capp.ActSystemNotify:
+				// 失败即降级：可用性标志已被适配器翻成 false（后续消息改走气泡），
+				// 本次仍要用气泡把这条消息补上 —— 否则「第一次失败」的那条消息
+				// 就什么提示都没有了。
+				if err := sysNotify.Send(systemnotify.Message{
+					ID:     a.ConvID,
+					Title:  a.Title,
+					Body:   a.Text,
+					ConvID: a.ConvID,
+					Silent: a.Silent,
+				}); err != nil {
+					slog.Warn("发送系统通知失败，回落到托盘气泡", "err", err)
+					showPopup(a.Text)
+				}
 			}
 			// ActHideToTray / ActAllowQuit 由关闭钩子消费，这里不处理。
 		}
