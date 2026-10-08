@@ -84,6 +84,21 @@ func (r *memTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error 
 
 func (r *memTransferRepo) ListActive() ([]transfer.Job, error)          { return nil, nil }
 func (r *memTransferRepo) ListRecent(limit int) ([]transfer.Job, error) { return nil, nil }
+
+func (r *memTransferRepo) ListWaiting() ([]transfer.Job, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]transfer.Job, 0, len(r.jobs))
+	for _, j := range r.jobs {
+		if j.Direction != transfer.DirectionSend ||
+			j.Status != transfer.StateIdle ||
+			j.WaitReason != transfer.WaitPeerOffline {
+			continue
+		}
+		out = append(out, j)
+	}
+	return out, nil
+}
 func (r *memTransferRepo) PurgeFinished(keep int, olderThan time.Time) (int, error) {
 	return 0, nil
 }
