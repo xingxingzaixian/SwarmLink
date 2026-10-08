@@ -1,9 +1,19 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/swarmlink/swarmlink/internal/domain/identity"
+	"github.com/swarmlink/swarmlink/internal/domain/transfer"
+	"github.com/swarmlink/swarmlink/internal/infra/clock"
+	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
 
 // 分类规则表：主判据是「对端可达性」，错误文本只做兜底。
@@ -48,5 +58,104 @@ func TestShouldWaitForPeer(t *testing.T) {
 				t.Errorf("shouldWaitForPeer = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// 对方离线时点发送：立刻落一条「等待对方上线」的任务，不报错。
+//
+// 这里用 noConns + 空目录，对端一律不可达；「不哈希」由这份用例间接锁定：
+// 等待路径根本不碰文件内容，因此 file_hash 必须还是空的。
+func TestSendFileWhilePeerOfflineWaitsWithoutHashing(t *testing.T) {
+	repo := &stubTransferRepo{}
+	bus := eventbus.New()
+	states := make(chan eventbus.TransferState, 4)
+	bus.Subscribe(eventbus.TopicTransferState, func(p any) {
+		if ev, ok := p.(eventbus.TransferState); ok {
+			states <- ev
+		}
+	})
+	bus.Subscribe(eventbus.TopicTransferError, func(p any) {
+		ev, _ := p.(eventbus.TransferError)
+		t.Errorf("等待不是失败，不该发 transfer:error（%v）", ev.Err)
+	})
+
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, bus, clock.New(), nil)
+	a.ChunkSize = 1024
+
+	peerID := mustNodeID(t, testPeerHex)
+	path := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{7}, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const jobID = "job-offline-send"
+	job, err := a.SendFileAs(context.Background(), peerID, path, jobID)
+	if err != nil {
+		t.Fatalf("等待不该返回错误，得到 %v", err)
+	}
+	if job.Status != transfer.StateIdle {
+		t.Errorf("status = %q, want %q（Idle 就是「还没开始」）", job.Status, transfer.StateIdle)
+	}
+	if job.WaitReason != transfer.WaitPeerOffline {
+		t.Errorf("waitReason = %q, want %q", job.WaitReason, transfer.WaitPeerOffline)
+	}
+	if job.FileSize != 4096 {
+		t.Errorf("fileSize = %d, want 4096（等待也要能显示进度口径）", job.FileSize)
+	}
+	if job.TotalChunks != 4 {
+		t.Errorf("totalChunks = %d, want 4", job.TotalChunks)
+	}
+	if job.FileHash != "" {
+		t.Errorf("还没开始传就不该有 file_hash，得到 %q（说明等待期读了文件内容）", job.FileHash)
+	}
+	if job.NextTryAt.IsZero() {
+		t.Error("下次重试时间必须落下，否则 sweep 不会拾取它")
+	}
+
+	stored, err := repo.GetJob(jobID)
+	if err != nil {
+		t.Fatalf("等待任务必须落库（否则重启后丢失）: %v", err)
+	}
+	if stored.WaitReason != transfer.WaitPeerOffline {
+		t.Errorf("落库的 waitReason = %q", stored.WaitReason)
+	}
+
+	select {
+	case ev := <-states:
+		if ev.To != string(transfer.StateIdle) || ev.Reason != string(transfer.WaitPeerOffline) {
+			t.Errorf("state 事件 = %+v，期望 idle/peer_offline", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("进入等待必须发 transfer.state，否则界面永远显示「协商中」")
+	}
+}
+
+// 真失败仍然必须是失败：本地文件不存在不该被"等待"吞掉。
+func TestSendFileMissingFileStillFails(t *testing.T) {
+	repo := &stubTransferRepo{}
+	bus := eventbus.New()
+	got := make(chan eventbus.TransferError, 1)
+	bus.Subscribe(eventbus.TopicTransferError, func(p any) {
+		if ev, ok := p.(eventbus.TransferError); ok {
+			got <- ev
+		}
+	})
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, bus, clock.New(), nil)
+
+	missing := filepath.Join(t.TempDir(), "nope.bin")
+	if _, err := a.SendFileAs(context.Background(), mustNodeID(t, testPeerHex), missing, "job-missing"); err == nil {
+		t.Fatal("文件不存在必须是错误")
+	}
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("失败路径必须发 transfer:error")
+	}
+	j, err := repo.GetJob("job-missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Status != transfer.StateFailed {
+		t.Errorf("status = %q, want failed", j.Status)
 	}
 }

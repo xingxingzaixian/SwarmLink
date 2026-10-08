@@ -43,9 +43,21 @@ type TransferApp struct {
 	// ProgressInterval 是进度事件节流间隔（4~10 Hz，P1-10）。
 	ProgressInterval time.Duration
 
+	// BaseBackoff / MaxBackoff 是「等待对方上线」的重试退避参数
+	// （与消息 outbox 同一套：1s → 2s → … → 5min）。
+	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
+
 	mu        sync.Mutex
 	senders   map[string]*sendJob
 	receivers map[string]*recvJob
+
+	// starting 记录「已经交给传输 goroutine、但还可能在建任务路上」的 job_id。
+	//
+	// 为什么不能只看 senders：senders 是在 sendFile 内部（抢到信号量之后）
+	// 才登记的，而 sweep 与 peer.online 两个触发点完全可能同时命中同一条
+	// 等待任务 —— 那样会同时跑两个 goroutine、两次全文件哈希。
+	starting map[string]struct{}
 
 	sendSem chan struct{}
 }
@@ -107,8 +119,11 @@ func NewTransferApp(
 		AckInterval:         500 * time.Millisecond,
 		AckEveryChunks:      32,
 		ProgressInterval:    250 * time.Millisecond,
+		BaseBackoff:         time.Second,
+		MaxBackoff:          5 * time.Minute,
 		senders:             make(map[string]*sendJob),
 		receivers:           make(map[string]*recvJob),
+		starting:            make(map[string]struct{}),
 		sendSem:             make(chan struct{}, maxConc),
 	}
 }
@@ -137,18 +152,47 @@ func (a *TransferApp) SendFileAs(
 	peerID identity.NodeID,
 	path string,
 	jobID string,
+) (transfer.Job, error) {
+	// 抢占：同一条任务同一时刻只有一个 goroutine 在跑（sweep 与 peer.online
+	// 都可能来拉它）。初始发送也走这里，因此那次抢占与后续重试共用同一把锁。
+	if !a.claimStarting(jobID) {
+		return transfer.Job{}, fmt.Errorf("transfer: job %s 已在传输中", jobID)
+	}
+	defer a.releaseStarting(jobID)
+	return a.sendFile(ctx, peerID, path, jobID, false)
+}
+
+// sendFile 是「一次传输尝试」的实现。force 为真时【跳过】"对端看起来不可达"
+// 的快速判定 —— 只给「立即重试」用：用户点了按钮就是想要真的试一次，
+// 哪怕目录说对方离线（目录可能滞后于现实）。
+func (a *TransferApp) sendFile(
+	ctx context.Context,
+	peerID identity.NodeID,
+	path string,
+	jobID string,
+	force bool,
 ) (job transfer.Job, err error) {
 	if jobID == "" {
 		return transfer.Job{}, fmt.Errorf("transfer: job_id 不能为空")
 	}
 
-	// 统一出口：任何失败路径都必须让前端收到 transfer:error，且只发一次。
+	// networkAttempted 标记「失败是否已经发生在网络阶段」。
 	//
-	// 过去只有 runSender 的错误会发事件；其余（打开文件失败、拿不到会话、
-	// 元数据发送失败、等 FILE_META_ACK / FILE_DONE_ACK 超时、对端校验失败）
-	// 全是裸 return。而调用方 TransferService.SendFile 又把错误丢给了 `_`，
-	// 于是界面只建了一条「排队中」的任务，然后永远等不到任何反馈 ——
-	// 用户看到的就是「点了发送文件，实际并没有发送」。
+	// 这是分类的硬前提：本地检查（stat / 打开 / 哈希）出错一律是【真失败】——
+	// 文件不在、读不了，等多久都不会好。只有进入网络阶段之后的失败才可能是
+	// 「对端暂时够不着」。
+	//
+	// 为什么必须有这个标记，而不是靠错误文案判断本地失败：Windows 说
+	// "The system cannot find the file specified"，Linux 说 "no such file"，
+	// 靠文案就是在赌平台措辞 —— 赌错的方向是"把删掉的文件当成等待"，
+	// 用户会永远等一个不可能成功的任务。
+	networkAttempted := false
+
+	// 统一出口：任何失败路径都必须让前端收到反馈，且只发一次。
+	//
+	// 与过去唯一的区别：以前【所有】失败都置 failed；现在先问一句
+	// 「是不是对方暂时够不着」—— 是就转入等待（那不是错误），
+	// 由 sweep 在对方上线或退避到点时重试同一条任务。
 	defer func() {
 		if err == nil {
 			return
@@ -156,8 +200,19 @@ func (a *TransferApp) SendFileAs(
 		if job.JobID == "" {
 			job.JobID = jobID
 		}
+		if networkAttempted && shouldWaitForPeer(failureEvidence{
+			PeerReachable: a.peerReachable(peerID),
+			SessionAlive:  a.sessionAlive(peerID),
+			Err:           err,
+		}) {
+			job = a.markWaiting(job, jobID, peerID, path, err)
+			err = nil // 「等一会儿」不是错误
+			return
+		}
 		job.Status = transfer.StateFailed
 		job.Error = err.Error()
+		job.WaitReason = transfer.WaitNone
+		job.NextTryAt = time.Time{}
 		job.UpdatedAt = a.clk.Now()
 		_ = a.store.UpsertJob(job)
 		if a.bus != nil {
@@ -167,16 +222,46 @@ func (a *TransferApp) SendFileAs(
 		}
 	}()
 
+	// 1) 本地文件先判。顺序是刻意的：文件不在 / 是空文件时不必等对方上线
+	//    （等多久都发不出去），也不该占用并发额度。
+	chunkSize := a.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = transfer.DefaultChunkSize
+	}
+	st, serr := os.Stat(path)
+	if serr != nil {
+		return transfer.Job{}, fmt.Errorf("transfer: %w", serr)
+	}
+	if st.IsDir() {
+		return transfer.Job{}, fmt.Errorf("transfer: %s is a directory", path)
+	}
+	statSize := st.Size()
+	if transfer.ChunkCount(statSize, chunkSize) == 0 {
+		return transfer.Job{}, fmt.Errorf("transfer: empty file")
+	}
+
+	// 2) 对端明显不在 → 直接落等待，连哈希都不做。
+	//
+	//    这是本次改动的核心：过去会先算完整文件 SHA-256 再拨号失败，
+	//    一个 10GB 文件为了"发不出去"要先读一整遍磁盘。
+	if !force && !a.peerReachable(peerID) {
+		job = a.newWaitingJob(jobID, peerID, path, statSize)
+		if uerr := a.store.UpsertJob(job); uerr != nil {
+			return job, uerr
+		}
+		if a.lg != nil {
+			a.lg.Info("transfer: 对端离线，任务进入等待",
+				"job_id", jobID, "peer_id", peerID.String(), "file", job.FileName)
+		}
+		a.publishState(job, "", string(transfer.StateIdle), string(transfer.WaitPeerOffline))
+		return job, nil
+	}
+
 	select {
 	case a.sendSem <- struct{}{}:
 		defer func() { <-a.sendSem }()
 	case <-ctx.Done():
 		return transfer.Job{}, ctx.Err()
-	}
-
-	chunkSize := a.ChunkSize
-	if chunkSize <= 0 {
-		chunkSize = transfer.DefaultChunkSize
 	}
 
 	fileHash, chunkHashes, size, err := hashFileChunks(path, chunkSize)
@@ -220,6 +305,8 @@ func (a *TransferApp) SendFileAs(
 	}
 	defer f.Close()
 
+	// 从这里开始进入网络阶段：之后的失败才可能是"对端够不着"。
+	networkAttempted = true
 	sess, err := a.session(ctx, peerID)
 	if err != nil {
 		return job, err

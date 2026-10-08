@@ -42,10 +42,14 @@ type TransferProgress struct {
 }
 
 // TransferState 是 transfer.state 的载荷。
+//
+// Reason 目前只用于等待态（"peer_offline"）；其余状态为空串。
+// 界面靠它区分「等待对方上线」与「还没轮到」—— 两者在状态上都是 idle/queued。
 type TransferState struct {
-	JobID string
-	From  string
-	To    string
+	JobID  string
+	From   string
+	To     string
+	Reason string
 }
 
 // TransferDone 是 transfer.done 的载荷。

@@ -1,10 +1,13 @@
 package app
 
 import (
+	"os"
 	"strings"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
+	"github.com/swarmlink/swarmlink/internal/domain/transfer"
+	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
 
 // failureEvidence 是判定「等一会儿还是就此失败」所需的证据快照。
@@ -29,9 +32,16 @@ var permanentPatterns = []string{
 	"peer verify failed",
 	"invalid meta",
 	"empty file",
+	// 本地 IO 的两套文案。网络阶段也可能读到本地文件（发块时 f.ReadAt），
+	// 那时文件刚好被删/被截断，同样是真失败。
+	//   Windows: "The system cannot find the file specified" / "Access is denied"
+	//   POSIX  : "no such file or directory" / "permission denied"
 	"no such file",
+	"cannot find the file specified",
+	"cannot find the path specified",
 	"is a directory",
 	"permission denied",
+	"access is denied",
 	"no space left",
 }
 
@@ -111,5 +121,113 @@ func (a *TransferApp) sessionAlive(peerID identity.NodeID) bool {
 		return false
 	}
 	_, ok := a.conns.SessionOf(peerID)
+	return ok
+}
+
+// newWaitingJob 组装一条「等对方上线」的轻量任务。
+//
+// 刻意只做 stat：等待期不读文件内容（不哈希）。哈希只在真要传的那一刻
+// 发生，file_hash 也留到那时再填 —— 它唯一的用处是让对端按
+// (peer, file_hash) 找到可续传的临时文件。
+func (a *TransferApp) newWaitingJob(jobID string, peerID identity.NodeID, path string, size int64) transfer.Job {
+	chunkSize := a.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = transfer.DefaultChunkSize
+	}
+	now := a.clk.Now()
+	total := transfer.ChunkCount(size, chunkSize)
+	return transfer.Job{
+		JobID:       jobID,
+		PeerID:      peerID,
+		FileName:    fileBase(path),
+		FileSize:    size,
+		ChunkSize:   chunkSize,
+		TotalChunks: total,
+		Direction:   transfer.DirectionSend,
+		LocalPath:   path,
+		Bitmap:      transfer.NewChunkBitmap(total),
+		Status:      transfer.StateIdle,
+		WindowSize:  a.windowSize(),
+		WaitReason:  transfer.WaitPeerOffline,
+		NextTryAt:   now.Add(backoff(1, a.BaseBackoff, a.MaxBackoff)),
+		RetryCount:  1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+}
+
+// markWaiting 把一个已有任务转入「等待对方上线」并落库。
+//
+// 不写 job.Error：那不是失败，把原因写进去只会让传输列表整行标红。
+// 原因交给日志（排障用）与 WaitReason（界面用）。
+func (a *TransferApp) markWaiting(job transfer.Job, jobID string, peerID identity.NodeID, path string, cause error) transfer.Job {
+	if job.JobID == "" {
+		job = a.newWaitingJob(jobID, peerID, path, sizeOf(path))
+	}
+	from := string(job.Status)
+	next := job.RetryCount + 1
+	job.RetryCount = next
+	job.Status = transfer.StateIdle
+	job.WaitReason = transfer.WaitPeerOffline
+	job.Error = ""
+	job.NextTryAt = a.clk.Now().Add(backoff(next, a.BaseBackoff, a.MaxBackoff))
+	job.UpdatedAt = a.clk.Now()
+	_ = a.store.UpsertJob(job)
+	if a.lg != nil && cause != nil {
+		a.lg.Info("transfer: 对端不可达，转入等待",
+			"job_id", job.JobID, "peer_id", peerID.String(), "attempt", next, "err", cause)
+	}
+	a.publishState(job, from, string(transfer.StateIdle), string(transfer.WaitPeerOffline))
+	return job
+}
+
+// sizeOf 取文件大小；取不到返回 0（随后会因「空文件」而真失败）。
+func sizeOf(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+// publishState 广播一次任务状态变化。UI 靠它把「等待对方上线」显示出来。
+func (a *TransferApp) publishState(job transfer.Job, from, to, reason string) {
+	if a.bus == nil {
+		return
+	}
+	a.bus.Publish(eventbus.TopicTransferState, eventbus.TransferState{
+		JobID: job.JobID, From: from, To: to, Reason: reason,
+	})
+}
+
+// claimStarting 抢占一个 job；已被抢占返回 false。
+//
+// 抢占必须发生在「交给 goroutine 之前」，否则两个触发点会在真正登记
+// （senders 表）之前同时通过检查，各自跑一遍全文件哈希。
+func (a *TransferApp) claimStarting(jobID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.starting == nil {
+		a.starting = make(map[string]struct{})
+	}
+	if _, ok := a.starting[jobID]; ok {
+		return false
+	}
+	a.starting[jobID] = struct{}{}
+	return true
+}
+
+// releaseStarting 释放抢占。
+func (a *TransferApp) releaseStarting(jobID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.starting, jobID)
+}
+
+// isStarting 报告任务是否已被交给传输 goroutine（取消时要拦住它）。
+func (a *TransferApp) isStarting(jobID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.starting[jobID]
 	return ok
 }
