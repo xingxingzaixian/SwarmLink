@@ -58,6 +58,8 @@ type Job struct {
 
 外加 `CREATE INDEX IF NOT EXISTS ix_transfer_batch ON transfer_jobs(batch_id)`：批次聚合进度与整体取消都要按 `batch_id` 查。
 
+`batch_id` 的取值约定（无法用 CHECK 表达，只能靠契约）：**由发送端生成且全局唯一**（随机串，不是文件夹名、不是序号），同一个 `batch_id` 只属于一个对端的一次发送。两个对端各发来一个同名批次时，卡片会把两个文件夹合并、取消也会连带停掉另一批。**空 `batch_id` 一律报错**，不许退化成「返回所有单文件任务」—— `CancelBatch("")` 若走到那里，就是把本机全部单文件传输一起停掉。
+
 **不用新状态**：批次不是状态机的概念，`State` 与 `transitions` 一个字不改。
 
 ### 3.2 协议与能力
@@ -103,7 +105,10 @@ func (a *TransferApp) SendFolderAs(ctx context.Context, peerID identity.NodeID, 
 // 与 WaitPeerOffline 一样属于「我们自己会拉起」的任务；
 // 用户取消会把 WaitReason 清成 WaitNone，因此取消过的任务永远不会被
 // sweep 自动拉起（transfer_waiting.go:343-350 的既有约束）。
-WaitQueued WaitReason = "queued"
+//
+// 取值刻意【不】叫 "queued"：那句查询里紧挨着还有 status = 'queued'
+// （StateIdle 的落库值），两个 "queued" 并排会让人以为写重了。
+WaitQueued WaitReason = "batch_queued"
 ```
 
 `ListWaiting` 的 SQL 从 `wait_reason = ?` 改为 `wait_reason IN (?, ?)`（`transfers.go:118-122`），并把「只自动拉起」的守卫从「等于 `peer_offline`」改成「属于可自动拉起集合」，**取消态的 `None` 依旧被排除**。
@@ -186,7 +191,7 @@ func (a *TransferApp) CancelBatch(batchID string) (int, error)
   `{batch_id, folder_name, file_count, total_size, skipped}`。
   与 `MsgTypeFile` 完全同构：只负责让两端聊天框出现一张卡片，传输由独立通道完成。
 - **聊天框一条聚合卡片**：`文件夹名/ · N 个文件 · 1.2 GB`，进度按 `batchId` 聚合传输 store 里的任务（`已完成 x/N`），`取消全部` 按钮调 `CancelBatch`；被跳过符号链接时显示 `已跳过 3 项`。
-- **传输列表逐文件分行**（已定）：那是真实任务，每行显示 `RelPath`（区分 `a/dup.txt` 与 `b/dup.txt`）；`排队中` 的文案由 `waitReason === 'queued'` 决定，**不是** `peer_offline` 的「等待对方上线」。
+- **传输列表逐文件分行**（已定）：那是真实任务，每行显示 `RelPath`（区分 `a/dup.txt` 与 `b/dup.txt`）；`排队中` 的文案由 `waitReason === 'batch_queued'` 决定，**不是** `peer_offline` 的「等待对方上线」。
 - **入口**：`pickFiles(multiple)` 旁边加一个「发送文件夹」，调 `Dialogs.OpenFile{CanChooseDirectories: true, CanChooseFiles: false}`；Go 侧零改动。
 - **批次任务查询**：新增 `TransferService.ListBatch(batchId)`（走新端口方法）。不能靠 `List()` 的 `ListRecent(50)`：500 个文件的文件夹重启后聚合进度会算缺。
 - `TransferDTO` 补 `batchId/relPath/isDir`；`TransferJob`（前端）同步补。
@@ -211,6 +216,9 @@ func (a *TransferApp) CancelBatch(batchID string) (int, error)
 | 接收端被恶意 `rel_path` 写到下载目录之外 | 逐段清洗 + 每层 `SecureJoin` + 深度上限（3.4） |
 | 老版本对端收到文件夹 | 发送前能力位检查，直接拒绝，不产生平铺错乱 |
 | 20000 条任务一次性 Upsert 拖慢 RPC | 枚举与写库都在同步路径上但只做 stat；若实测卡顿，退路是分批写入（本次不做） |
+| **接收端续传键误命中**：`FindResumable` 的键是 `(peer, file_hash)`，同一批次里两个内容相同的文件（一张文件夹里两份一样的图/文档很常见）会命中同一条，后一个会**继承前一个的临时文件与最终路径** —— 结果是目录里少一个文件、另一个内容错位 | Task 7 落地时把批次内的续传键升为「按 `rel_path`」：`FindResumable(peerID, fileHash, relPath)`，`relPath == ""` 时保持单文件旧语义。**这条必须在批次上线前解决**，见实施计划的 Task 7 |
+| `IsDir` 条目的 `FileID` 为空，会带着空 hash 走进续传查找 | Task 7 显式化：目录条目不进 `FindResumable`（现在只是被 `TempPath != ""` 这个次生条件偶然挡住） |
+| 批次把任务数放大：`ListRecent(50)` 与 `PurgeFinished(keep)` 都以 job 计数，一个 20000 文件的文件夹会把单文件历史挤出窗口、吃光保留位 | 本次不动（字段零值兼容、行为未变）；Task 6 之后值得重新想保留策略（例如按 batch 折叠计数） |
 
 ## 6. 验收标准
 

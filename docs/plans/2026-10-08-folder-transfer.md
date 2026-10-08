@@ -1023,6 +1023,17 @@ func TestHandleFileMetaBadRelPathFailsOnlyThatJob(t *testing.T) {
 
 // is_dir 任务不需要任何分块；收到 chunk 时应被忽略而不是 panic。
 func TestHandleFileChunkIgnoresDirJob(t *testing.T) { /* … */ }
+
+// 【本任务必须新增】同一批次里两个内容相同的文件，不能共享临时文件与最终路径。
+//
+// 现状的续传键是 (peer, file_hash)（transfers.go:70），命中后 HandleFileMeta 会
+// 继承前一条的 TempPath/LocalPath/位图。单文件重复发送时这问题偶发，批次把
+// 「同一 hash 出现两次」变成常态（一张文件夹里两份一样的图很常见）——
+// 后果是目录里少一个文件、另一个内容错位。
+func TestHandleFileMetaSameHashInBatchKeepsSeparateTargets(t *testing.T) {
+	// 同一批两条 META：file_id 相同、rel_path 不同（照片/a.txt 与 照片/备份/a.txt）
+	// 断言：两次的最终路径不同、第二条不继承第一条的 TempPath
+}
 ```
 
 **Step 2: 运行确认失败**
@@ -1047,6 +1058,8 @@ go test ./internal/app/ -run "TestHandleFileMetaWithRelPath|TestHandleFileMetaDi
 ```
 
 - 落库的 `job` 填 `BatchID/RelPath/IsDir`；`IsDir` 时 `Bitmap` 长度为 0，`handle.TempPath` 为空 → 不要调用 `OpenTemp`（现有代码在 `recvJob` 里打开临时文件，需按 `IsDir` 分支跳过）。
+- **续传键必须按批次收紧**（本任务的关键修正）：把 `FindResumable(peerID, fileHash)` 升为 `FindResumable(peerID, fileHash, relPath)` —— `relPath == ""` 时保持单文件的旧语义（`(peer, hash)`），非空时按 `rel_path` 区分。端口、sqlite、mem 三处同步改，并补一条「同 hash 不同 rel_path 互不命中」的仓储用例。不修的话，一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。
+- `IsDir` 条目**显式不进**续传查找（它没有文件内容，`FileID` 为空）：现在是靠 `existing.TempPath != ""` 这个次生条件偶然挡住的，不要依赖它。
 - `HandleFileChunk`：`IsDir` 的接收任务直接 `return nil`（防御性，正常不会收到）。
 - `HandleFileDone`：`IsDir` 时跳过 `verify`（没有块可校验）、直接 `Status = StateDone`、`UpsertJob`、回 ACK — 目录在 META 阶段已经建好，这里只收尾。
 
@@ -1417,6 +1430,10 @@ go test -tags wails ./internal/adapters/wails/ -run "TestSendFolder|TestCancelBa
 // SendFolder 异步发送一个文件夹：枚举与落库在返回前完成（只 stat，不哈希），
 // 传输由 app 层的排队机制驱动，因此界面上会立刻出现一条文件夹卡片与
 // 一批「排队中」的任务。
+//
+// batchID 必须在这里用 message.NewID() 生成随机值（与 job_id 同一套）：
+// 它是全局唯一的批次标识，不是文件夹名 —— 两个对端各发一个「照片」时，
+// 同名 batch 会让卡片把两个文件夹合并、取消也连带停掉另一批。
 func (s *TransferService) SendFolder(peerID, path string) (FolderDTO, error)
 
 // CancelBatch 取消整个文件夹批次里未结束的任务，返回取消条数。
@@ -1505,7 +1522,7 @@ cd frontend && npm run test
 - `types.ts`：`TransferJob` 补 `batchId/relPath/isDir`；`SwarmApi` 补 `sendFolder(peerId, path): Promise<FolderSummary>`、`cancelBatch(batchId): Promise<number>`、`batchJobs(batchId): Promise<TransferJob[]>`、`sendFolderMessage(...)`。
 - `bindings.ts`：接上 Task 11 生成的绑定。
 - `mock.ts`：为四个新方法提供降级实现（预览模式里造几条假的 `batchId` 任务即可，**必须让 typecheck 干净**）。
-- `stores/transfer.ts`：`applyProgress`/`applyState` 已按 jobId 合并，只要 DTO 带上新字段即可；新增 `sendFolder`；把「等待对方上线」的判据保留为 `waitReason === 'peer_offline'`，并为 `waitReason === 'queued'` 增加「排队中」文案（**两者不同**：一个是等对端，一个是等前一个文件传完）。
+- `stores/transfer.ts`：`applyProgress`/`applyState` 已按 jobId 合并，只要 DTO 带上新字段即可；新增 `sendFolder`；把「等待对方上线」的判据保留为 `waitReason === 'peer_offline'`，并为 `waitReason === 'batch_queued'` 增加「排队中」文案（**两者不同**：一个是等对端，一个是等前一个文件传完）。
 - `stores/chat.ts`：新增 `sendFolder(conv, summary)`，照 `sendFile`（`chat.ts:273-282`）的写法，只支持单聊。
 
 **Step 4: 运行确认通过**
@@ -1572,7 +1589,7 @@ export async function pickFolder(): Promise<PickOutcome> {
 
 **Step 4: 传输列表**
 
-`TransferList.vue`：有 `relPath` 时显示相对路径（而不是只有文件名）；`排队中` 用 `waitReason === 'queued'` 判定；`format.ts` 与 `ChatBubble.vue` 两处状态文案同步加分支。
+`TransferList.vue`：有 `relPath` 时显示相对路径（而不是只有文件名）；`排队中` 用 `waitReason === 'batch_queued'` 判定；`format.ts` 与 `ChatBubble.vue` 两处状态文案同步加分支。
 
 **Step 5: 验证**
 
@@ -1650,4 +1667,28 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 - [ ] `Recover` 认领批次根目录
 - [ ] `MsgTypeFolder` + 服务方法与绑定
 - [ ] 前端聚合卡片、目录入口、逐文件传输行与整体取消
+- [ ] 批次内续传键按 `rel_path` 收紧（Task 7，防同 hash 文件互相覆盖）
 - [ ] 文档从不做清单移到已实现
+
+---
+
+## 实施差异记录
+
+按仓库存量约定，实施中与计划的偏离记在这里（不回头改上面已执行的任务步骤）。
+
+### Task 1（提交 `cf30ced`、`32a6863`、`dd4ba86`）
+
+计划与实现的差异，以及原因：
+
+1. **`WaitQueued` 的落库取值改为 `"batch_queued"`**（计划写的是 `"queued"`）。原因：同一句 SQL 里紧挨着还有 `status = 'queued'`（`StateIdle` 的落库值），两个 `queued` 并排会让读代码的人以为写重了；本仓已有过同类同名撞车。
+2. **新增 `transfer.AutoStartableReasons()`**，`ListWaiting` 的 `IN` 占位符由它派生。计划让仓储写死 `IN (?, ?)`，而 `AutoStartable()` 是另一处独立判断 —— 那就是第二份真相，分叉方向正是「取消过的任务被重新拉起」。
+3. **`ListByBatch("")` 与 `ListWaiting` 都拒绝/排除空值**：空 `batch_id` 会退化成「返回所有单文件任务」，`CancelBatch("")` 就成了「停掉本机全部单文件传输」。
+4. **`ListByBatch`/`ListWaiting` 增加第二排序键 `job_id`**（mem 侧同步）。批次是同一个循环里建的，整批落在同一毫秒是常态，只按 `created_at` 排会让文件次序由引擎决定、且两种存储给出不同结果。
+5. **计划里的测试辅助名是占位符**：实际用 `sqlite_test.go` 已有的 `openTest`/`mkID`（计划写的 `newTestDB`/`mustNodeID` 不存在）。
+6. **`internal/app/transfer_app_test.go` 的 `stubTransferRepo` 与 `internal/adapters/wails/services_test.go` 的 `memTransferRepo` 都必须补 `ListByBatch`**：计划漏了后者的连带影响，第一次提交因此让 `internal/adapters/wails` 测试包编译失败（`go build` 通过、`go vet ./internal/...` 全红）。这条固化成了前置约定里的「验证必须跑全仓」。
+7. **补 `TestMigrateFromV3AppliesV4`**：计划只写了「v3→v4 迁移回归」为可选，实测发现退库并重放是唯一能证明「老库升级不炸」的路径，且必须先删索引才能 `DROP COLUMN`。
+
+### 尚未执行、但已挂上验收条件
+
+- **Task 7 必须同时收紧续传键**：`FindResumable(peer, file_hash)` → 批次内按 `rel_path`。否则一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。这是代码质量审查发现的既有语义在批次下被放大，必须在批次上线前解决。
+- **`ListRecent(50)` 与 `PurgeFinished(keep)` 的保留窗口以 job 计数**：一个 20000 文件的文件夹会把单文件历史挤出窗口。本次不动，Task 6 之后需要重新考虑保留策略。
