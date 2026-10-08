@@ -430,11 +430,15 @@ func TestListByBatch(t *testing.T) {
 		Status: transfer.StateIdle, WaitReason: transfer.WaitQueued,
 		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
 	}
-	for _, spec := range []struct{ jobID, rel string }{
+	// CreatedAt 刻意各不相同：三条同时间戳会让 ORDER BY created_at 出现并列，
+	// 返回顺序取决于 SQLite 未定义的稳定性 —— 那样「按创建顺序」这条要求
+	// 即使被改成 DESC 也照样通过，断言就成了摆设。
+	for i, spec := range []struct{ jobID, rel string }{
 		{"j1", "照片/a.txt"}, {"j2", "照片/b.txt"}, {"j3", "照片/子/c.txt"},
 	} {
 		j := base
 		j.JobID, j.BatchID, j.RelPath = spec.jobID, "b1", spec.rel
+		j.CreatedAt = time.Unix(int64(i+1), 0)
 		if err := tr.UpsertJob(j); err != nil {
 			t.Fatal(err)
 		}

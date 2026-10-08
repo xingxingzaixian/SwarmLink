@@ -90,12 +90,30 @@ func (r *memTransferRepo) ListWaiting() ([]transfer.Job, error) {
 	defer r.mu.Unlock()
 	out := make([]transfer.Job, 0, len(r.jobs))
 	for _, j := range r.jobs {
+		// 判据与两个真实实现（mem / sqlite）保持一致：用 AutoStartable()，
+		// 而不是自己写一遍「等于 peer_offline」。替身若与实现分叉，
+		// 测试会在「排队中的任务能否被拉起」这类问题上给出假绿灯。
 		if j.Direction != transfer.DirectionSend ||
 			j.Status != transfer.StateIdle ||
-			j.WaitReason != transfer.WaitPeerOffline {
+			!j.WaitReason.AutoStartable() {
 			continue
 		}
 		out = append(out, j)
+	}
+	return out, nil
+}
+
+// ListByBatch 按批次过滤（与 internal/app 的 stubTransferRepo 同一做法）：
+// 整体取消的语义完全依赖「只动这一批」，一个返回全表的替身会让
+// 「取消 b1 也把 b2 停了」在测试里照样通过。
+func (r *memTransferRepo) ListByBatch(batchID string) ([]transfer.Job, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]transfer.Job, 0, len(r.jobs))
+	for _, j := range r.jobs {
+		if j.BatchID == batchID {
+			out = append(out, j)
+		}
 	}
 	return out, nil
 }
