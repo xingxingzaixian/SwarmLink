@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
@@ -28,17 +29,32 @@ const (
 	//
 	// 与 WaitPeerOffline 一样属于「我们自己会拉起」的任务：文件夹的每个文件
 	// 都是一条独立任务，靠这个原因排队，由既有调度按序开跑。
-	WaitQueued WaitReason = "queued"
+	//
+	// 取值刻意【不】叫 "queued"：那一句查询里紧挨着还有 status = 'queued'
+	// （StateIdle 的落库值，见 state.go 的 DBStatus），两个 "queued" 并排
+	// 会让读代码的人以为写重了 —— 本仓已经有过一次这类同名撞车。
+	WaitQueued WaitReason = "batch_queued"
 )
+
+// autoStartableReasons 是【唯一】一份「可自动拉起」的取值清单。
+//
+// 仓储的 SQL IN 列表（AutoStartableReasons）与调用方的守卫（AutoStartable）
+// 都从它派生。各写一遍的分叉方向是「用户取消过的任务自己又跑起来」——
+// 那是这个功能最不能出的问题。
+var autoStartableReasons = []WaitReason{WaitPeerOffline, WaitQueued}
 
 // AutoStartable 报告该等待原因是否属于「可以自动拉起」的一类。
 //
-// 这个判断同时被仓储（ListWaiting 的 SQL）与应用层（startJobs 的守卫）使用。
-// 两处各写一遍迟早会分叉，而分叉的方向是「用户取消过的任务自己又跑起来」——
-// 那是这个功能最不能出的问题，因此收敛成一个方法。
-func (r WaitReason) AutoStartable() bool {
-	return r == WaitPeerOffline || r == WaitQueued
-}
+// 未登记的原因一律返回 false，这个方向是刻意选的：将来加了「用户暂停」这类
+// 新原因而忘了登记时，后果是「任务停在队列里不动」（响亮、一眼可见），
+// 而不是「取消过的任务被重新跑起来」（致命且难复现）。
+func (r WaitReason) AutoStartable() bool { return slices.Contains(autoStartableReasons, r) }
+
+// AutoStartableReasons 返回可自动拉起的全部取值（副本）。
+//
+// 供仓储构造 SQL 的 IN 列表：让「哪些原因能被自动拉起」只有一份真相，
+// 而不是领域层一个方法、仓储层一句手写的 IN (?, ?)。
+func AutoStartableReasons() []WaitReason { return slices.Clone(autoStartableReasons) }
 
 // DefaultChunkSize 是默认分块大小（架构书 4.8：LAN 1MB / 跨网段 256KB / 默认 512KB）。
 const DefaultChunkSize int64 = 512 * 1024

@@ -453,22 +453,92 @@ func TestListByBatch(t *testing.T) {
 	if err := tr.UpsertJob(single); err != nil {
 		t.Fatal(err)
 	}
+	// 批次里必须能看到【已结束】的任务：卡片要显示完整的 N 条，
+	// 一个顺手过滤掉 done 的实现会让「30/32 完成」永远显示成「0/2」。
+	doneJob := base
+	doneJob.JobID, doneJob.BatchID, doneJob.RelPath = "j4", "b1", "照片/已传完.txt"
+	doneJob.Status = transfer.StateDone
+	doneJob.CreatedAt = time.Unix(4, 0)
+	if err := tr.UpsertJob(doneJob); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := tr.ListByBatch("b1")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("条数 = %d，期望 3（不能把别的批或单文件算进来）", len(got))
+	if len(got) != 4 {
+		t.Fatalf("条数 = %d，期望 4（不能把别的批或单文件算进来，也不能漏掉已结束的）", len(got))
 	}
 	if got[0].RelPath != "照片/a.txt" {
 		t.Errorf("首条 rel_path = %q，期望按创建顺序", got[0].RelPath)
 	}
+	if got[3].Status != transfer.StateDone {
+		t.Errorf("末条状态 = %s，期望 done（批次必须包含已结束的任务）", got[3].Status)
+	}
 }
 
-// 批次排队任务必须被 ListWaiting 一起返回，否则对方上线后整批不会自动开始；
-// 而「用户取消过」的任务一个都不能进来。
-func TestListWaitingIncludesQueued(t *testing.T) {
+// 空 batch_id 必须报错，而不是「返回所有单文件任务」。
+//
+// 这不是洁癖：CancelBatch("") 若走到这里，就会把本机全部单文件传输一起停掉。
+func TestListByBatchRejectsEmptyID(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	single := transfer.Job{
+		JobID: "solo", PeerID: mkID(13), ChunkSize: 512, Direction: transfer.DirectionSend,
+		Status: transfer.StateIdle, CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}
+	if err := tr.UpsertJob(single); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := tr.ListByBatch(""); err == nil {
+		t.Fatalf("空 batch_id 必须报错，实际返回 %d 条", len(got))
+	}
+}
+
+// 同一毫秒的并列必须有确定顺序（第二排序键 job_id）。
+//
+// 批次是同一个循环里建的，整批落在同一毫秒是常态而不是边角；没有第二排序键时
+// 顺序由引擎决定，用户看到的文件次序一次一个样。
+func TestListByBatchTieBreakByJobID(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	same := time.Unix(7, 0)
+	for _, id := range []string{"jb", "ja", "jc"} {
+		if err := tr.UpsertJob(transfer.Job{
+			JobID: id, PeerID: mkID(14), ChunkSize: 512, Direction: transfer.DirectionSend,
+			Status: transfer.StateIdle, BatchID: "b-tie", RelPath: "照片/" + id,
+			CreatedAt: same, UpdatedAt: same,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := tr.ListByBatch("b-tie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ja", "jb", "jc"}
+	for i, id := range want {
+		if i >= len(got) || got[i].JobID != id {
+			t.Fatalf("并列时顺序 = %v，期望按 job_id 升序 %v", jobIDs(got), want)
+		}
+	}
+}
+
+func jobIDs(jobs []transfer.Job) []string {
+	out := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, j.JobID)
+	}
+	return out
+}
+
+// ListWaiting 的取值集合必须【自动】覆盖每一个 AutoStartable 的原因。
+//
+// 刻意遍历 AutoStartableReasons() 而不是写死 peer_offline/queued：
+// 将来加第三个可拉起的原因时，这条用例会立刻红，逼着人去看 SQL ——
+// 而不是等到用户发现「排队中的任务永远不动」。
+func TestListWaitingCoversEveryAutoStartableReason(t *testing.T) {
 	db, _ := openTest(t)
 	tr := NewTransfers(db)
 	peerID := mkID(11)
@@ -482,9 +552,14 @@ func TestListWaitingIncludesQueued(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mk("w1", transfer.WaitPeerOffline)
-	mk("w2", transfer.WaitQueued)
-	mk("w3", transfer.WaitNone) // 用户取消过 → 绝不能被自动拉起
+	reasons := transfer.AutoStartableReasons()
+	if len(reasons) == 0 {
+		t.Fatal("AutoStartableReasons 不许为空")
+	}
+	for _, r := range reasons {
+		mk("auto-"+string(r), r)
+	}
+	mk("cancelled", transfer.WaitNone) // 用户取消过 → 绝不能被自动拉起
 
 	got, err := tr.ListWaiting()
 	if err != nil {
@@ -494,11 +569,87 @@ func TestListWaitingIncludesQueued(t *testing.T) {
 	for _, j := range got {
 		ids[j.JobID] = true
 	}
-	if !ids["w1"] || !ids["w2"] {
-		t.Errorf("ListWaiting 漏了可自动拉起的任务：%v", ids)
+	for _, r := range reasons {
+		if !ids["auto-"+string(r)] {
+			t.Errorf("ListWaiting 漏了可自动拉起的原因 %q：%v", r, ids)
+		}
 	}
-	if ids["w3"] {
+	if ids["cancelled"] {
 		t.Error("WaitNone（用户取消）的任务不能被 ListWaiting 返回")
+	}
+}
+
+// 老库升级到 v4：三列必须在【有数据的库】上落地，且旧行读回来仍是「单文件」。
+//
+// 与 v1→v2 那条同理，这是最容易在真机上炸、最容易在测试里漏的路径。
+// 注意退回旧版本时【必须先删索引】：SQLite 不允许 DROP 掉仍被索引引用的列
+// （引擎限制，不是约定）。
+func TestMigrateFromV3AppliesV4(t *testing.T) {
+	db, path := openTest(t)
+	tr := NewTransfers(db)
+
+	// 一条升级前就存在的单文件任务
+	legacy := transfer.Job{
+		JobID: "legacy-1", PeerID: mkID(12), FileName: "old.bin", FileSize: 1024,
+		ChunkSize: 512, TotalChunks: 2, Direction: transfer.DirectionSend,
+		Bitmap: transfer.NewChunkBitmap(2), Status: transfer.StateDone,
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}
+	if err := tr.UpsertJob(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	// 把库退回「只应用过 v3」的样子
+	if err := db.Write(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DROP INDEX IF EXISTS ix_transfer_batch`); err != nil {
+			return err
+		}
+		for _, stmt := range []string{
+			`ALTER TABLE transfer_jobs DROP COLUMN batch_id`,
+			`ALTER TABLE transfer_jobs DROP COLUMN rel_path`,
+			`ALTER TABLE transfer_jobs DROP COLUMN is_dir`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(`DELETE FROM schema_migrations WHERE version = 4`)
+		return err
+	}); err != nil {
+		t.Fatalf("退回 v3: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openAt(t, path)
+	defer func() { _ = reopened.Close() }()
+
+	var n int
+	if err := reopened.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = 4`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("v4 没有被重新应用")
+	}
+
+	back, err := NewTransfers(reopened).GetJob("legacy-1")
+	if err != nil {
+		t.Fatalf("升级后旧任务读不出来: %v", err)
+	}
+	if back.FileName != "old.bin" || back.BatchID != "" || back.RelPath != "" || back.IsDir {
+		t.Errorf("旧行读回异常（应保持单文件语义）：%+v", back)
+	}
+
+	// 新列必须真能用（否则「重新应用」只是写了个版本号）
+	withBatch := legacy
+	withBatch.JobID, withBatch.BatchID, withBatch.RelPath = "new-1", "b-new", "照片/x.bin"
+	if err := NewTransfers(reopened).UpsertJob(withBatch); err != nil {
+		t.Fatalf("升级后写入批次字段失败: %v", err)
+	}
+	got, err := NewTransfers(reopened).ListByBatch("b-new")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("升级后批次查询失败：len=%d err=%v", len(got), err)
 	}
 }
 

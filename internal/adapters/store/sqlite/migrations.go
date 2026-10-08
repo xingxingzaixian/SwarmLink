@@ -183,6 +183,10 @@ ALTER TABLE transfer_jobs ADD COLUMN rel_path TEXT    NOT NULL DEFAULT '';
 ALTER TABLE transfer_jobs ADD COLUMN is_dir   INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS ix_transfer_batch ON transfer_jobs(batch_id);
 `,
+		// batch_id 的取值约定（不加约束，因为没有能表达它的 CHECK）：
+		// 由发送端生成、全局唯一（随机串），不是文件夹名也不是序号；
+		// 同一 batch_id 只属于一个对端的一次发送。空串 = 单文件传输。
+		// 见 ports.TransferRepo.ListByBatch 的契约说明。
 	},
 }
 

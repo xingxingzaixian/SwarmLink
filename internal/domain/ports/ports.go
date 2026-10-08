@@ -100,16 +100,25 @@ type TransferRepo interface {
 	// SaveBitmap 批量落盘，避免每块一次事务（P1-9）。
 	SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed int64) error
 	ListActive() ([]transfer.Job, error)
-	// ListWaiting 返回「等待对方上线」的发送任务（重启恢复与周期性 sweep 用）。
+	// ListWaiting 返回「可以被自动拉起」的发送任务（重启恢复与周期性 sweep 用）。
+	//
+	// 取值集合来自 WaitReason.AutoStartable()：等待对方上线的，以及文件夹批次里
+	// 排队的。用户取消过的任务（WaitReason 被清成 WaitNone）必须【不在】其中 ——
+	// 被自动拉起就等于「取消了又自己跑起来」。
 	//
 	// 【不要】用 ListActive 代替：那个语义是「未结束」，把 failed/paused/
 	// verifying 都算进来，拿它驱动自动重试会把不该重试的任务一起拉起来。
 	ListWaiting() ([]transfer.Job, error)
-	// ListByBatch 返回同一文件夹批次的全部任务（按 created_at 升序）。
+	// ListByBatch 返回同一文件夹批次的全部任务（按 created_at 升序，同刻按 job_id）。
 	//
 	// 单独一个方法而不是复用 ListActive：批次聚合进度与「取消全部」都要看到
 	// 已结束的任务 —— 用户在一个 32 个文件的文件夹卡片上看到的必须是完整的
 	// 32 条，不能因为其中 30 条已经传完就只剩 2 条。
+	//
+	// batchID 由发送端生成且【必须全局唯一】（随机串，不是文件夹名、不是序号）：
+	// 两个对端各发来一个同名批次时，卡片会把两个文件夹合并、取消也会连带停掉
+	// 另一批。空 batchID 一律报错而不是「返回所有单文件任务」——后者会让
+	// CancelBatch("") 变成「停掉本机全部单文件传输」。
 	ListByBatch(batchID string) ([]transfer.Job, error)
 	// ListRecent 返回最近更新的若干任务，【包含】已结束的。
 	//

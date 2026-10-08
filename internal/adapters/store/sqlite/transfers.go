@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
@@ -18,6 +19,11 @@ var _ ports.TransferRepo = (*Transfers)(nil)
 // NewTransfers 构造传输任务仓储。
 func NewTransfers(db *DB) *Transfers { return &Transfers{db: db} }
 
+// transferColumns 是全部列。
+//
+// 【四处必须严格同序】：这张列清单、INSERT 的列清单、Exec 的实参、scanTransfer
+// 的 Scan 目标。错位不会报任何错 —— 只会把值整体读串（例如把 file_size 读成
+// file_hash），因此新增列一律加在尾部，加完立刻跑 store 包的用例。
 const transferColumns = `job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
                          window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at,
@@ -119,18 +125,23 @@ WHERE status NOT IN ('done','cancelled') ORDER BY created_at`)
 
 // ListWaiting 返回可以被自动拉起的发送任务（语义见 ports.TransferRepo.ListWaiting）。
 //
-// 取值集合来自 WaitReason.AutoStartable()：等待对方上线的，以及文件夹批次里
-// 排队的。用户取消过的（明确写了 WaitNone）【必须】落在这个集合之外 ——
-// 被自动拉起就等于「取消了又自己跑起来」。
+// 取值集合【派生自】transfer.AutoStartableReasons()：手写一句 IN (?, ?) 就等于
+// 在仓储层再维护一份「哪些原因能被自动拉起」的真相，而分叉的方向是
+// 「用户取消过的任务被重新拉起」。
 //
 // 「是否到点」刻意不在 SQL 里判：到点判断要用 ports.Clock，留在应用层
 // 才能用 clock.Fake 做确定性测试。
 func (t *Transfers) ListWaiting() ([]transfer.Job, error) {
+	reasons := transfer.AutoStartableReasons()
+	args := make([]any, len(reasons))
+	for i, r := range reasons {
+		args[i] = string(r)
+	}
 	rows, err := t.db.Query(`
 SELECT `+transferColumns+` FROM transfer_jobs
-WHERE direction = 'send' AND status = 'queued' AND wait_reason IN (?, ?)
-ORDER BY created_at`,
-		string(transfer.WaitPeerOffline), string(transfer.WaitQueued))
+WHERE direction = 'send' AND status = 'queued'
+  AND wait_reason IN (`+placeholders(len(reasons))+`)
+ORDER BY created_at, job_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -149,12 +160,19 @@ ORDER BY created_at`,
 
 // ListByBatch 返回同一批次的全部任务（语义见 ports.TransferRepo.ListByBatch）。
 //
-// 按 created_at 升序：枚举顺序即发送顺序，界面上的文件顺序与之一致。
+// 第二排序键 job_id 不是装饰：批次里几十条任务是同一个循环里建的，
+// created_at 常常整批落在同一毫秒，只按它排的话顺序由 SQLite 的稳定性决定 ——
+// 用户看到的文件次序会一次一个样，而且与内存实现给出不同的结果。
 func (t *Transfers) ListByBatch(batchID string) ([]transfer.Job, error) {
+	if batchID == "" {
+		// 空 batch_id 会退化成「返回所有单文件任务」：对 CancelBatch 来说
+		// 就是「把本机全部单文件传输一起停掉」。宁可在最底层响亮地拒绝。
+		return nil, fmt.Errorf("sqlite: empty batch id")
+	}
 	rows, err := t.db.Query(`
 SELECT `+transferColumns+` FROM transfer_jobs
 WHERE batch_id = ?
-ORDER BY created_at`, batchID)
+ORDER BY created_at, job_id`, batchID)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +214,17 @@ ORDER BY updated_at DESC LIMIT ?`, limit)
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+// placeholders 生成 n 个逗号分隔的占位符（供 IN 列表拼接）。
+//
+// n <= 0 时返回 ”：IN (”) 永远匹配不上任何行 —— 空列表退化成
+// IN () 是语法错误，而「什么也没匹配到」才是这两种情况都想要的语义。
+func placeholders(n int) string {
+	if n <= 0 {
+		return "''"
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 // PurgeFinished 清理已结束的任务；正在进行的永远不动。
@@ -266,10 +295,9 @@ func scanTransfer(s rowScanner) (transfer.Job, error) {
 	out.WaitReason = transfer.WaitReason(waitReason)
 	// next_try_at 用 timeOf 还原（msOf 的逆运算：0 ↔ 零值时间）。
 	out.NextTryAt = timeOf(nextTryAt)
-	// batch_id / rel_path 是 NOT NULL 的 TEXT，直接扫成 string 即可；
-	// is_dir 是 INTEGER 0/1（SQLite 没有布尔类型）。
 	out.BatchID = batchID
 	out.RelPath = relPath
+	// is_dir 是 INTEGER 0/1（列定义见 migrations.go 的 v4）。
 	out.IsDir = isDir != 0
 	out.Error = nullString(errMsg)
 	out.Bitmap = transfer.NewChunkBitmapFromBytes(bitmap)

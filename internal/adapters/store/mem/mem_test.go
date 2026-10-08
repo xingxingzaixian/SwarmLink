@@ -188,10 +188,14 @@ func TestGroupsRepo(t *testing.T) {
 	}
 }
 
-// ListWaiting 只认「发送方向 + 等待对方上线」，且按创建时间返回。
+// ListWaiting 只认「发送方向 + 可自动拉起的原因」，且按创建时间返回。
 //
 // 这条守卫的意义：sweep 拿它去自动重试，多返回一条就是把不该动的任务
 // 一起拉起来；顺序错了则慢来的文件插队，用户看到的传输次序与发起次序不符。
+//
+// 这里与 sqlite 侧的 TestListWaitingCoversEveryAutoStartableReason 是镜像，
+// 两边必须同时包含 WaitPeerOffline 与 WaitQueued —— 一个实现漏了，
+// 就会出现「只在其中一种存储下，排队中的文件永远不动」。
 func TestListWaitingFiltersByReasonAndDirection(t *testing.T) {
 	m := NewMessages(clock.New())
 	peerID := mkID(7)
@@ -206,6 +210,7 @@ func TestListWaitingFiltersByReasonAndDirection(t *testing.T) {
 	for _, j := range []transfer.Job{
 		mk("wait-first", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionSend, 10),
 		mk("wait-second", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionSend, 20),
+		mk("wait-queued", transfer.StateIdle, transfer.WaitQueued, transfer.DirectionSend, 25),
 		mk("idle-no-reason", transfer.StateIdle, transfer.WaitNone, transfer.DirectionSend, 30),
 		mk("running", transfer.StateTransferring, transfer.WaitNone, transfer.DirectionSend, 40),
 		mk("wait-recv", transfer.StateIdle, transfer.WaitPeerOffline, transfer.DirectionRecv, 50),
@@ -220,11 +225,64 @@ func TestListWaitingFiltersByReasonAndDirection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("ListWaiting 返回 %d 条，want 2：%+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("ListWaiting 返回 %d 条，want 3：%+v", len(got), got)
 	}
-	if got[0].JobID != "wait-first" || got[1].JobID != "wait-second" {
-		t.Fatalf("ListWaiting 顺序 = %q/%q，want wait-first/wait-second（按创建时间）", got[0].JobID, got[1].JobID)
+	if got[0].JobID != "wait-first" || got[1].JobID != "wait-second" || got[2].JobID != "wait-queued" {
+		t.Fatalf("ListWaiting 顺序 = %v，want wait-first/wait-second/wait-queued（按创建时间）", jobIDsOf(got))
+	}
+}
+
+// jobIDsOf 便于断言任务顺序（与 sqlite 侧的同名辅助分开定义：两者是不同包）。
+func jobIDsOf(jobs []transfer.Job) []string {
+	out := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, j.JobID)
+	}
+	return out
+}
+
+// ListByBatch 与 sqlite 侧镜像：只返回本批、包含已结束的、空 id 报错。
+func TestListByBatchFiltersAndKeepsFinished(t *testing.T) {
+	m := NewMessages(clock.New())
+	peerID := mkID(8)
+
+	mk := func(id, batch string, st transfer.State, rel string) transfer.Job {
+		j := newJob(id, peerID, "hash-"+id)
+		j.BatchID, j.Status, j.RelPath = batch, st, rel
+		return j
+	}
+	for _, j := range []transfer.Job{
+		mk("b1-a", "b1", transfer.StateDone, "照片/a.txt"),
+		mk("b1-b", "b1", transfer.StateIdle, "照片/b.txt"),
+		mk("b2-a", "b2", transfer.StateIdle, "别的/a.txt"),
+		mk("solo", "", transfer.StateIdle, ""),
+	} {
+		if err := m.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := m.ListByBatch("b1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("返回 %d 条，want 2（不能带上别的批或单文件）：%v", len(got), jobIDsOf(got))
+	}
+	hasDone := false
+	for _, j := range got {
+		if j.Status == transfer.StateDone {
+			hasDone = true
+		}
+	}
+	if !hasDone {
+		t.Error("批次必须包含已结束的任务，否则卡片上的 N 会永远对不上")
+	}
+
+	// 空 batch_id 必须报错：否则 CancelBatch("") 会把本机全部单文件传输一起停掉
+	if _, err := m.ListByBatch(""); err == nil {
+		t.Fatal("空 batch_id 必须报错")
 	}
 }
 
