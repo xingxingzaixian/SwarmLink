@@ -278,6 +278,16 @@ func (a *TransferApp) sendFile(
 		window = transfer.DefaultWindow
 	}
 
+	// 承接历史尝试次数：等待重试的退避靠它递增（1s→2s→…→5min）。
+	//
+	// 这里必须回读一次库：任务字面量是从零构造的，不带上旧值就等于每次
+	// 重试都把计数归零 —— 退避会永远停在第一档，变成"每秒重试一次"。
+	// 首次发送查不到行，拿到 0，行为与过去一致。
+	retryCount := 0
+	if prev, gerr := a.store.GetJob(jobID); gerr == nil {
+		retryCount = prev.RetryCount
+	}
+
 	// job 是命名返回值，此处用 = 而非 :=
 	job = transfer.Job{
 		JobID:       jobID,
@@ -292,6 +302,7 @@ func (a *TransferApp) sendFile(
 		Bitmap:      transfer.NewChunkBitmap(total),
 		Status:      transfer.StateMetaExchange,
 		WindowSize:  window,
+		RetryCount:  retryCount,
 		CreatedAt:   a.clk.Now(),
 		UpdatedAt:   a.clk.Now(),
 	}

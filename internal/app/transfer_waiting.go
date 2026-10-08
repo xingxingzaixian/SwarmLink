@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"strings"
 
@@ -230,4 +231,108 @@ func (a *TransferApp) isStarting(jobID string) bool {
 	defer a.mu.Unlock()
 	_, ok := a.starting[jobID]
 	return ok
+}
+
+// Start 订阅「对端上线」类事件，作为等待任务的主要触发源。
+//
+// 与 ChatApp.Start 同构：peer.online（TCP 握手成功）与 peer.discovered
+// （UDP 通告）都要订阅 —— 只订阅前者会漏掉「对端一直在广播但没建连」
+// 这种最常见的离线恢复场景（那时它是 discovered，不是 online）。
+func (a *TransferApp) Start(ctx context.Context) {
+	if a.bus == nil {
+		return
+	}
+	a.bus.Subscribe(eventbus.TopicPeerOnline, func(payload any) {
+		ev, ok := payload.(eventbus.PeerOnline)
+		if !ok {
+			return
+		}
+		id, err := identity.ParseNodeID(ev.NodeID)
+		if err != nil {
+			return
+		}
+		go a.WakePeer(ctx, id)
+	})
+	a.bus.Subscribe(eventbus.TopicPeerDiscovered, func(payload any) {
+		p, ok := payload.(peer.Peer)
+		if !ok {
+			return
+		}
+		if p.State != peer.StateOnline && p.State != peer.StateDiscovered {
+			return
+		}
+		go a.WakePeer(ctx, p.NodeID)
+	})
+}
+
+// SweepWaiting 扫描等待任务，启动「到点」的那些。
+//
+// 由 bootstrap 的 1 秒节拍驱动（与 outbox 同一套）：peer.online 是主触发源，
+// 这里兜住其余情况 —— 对端早就在线、退避到期、以及事件丢了。
+func (a *TransferApp) SweepWaiting(ctx context.Context) {
+	jobs, err := a.store.ListWaiting()
+	if err != nil {
+		return
+	}
+	a.startDue(ctx, jobs)
+}
+
+// WakePeer 对端刚上线：无视退避，立刻试它那些等待任务。
+func (a *TransferApp) WakePeer(ctx context.Context, peerID identity.NodeID) {
+	jobs, err := a.store.ListWaiting()
+	if err != nil {
+		return
+	}
+	due := make([]transfer.Job, 0, len(jobs))
+	for _, j := range jobs {
+		if j.PeerID == peerID {
+			due = append(due, j)
+		}
+	}
+	a.startJobs(ctx, due)
+}
+
+// startDue 启动到点的任务（退避未到的留到下一轮）。
+func (a *TransferApp) startDue(ctx context.Context, jobs []transfer.Job) {
+	now := a.clk.Now()
+	due := make([]transfer.Job, 0, len(jobs))
+	for _, j := range jobs {
+		if !j.NextTryAt.IsZero() && j.NextTryAt.After(now) {
+			continue
+		}
+		due = append(due, j)
+	}
+	a.startJobs(ctx, due)
+}
+
+// startJobs 尝试启动给定任务：同一对端同一时刻只启动一个。
+//
+// 这一条是为了防哈希风暴：对方一上线，10 个等待任务同时开始整文件哈希，
+// 磁盘会先崩。其余任务留到下一轮（或下一个事件）—— 它们不会丢。
+func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
+	busy := a.busyPeers()
+	for _, j := range jobs {
+		if busy[j.PeerID] {
+			continue
+		}
+		if !a.claimStarting(j.JobID) {
+			continue
+		}
+		busy[j.PeerID] = true
+		go func(job transfer.Job) {
+			defer a.releaseStarting(job.JobID)
+			_, _ = a.sendFile(ctx, job.PeerID, job.LocalPath, job.JobID, false)
+		}(j)
+	}
+}
+
+// busyPeers 返回「已经有任务在传」的对端集合。
+func (a *TransferApp) busyPeers() map[identity.NodeID]bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make(map[identity.NodeID]bool, len(a.senders))
+	for _, sj := range a.senders {
+		out[sj.job.PeerID] = true
+	}
+	return out
 }

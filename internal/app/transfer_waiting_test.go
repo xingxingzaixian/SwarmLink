@@ -309,3 +309,134 @@ func TestMidTransferDisconnectWaitsForPeer(t *testing.T) {
 		t.Fatal("转入等待必须发 transfer.state")
 	}
 }
+
+// countAttempted 数一数「真的尝试过」的任务。
+//
+// 观测点选 RetryCount 而不是 Status：等待任务每次被重新标记时计数 +1
+// （newWaitingJob 初始为 1），因此 >=2 就说明这次尝试真的发生过。
+// 而 Status 在尝试期间是 StateMetaExchange，跑完又会回到 StateIdle ——
+// 拿它当判据要跟时序赛跑。
+func countAttempted(repo *stubTransferRepo) int {
+	n := 0
+	for _, j := range repo.all() {
+		if j.RetryCount >= 2 {
+			n++
+		}
+	}
+	return n
+}
+
+// sweep 只挑「到点」的等待任务，且同一对端每轮只启动一个。
+//
+// 后半句是硬要求：对方一上线，10 个等待任务同时开始整文件哈希，
+// 磁盘会先崩。
+func TestSweepWaitingRespectsBackoffAndPerPeerSerialization(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	fc := clock.NewFake(time.Unix(1_700_000_000, 0))
+
+	// 目录里对端显示在线（所以「值得一试」），但会话查不到：
+	// 于是尝试会真的走到网络阶段，然后因写失败回到等待。
+	peers := mem.NewPeers(fc)
+	if err := peers.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastAddr: "127.0.0.1:9", LastSeen: fc.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess := &brokenSession{
+		peer: peerID, failFrom: 1, err: errors.New("use of closed network connection"),
+	}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, deadConns{sess: sess}, peers, eventbus.New(), fc, nil)
+	a.ChunkSize = 1024
+	a.BaseBackoff = time.Second
+
+	dir := t.TempDir()
+	for i, id := range []string{"job-1", "job-2", "job-3"} {
+		p := filepath.Join(dir, id+".bin")
+		if err := os.WriteFile(p, bytes.Repeat([]byte{1}, 4*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		j := a.newWaitingJob(id, peerID, p, 4096)
+		j.CreatedAt = fc.Now().Add(time.Duration(i) * time.Second)
+		if err := repo.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 退避未到点：一条都不该动，也不该发出任何帧
+	a.SweepWaiting(context.Background())
+	if n := countAttempted(repo); n != 0 {
+		t.Fatalf("退避未到点就启动了 %d 条任务", n)
+	}
+	if got := sess.sent(); got != 0 {
+		t.Fatalf("退避未到点就发了 %d 帧", got)
+	}
+
+	// 到点：同一对端这一轮只启动一条
+	fc.Advance(2 * time.Second)
+	a.SweepWaiting(context.Background())
+	waitUntil(t, 2*time.Second, "有一条任务被启动", func() bool {
+		return countAttempted(repo) == 1
+	})
+	// 给「误启动第二条」留出犯错窗口：真出问题时它会在这一小段时间里出现
+	time.Sleep(50 * time.Millisecond)
+	if n := countAttempted(repo); n != 1 {
+		t.Fatalf("同一对端在同一轮启动了 %d 条（want 1）—— 对方一上线就会同时哈希多个文件", n)
+	}
+}
+
+// 连续失败必须让退避递增。
+//
+// 这条守卫来自一个真实缺陷：尝试时任务是从零构造的，若不把历史次数带回来，
+// 退避会永远停在第一档 —— 对端离线时变成每秒一次无谓唤醒，
+// 而且永远到不了 5 分钟上限。
+func TestWaitingBackoffEscalates(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	fc := clock.NewFake(time.Unix(1_700_000_000, 0))
+
+	peers := mem.NewPeers(fc)
+	if err := peers.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastAddr: "127.0.0.1:9", LastSeen: fc.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess := &brokenSession{
+		peer: peerID, failFrom: 1, err: errors.New("use of closed network connection"),
+	}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, deadConns{sess: sess}, peers, eventbus.New(), fc, nil)
+	a.ChunkSize = 1024
+
+	p := filepath.Join(t.TempDir(), "b.bin")
+	if err := os.WriteFile(p, bytes.Repeat([]byte{1}, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	j := a.newWaitingJob("job-backoff", peerID, p, 4096)
+	j.RetryCount = 1
+	j.NextTryAt = fc.Now()
+	if err := repo.UpsertJob(j); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第一次尝试失败 → 计数 2，下一次间隔 backoff(2) = 2s
+	a.SweepWaiting(context.Background())
+	waitUntil(t, 2*time.Second, "第一次尝试失败并重新入等待", func() bool {
+		got, err := repo.GetJob("job-backoff")
+		return err == nil && got.RetryCount == 2
+	})
+	if got, _ := repo.GetJob("job-backoff"); !got.NextTryAt.Equal(fc.Now().Add(2 * time.Second)) {
+		t.Fatalf("第一次重试间隔 = %v，期望 2s（退避没有递增）", got.NextTryAt.Sub(fc.Now()))
+	}
+
+	// 第二次尝试失败 → 计数 3，下一次间隔 backoff(3) = 4s
+	fc.Advance(2 * time.Second)
+	a.SweepWaiting(context.Background())
+	waitUntil(t, 2*time.Second, "第二次尝试失败并重新入等待", func() bool {
+		got, err := repo.GetJob("job-backoff")
+		return err == nil && got.RetryCount == 3
+	})
+	if got, _ := repo.GetJob("job-backoff"); !got.NextTryAt.Equal(fc.Now().Add(4 * time.Second)) {
+		t.Fatalf("第二次重试间隔 = %v，期望 4s（退避没有递增）", got.NextTryAt.Sub(fc.Now()))
+	}
+}
