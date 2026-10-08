@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
+	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
@@ -77,6 +79,11 @@ func (s *stubTransferRepo) ListWaiting() ([]transfer.Job, error) { return s.all(
 // 「取消 b1 却把 b2 的任务也停了」这种错误在测试里照样通过 ——
 // 那种测试比没有测试更糟。
 func (s *stubTransferRepo) ListByBatch(batchID string) ([]transfer.Job, error) {
+	if batchID == "" {
+		// 与两个真实实现同一条守卫：替身不镜像它，Task 8 的 CancelBatch("")
+		// 用例就会拿到「返回全部单文件任务」的假绿灯。
+		return nil, fmt.Errorf("%w: stub", ports.ErrEmptyBatchID)
+	}
 	out := make([]transfer.Job, 0)
 	for _, j := range s.all() {
 		if j.BatchID == batchID {

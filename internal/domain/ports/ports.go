@@ -12,6 +12,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/group"
@@ -92,6 +93,13 @@ type MessageRepo interface {
 // 传输任务仓储
 // ---------------------------------------------------------------------------
 
+// ErrEmptyBatchID 表示调用方传了空的 batch_id。
+//
+// 单独一个哨兵错误而不是各实现自己写一句文案：调用方需要把「传了空 id」
+// 这种不该发生的编程错误与「存储故障」分开处理，而两个存储实现也必须
+// 给出同一种可判别的错误（否则上层只能靠比较错误字符串）。
+var ErrEmptyBatchID = errors.New("transfer: empty batch id")
+
 // TransferRepo 是传输任务持久化端口。
 type TransferRepo interface {
 	UpsertJob(j transfer.Job) error
@@ -109,7 +117,16 @@ type TransferRepo interface {
 	// 【不要】用 ListActive 代替：那个语义是「未结束」，把 failed/paused/
 	// verifying 都算进来，拿它驱动自动重试会把不该重试的任务一起拉起来。
 	ListWaiting() ([]transfer.Job, error)
-	// ListByBatch 返回同一文件夹批次的全部任务（按 created_at 升序，同刻按 job_id）。
+	// ListByBatch 返回同一文件夹批次的全部任务，顺序为 rel_path 升序
+	// （即目录树顺序），同路径再按 job_id。
+	//
+	// 为什么用 rel_path 而不是「创建时间」排序：批次是同一个循环里建的，
+	// created_at 以毫秒落库、整批落在同一毫秒是常态，而 job_id 是 UUIDv7
+	// （同毫秒内是随机尾）。拿它们排序得到的顺序虽然确定却【没有语义】——
+	// 用户看到的文件次序会与他看到的目录结构无关。rel_path 是两端都能
+	// 复现的目录树顺序，也是这个界面唯一有意义的顺序。
+	//
+	// 空 batchID 返回 ErrEmptyBatchID。
 	//
 	// 单独一个方法而不是复用 ListActive：批次聚合进度与「取消全部」都要看到
 	// 已结束的任务 —— 用户在一个 32 个文件的文件夹卡片上看到的必须是完整的

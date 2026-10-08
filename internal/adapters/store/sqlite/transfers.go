@@ -103,10 +103,13 @@ func (t *Transfers) SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed 
 }
 
 // ListActive 返回所有未结束的任务（供启动时全局恢复）。
+//
+// 顺序没有承诺（唯一的消费者 Recover 只看状态），但两种存储必须给出
+// 同一种确定性顺序：一边有序、另一边随机，下一个人就会以为它有顺序语义。
 func (t *Transfers) ListActive() ([]transfer.Job, error) {
 	rows, err := t.db.Query(`
 SELECT ` + transferColumns + ` FROM transfer_jobs
-WHERE status NOT IN ('done','cancelled') ORDER BY created_at`)
+WHERE status NOT IN ('done','cancelled') ORDER BY created_at, job_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +144,7 @@ func (t *Transfers) ListWaiting() ([]transfer.Job, error) {
 SELECT `+transferColumns+` FROM transfer_jobs
 WHERE direction = 'send' AND status = 'queued'
   AND wait_reason IN (`+placeholders(len(reasons))+`)
-ORDER BY created_at, job_id`, args...)
+ORDER BY created_at, rel_path, job_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -160,19 +163,20 @@ ORDER BY created_at, job_id`, args...)
 
 // ListByBatch 返回同一批次的全部任务（语义见 ports.TransferRepo.ListByBatch）。
 //
-// 第二排序键 job_id 不是装饰：批次里几十条任务是同一个循环里建的，
-// created_at 常常整批落在同一毫秒，只按它排的话顺序由 SQLite 的稳定性决定 ——
-// 用户看到的文件次序会一次一个样，而且与内存实现给出不同的结果。
+// 按 rel_path 排（目录树顺序），不是按创建时间：批次是同一个循环里建的，
+// created_at 以毫秒落库、整批同毫秒是常态，而 job_id 是 UUIDv7（同毫秒内
+// 随机）—— 按它们排出来的顺序确定但没有语义，用户看到的文件次序会与
+// 他看到的目录结构无关。rel_path 升序是两种存储都能复现的目录树顺序。
 func (t *Transfers) ListByBatch(batchID string) ([]transfer.Job, error) {
 	if batchID == "" {
 		// 空 batch_id 会退化成「返回所有单文件任务」：对 CancelBatch 来说
 		// 就是「把本机全部单文件传输一起停掉」。宁可在最底层响亮地拒绝。
-		return nil, fmt.Errorf("sqlite: empty batch id")
+		return nil, fmt.Errorf("%w: sqlite", ports.ErrEmptyBatchID)
 	}
 	rows, err := t.db.Query(`
 SELECT `+transferColumns+` FROM transfer_jobs
 WHERE batch_id = ?
-ORDER BY created_at, job_id`, batchID)
+ORDER BY rel_path, job_id`, batchID)
 	if err != nil {
 		return nil, err
 	}
@@ -218,11 +222,13 @@ ORDER BY updated_at DESC LIMIT ?`, limit)
 
 // placeholders 生成 n 个逗号分隔的占位符（供 IN 列表拼接）。
 //
-// n <= 0 时返回 ”：IN (”) 永远匹配不上任何行 —— 空列表退化成
-// IN () 是语法错误，而「什么也没匹配到」才是这两种情况都想要的语义。
+// n <= 0 时返回 NULL。这里【绝不能】返回空串占位：空串正是 WaitNone 的取值
+// （用户取消过），IN (”) 会把「最不该被自动拉起」的那一类整批捞出来。
+// IN (NULL) 的比较结果是 unknown，一行都匹配不上 —— 这才是空列表唯一
+// 可接受的语义。
 func placeholders(n int) string {
 	if n <= 0 {
-		return "''"
+		return "NULL"
 	}
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }

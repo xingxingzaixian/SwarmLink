@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/gif"
@@ -107,6 +108,10 @@ func (r *memTransferRepo) ListWaiting() ([]transfer.Job, error) {
 // 整体取消的语义完全依赖「只动这一批」，一个返回全表的替身会让
 // 「取消 b1 也把 b2 停了」在测试里照样通过。
 func (r *memTransferRepo) ListByBatch(batchID string) ([]transfer.Job, error) {
+	if batchID == "" {
+		// 空值守卫同样要镜像：替身不镜像实现，测试就会给出假绿灯。
+		return nil, fmt.Errorf("%w: fake", ports.ErrEmptyBatchID)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]transfer.Job, 0, len(r.jobs))

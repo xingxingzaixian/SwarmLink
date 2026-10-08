@@ -343,11 +343,13 @@ func (s *Messages) ListWaiting() ([]transfer.Job, error) {
 //
 // 与 ListActive 的区别是决定性的：这里【包含】已结束的任务 ——
 // 文件夹卡片上要显示的是完整的 N 条，少一条数字就对不上。
+//
+// 顺序为 rel_path 升序（目录树顺序），与 sqlite 侧的 ORDER BY rel_path, job_id 一致。
 func (s *Messages) ListByBatch(batchID string) ([]transfer.Job, error) {
 	if batchID == "" {
 		// 与 sqlite 实现同一条守卫：空 batch_id 会退化成「返回所有单文件任务」，
 		// 对 CancelBatch 而言就是把本机全部单文件传输一起停掉。
-		return nil, fmt.Errorf("mem: empty batch id")
+		return nil, fmt.Errorf("%w: mem", ports.ErrEmptyBatchID)
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -359,7 +361,7 @@ func (s *Messages) ListByBatch(batchID string) ([]transfer.Job, error) {
 		j.Bitmap = j.Bitmap.Copy()
 		out = append(out, j)
 	}
-	sortJobsByCreated(out)
+	sort.Slice(out, func(i, k int) bool { return lessBatchOrder(out[i], out[k]) })
 	return out, nil
 }
 
@@ -422,18 +424,30 @@ func isTerminal(st transfer.State) bool {
 	return st == transfer.StateDone || st == transfer.StateFailed || st == transfer.StateCancelled
 }
 
-// sortJobsByCreated 按「创建时间 + job_id」升序排。
+// lessBatchOrder 是批次的顺序：rel_path 升序（目录树顺序），同路径再按 job_id。
 //
-// 第二排序键是必须的：批次里几十条任务在同一个紧循环里建出来，创建时间
-// 常常整批落在同一毫秒，只比时间的话顺序由 map 迭代顺序决定 ——
-// 用户看到的文件次序会一次一个样，而且与 sqlite 实现给出不同结果
-// （sqlite 侧同样是 ORDER BY created_at, job_id）。
+// 与 sqlite 侧 ORDER BY rel_path, job_id 必须一致。刻意不按创建时间：
+// 批次是同一个循环里建的，整批落在同一毫秒是常态，而 job_id 是 UUIDv7
+// （同毫秒内随机），按它们排出来的顺序确定但没有语义。
+func lessBatchOrder(a, b transfer.Job) bool {
+	if a.RelPath != b.RelPath {
+		return a.RelPath < b.RelPath
+	}
+	return a.JobID < b.JobID
+}
+
+// sortJobsByCreated 是队列顺序：先按创建时间，同刻再走批次顺序（目录树）。
+//
+// 必须有第二、第三排序键：只比 CreatedAt 时顺序由 map 迭代顺序决定 ——
+// 用户看到的次序会一次一个样，而且与 sqlite 实现给出不同结果
+// （sqlite 侧是 ORDER BY created_at, rel_path, job_id）。
 func sortJobsByCreated(out []transfer.Job) {
 	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		a, b := out[i], out[j]
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
 		}
-		return out[i].JobID < out[j].JobID
+		return lessBatchOrder(a, b)
 	})
 }
 

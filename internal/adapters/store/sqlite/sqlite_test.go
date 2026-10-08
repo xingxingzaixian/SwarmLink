@@ -496,18 +496,22 @@ func TestListByBatchRejectsEmptyID(t *testing.T) {
 	}
 }
 
-// 同一毫秒的并列必须有确定顺序（第二排序键 job_id）。
+// 同一毫秒里必须按【目录树顺序】排，不是按 job_id、也不是按插入顺序。
 //
-// 批次是同一个循环里建的，整批落在同一毫秒是常态而不是边角；没有第二排序键时
-// 顺序由引擎决定，用户看到的文件次序一次一个样。
-func TestListByBatchTieBreakByJobID(t *testing.T) {
+// 批次是同一个循环里建的，created_at 以毫秒落库、整批同毫秒是常态；
+// job_id 是 UUIDv7（同毫秒内是随机尾），按它排出来的顺序确定但没有语义。
+// 这里刻意让 job_id 顺序与 rel_path 顺序相反，断言必须听 rel_path 的。
+func TestListByBatchOrdersByRelPath(t *testing.T) {
 	db, _ := openTest(t)
 	tr := NewTransfers(db)
 	same := time.Unix(7, 0)
-	for _, id := range []string{"jb", "ja", "jc"} {
+	// job_id 升序 = ja, jm, jz；rel_path 升序 = 照片/a.txt, 照片/m.txt, 照片/z.txt
+	for _, spec := range []struct{ id, rel string }{
+		{"jz", "照片/a.txt"}, {"ja", "照片/m.txt"}, {"jm", "照片/z.txt"},
+	} {
 		if err := tr.UpsertJob(transfer.Job{
-			JobID: id, PeerID: mkID(14), ChunkSize: 512, Direction: transfer.DirectionSend,
-			Status: transfer.StateIdle, BatchID: "b-tie", RelPath: "照片/" + id,
+			JobID: spec.id, PeerID: mkID(14), ChunkSize: 512, Direction: transfer.DirectionSend,
+			Status: transfer.StateIdle, BatchID: "b-tie", RelPath: spec.rel,
 			CreatedAt: same, UpdatedAt: same,
 		}); err != nil {
 			t.Fatal(err)
@@ -517,12 +521,76 @@ func TestListByBatchTieBreakByJobID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ja", "jb", "jc"}
-	for i, id := range want {
-		if i >= len(got) || got[i].JobID != id {
-			t.Fatalf("并列时顺序 = %v，期望按 job_id 升序 %v", jobIDs(got), want)
+	want := []string{"照片/a.txt", "照片/m.txt", "照片/z.txt"}
+	if len(got) != len(want) {
+		t.Fatalf("条数 = %d，期望 %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].RelPath != want[i] {
+			t.Fatalf("同刻顺序 = %v，期望按 rel_path（目录树）%v", relPaths(got), want)
 		}
 	}
+}
+
+// 队列顺序：不同时刻按时间（先来先传），同一毫秒内按目录树。
+//
+// 这一条是补覆盖缺口的：把 ListWaiting 的 rel_path/job_id 第二键删掉时，
+// 之前全仓测试【一条都不会红】—— 而队列顺序决定了用户先收到哪个文件。
+func TestListWaitingOrdersByTimeThenTreePath(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	peerID := mkID(15)
+	tick := time.Unix(9, 0)
+	for _, spec := range []struct {
+		id  string
+		rel string
+		at  time.Time
+	}{
+		{"j2", "照片/z.txt", tick},
+		{"j1", "照片/a.txt", tick},
+		{"j0", "照片/0-更早.txt", tick.Add(-time.Second)},
+	} {
+		if err := tr.UpsertJob(transfer.Job{
+			JobID: spec.id, PeerID: peerID, ChunkSize: 512, Direction: transfer.DirectionSend,
+			Status: transfer.StateIdle, WaitReason: transfer.WaitQueued,
+			BatchID: "b-order", RelPath: spec.rel,
+			CreatedAt: spec.at, UpdatedAt: spec.at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := tr.ListWaiting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"j0", "j1", "j2"}
+	for i, id := range want {
+		if i >= len(got) || got[i].JobID != id {
+			t.Fatalf("队列顺序 = %v，期望 %v（先按时间，同刻按目录树）", jobIDs(got), want)
+		}
+	}
+}
+
+// 空原因列表绝不能退化成「匹配 WaitNone」。
+//
+// 这条守卫是踩出来的：placeholders 一开始对 n<=0 返回空串，而空串正是
+// WaitNone（用户取消过）的取值 —— IN (”) 会把最不该被自动拉起的那一类
+// 整批捞出来，与当时注释声称的「匹配不上任何行」正好相反。
+func TestPlaceholdersEmptyListMatchesNothing(t *testing.T) {
+	if got := placeholders(0); got != "NULL" {
+		t.Fatalf("placeholders(0) = %q，空列表必须是 NULL（IN (NULL) 一行都匹配不上）", got)
+	}
+	if got := placeholders(2); got != "?,?" {
+		t.Fatalf("placeholders(2) = %q，期望 ?,?", got)
+	}
+}
+
+func relPaths(jobs []transfer.Job) []string {
+	out := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, j.RelPath)
+	}
+	return out
 }
 
 func jobIDs(jobs []transfer.Job) []string {

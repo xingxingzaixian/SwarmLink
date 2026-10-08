@@ -242,6 +242,39 @@ func jobIDsOf(jobs []transfer.Job) []string {
 	return out
 }
 
+// 同刻按目录树顺序（镜像 sqlite 侧）：刻意让 job_id 顺序与 rel_path 顺序相反。
+//
+// map 迭代顺序是随机的，没有第二/第三排序键时这条用例会随机红 ——
+// 它同时守着「内存实现与 sqlite 给出同一种顺序」这条对等性。
+func TestListByBatchOrdersByRelPath(t *testing.T) {
+	m := NewMessages(clock.New())
+	peerID := mkID(9)
+	same := time.Unix(7, 0)
+	for _, spec := range []struct{ id, rel string }{
+		{"jz", "照片/a.txt"}, {"ja", "照片/m.txt"}, {"jm", "照片/z.txt"},
+	} {
+		j := newJob(spec.id, peerID, "hash-"+spec.id)
+		j.BatchID, j.RelPath = "b-tie", spec.rel
+		j.CreatedAt, j.UpdatedAt = same, same
+		if err := m.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := m.ListByBatch("b-tie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"照片/a.txt", "照片/m.txt", "照片/z.txt"}
+	if len(got) != len(want) {
+		t.Fatalf("条数 = %d，期望 %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].RelPath != want[i] {
+			t.Fatalf("同刻顺序异常，期望按 rel_path（目录树）%v", want)
+		}
+	}
+}
+
 // ListByBatch 与 sqlite 侧镜像：只返回本批、包含已结束的、空 id 报错。
 func TestListByBatchFiltersAndKeepsFinished(t *testing.T) {
 	m := NewMessages(clock.New())
