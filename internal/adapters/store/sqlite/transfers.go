@@ -224,9 +224,9 @@ func scanTransfer(s rowScanner) (transfer.Job, error) {
 	}
 	out.Direction = transfer.Direction(direction)
 	out.TempPath = nullString(tempPath)
-	// wait_reason / next_try_at 都是 NOT NULL：
-	// next_try_at 用 timeOf，把 0 还原成零值时间（msOf 的逆运算）。
+	// wait_reason 是 NOT NULL 的 TEXT，可以直接扫成 string，不必走 NullString。
 	out.WaitReason = transfer.WaitReason(waitReason)
+	// next_try_at 用 timeOf 还原（msOf 的逆运算：0 ↔ 零值时间）。
 	out.NextTryAt = timeOf(nextTryAt)
 	out.Error = nullString(errMsg)
 	out.Bitmap = transfer.NewChunkBitmapFromBytes(bitmap)
