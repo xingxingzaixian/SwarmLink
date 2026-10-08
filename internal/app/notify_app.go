@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -84,6 +85,11 @@ const (
 	hoverUnknownName  = "未知用户"
 	hoverImagePreview = "[图片]"
 	hoverEmptyPreview = "发来一条消息"
+
+	// 文件消息的 content 是 {job_id, file_name} 的 JSON 信封（不是给人读的文字）。
+	// 直接透出去，托盘气泡里就是一段「{"job_id":"01a0ed92-…」。
+	hoverFilePreview    = "[文件]"
+	hoverFileFailSuffix = "（发送失败）"
 )
 
 // NotifyDeps 是决策器的依赖集合。
@@ -350,11 +356,16 @@ func (n *NotifyApp) hoverTextLocked() string {
 
 // previewOf 把消息压成一行可读的预览。
 //
-// 图片消息的 content 是内联图的 JSON 信封（含几百 KB base64）：
-// 直接透出去既没用，又会撑出一个巨大的提示框，因此单独处理。
+// 图片与文件消息的 content 都是 JSON 信封（图片那个含几百 KB base64，
+// 文件那个带着 job_id）：直接透出去既没用，又会把提示框变成一段裸 JSON，
+// 因此按类型给一句人话。规则与前端 utils/message.ts 的 previewText 互为镜像 ——
+// 只改一边，就会出现「左栏有文件名、托盘只有一段 JSON」这种不一致。
 func previewOf(m message.Message) string {
-	if m.MsgType == message.MsgTypeImage {
+	switch m.MsgType {
+	case message.MsgTypeImage:
 		return hoverImagePreview
+	case message.MsgTypeFile, message.MsgTypeFileFailed:
+		return filePreviewOf(m)
 	}
 	first, _, _ := strings.Cut(m.Content, "\n") // 只取首行
 	first = strings.TrimSpace(first)
@@ -362,6 +373,42 @@ func previewOf(m message.Message) string {
 		return hoverEmptyPreview
 	}
 	return truncateRunes(first, hoverPreviewMax)
+}
+
+// filePreviewOf 把文件消息的 JSON 信封压成「[文件] 名字」。
+//
+// 取不到名字时只给「[文件]」：宁可少一个名字，也不能把那串 job_id 漏到提示框里。
+func filePreviewOf(m message.Message) string {
+	suffix := ""
+	if m.MsgType == message.MsgTypeFileFailed {
+		suffix = hoverFileFailSuffix
+	}
+	name := fileNameOf(m.Content)
+	if name == "" {
+		return hoverFilePreview + suffix
+	}
+	return hoverFilePreview + " " + name + suffix
+}
+
+// fileNameOf 取文件消息 content 里的文件名。
+//
+// 三种历史写法都要认（file_name / fileName / FileName）：与前端
+// utils/message.ts 的容错保持一致，否则老消息会出现「气泡有名字、托盘没名字」。
+func fileNameOf(content string) string {
+	var v struct {
+		Snake string `json:"file_name"`
+		Camel string `json:"fileName"`
+		Go    string `json:"FileName"`
+	}
+	if err := json.Unmarshal([]byte(content), &v); err != nil {
+		return ""
+	}
+	for _, s := range []string{v.Snake, v.Camel, v.Go} {
+		if s = strings.TrimSpace(s); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // truncateRunes 按【字符】而非字节截断：按字节切会把中文切成半个字。

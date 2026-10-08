@@ -20,7 +20,7 @@ func NewTransfers(db *DB) *Transfers { return &Transfers{db: db} }
 
 const transferColumns = `job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
-                         window_size, retry_count, error, created_at, updated_at`
+                         window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at`
 
 // UpsertJob 写入/更新传输任务。
 func (t *Transfers) UpsertJob(j transfer.Job) error {
@@ -28,8 +28,8 @@ func (t *Transfers) UpsertJob(j transfer.Job) error {
 		_, err := tx.Exec(`
 INSERT INTO transfer_jobs(job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
-                         window_size, retry_count, error, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(job_id) DO UPDATE SET
   file_name    = excluded.file_name,
   file_size    = excluded.file_size,
@@ -43,11 +43,14 @@ ON CONFLICT(job_id) DO UPDATE SET
   status       = excluded.status,
   window_size  = excluded.window_size,
   retry_count  = excluded.retry_count,
+  wait_reason  = excluded.wait_reason,
+  next_try_at  = excluded.next_try_at,
   error        = excluded.error,
   updated_at   = excluded.updated_at`,
 			j.JobID, j.PeerID.String(), j.FileName, j.FileSize, j.FileHash, j.ChunkSize, j.TotalChunks,
 			string(j.Direction), j.LocalPath, j.TempPath, j.Completed, j.Bitmap.Bytes(), j.Status.DBStatus(),
-			j.WindowSize, j.RetryCount, j.Error, msOf(j.CreatedAt), msOf(j.UpdatedAt),
+			j.WindowSize, j.RetryCount, string(j.WaitReason), msOf(j.NextTryAt), j.Error,
+			msOf(j.CreatedAt), msOf(j.UpdatedAt),
 		)
 		return err
 	})
@@ -170,20 +173,23 @@ WHERE status IN ('done','failed','cancelled')
 
 func scanTransfer(s rowScanner) (transfer.Job, error) {
 	var (
-		out       transfer.Job
-		peerID    string
-		direction string
-		bitmap    []byte
-		status    string
-		tempPath  sql.NullString
-		errMsg    sql.NullString
-		createdAt int64
-		updatedAt int64
+		out        transfer.Job
+		peerID     string
+		direction  string
+		bitmap     []byte
+		status     string
+		tempPath   sql.NullString
+		errMsg     sql.NullString
+		waitReason string
+		nextTryAt  int64
+		createdAt  int64
+		updatedAt  int64
 	)
 	if err := s.Scan(
 		&out.JobID, &peerID, &out.FileName, &out.FileSize, &out.FileHash, &out.ChunkSize,
 		&out.TotalChunks, &direction, &out.LocalPath, &tempPath, &out.Completed, &bitmap,
-		&status, &out.WindowSize, &out.RetryCount, &errMsg, &createdAt, &updatedAt,
+		&status, &out.WindowSize, &out.RetryCount, &waitReason, &nextTryAt, &errMsg,
+		&createdAt, &updatedAt,
 	); err != nil {
 		return out, err
 	}
@@ -193,6 +199,10 @@ func scanTransfer(s rowScanner) (transfer.Job, error) {
 	}
 	out.Direction = transfer.Direction(direction)
 	out.TempPath = nullString(tempPath)
+	// wait_reason / next_try_at 都是 NOT NULL：
+	// next_try_at 用 timeOf，把 0 还原成零值时间（msOf 的逆运算）。
+	out.WaitReason = transfer.WaitReason(waitReason)
+	out.NextTryAt = timeOf(nextTryAt)
 	out.Error = nullString(errMsg)
 	out.Bitmap = transfer.NewChunkBitmapFromBytes(bitmap)
 	out.Bitmap.EnsureLen(out.TotalChunks)

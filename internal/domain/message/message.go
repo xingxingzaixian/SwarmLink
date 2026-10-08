@@ -36,7 +36,8 @@ const (
 	MsgTypeText  MsgType = "text"
 	// MsgTypeImage 的 content 是 InlineImage 的 JSON 信封（见 inline_image.go）。
 	MsgTypeImage MsgType = "image"
-	// MsgTypeFile 的 content 是文件传输的 job_id。
+	// MsgTypeFile 的 content 是 FileMessageContent 的 JSON 信封（job_id + file_name），
+	// 不是裸 job_id —— 预览/渲染都必须先解析它，否则界面上就是一段 JSON。
 	MsgTypeFile MsgType = "file"
 	// MsgTypeFileFailed 表示文件传输失败
 	MsgTypeFileFailed MsgType = "file_failed"

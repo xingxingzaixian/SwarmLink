@@ -96,6 +96,66 @@ func TestIncomingMessageEmitsPopup(t *testing.T) {
 	}
 }
 
+// 文件/图片消息的 content 是 JSON 信封：提示框里必须给「[文件] 名字」这种人话，
+// 不能把 {"job_id":"01a0ed92-…"} 原样弹出来（左栏预览是同一份规则）。
+func TestMediaMessagePreviewIsNotRawJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		typ     message.MsgType
+		content string
+		want    string
+	}{
+		{
+			"文件（snake_case，当前后端写法）",
+			message.MsgTypeFile,
+			`{"job_id":"01a0ed92-0204-7b3c","file_name":"SwarmLink.exe"}`,
+			"张三：[文件] SwarmLink.exe",
+		},
+		{
+			"文件（Go 字段名的历史数据）",
+			message.MsgTypeFile,
+			`{"JobID":"j2","FileName":"老安装包.zip"}`,
+			"张三：[文件] 老安装包.zip",
+		},
+		{
+			"文件发送失败要点出失败",
+			message.MsgTypeFileFailed,
+			`{"job_id":"j3","file_name":"丢了.pdf","reason":"文件已被删除或移动"}`,
+			"张三：[文件] 丢了.pdf（发送失败）",
+		},
+		{
+			"坏 JSON 宁可少个名字，也不能漏出原文",
+			message.MsgTypeFile,
+			`{"job_id":`,
+			"张三：[文件]",
+		},
+		{
+			"图片",
+			message.MsgTypeImage,
+			`{"v":1,"mime":"image/png","b64":"iVBORw0KGgo="}`,
+			"张三：[图片]",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, set := NotifyEnv{WindowVisible: false}, NotifySettings{}
+			n, _ := newNotifyFixtureNamed(t, &env, &set, names(map[string]string{testPeerHex: "张三"}))
+
+			text, ok := popupOf(n.OnChatMessage(inboundFrom(t, testPeerHex, tc.content, tc.typ)))
+			if !ok {
+				t.Fatal("新消息应产生自动弹出动作")
+			}
+			if text != tc.want {
+				t.Errorf("弹出文案 = %q，期望 %q", text, tc.want)
+			}
+			if strings.ContainsAny(text, "{}") {
+				t.Errorf("提示框漏出了 JSON 信封：%q", text)
+			}
+		})
+	}
+}
+
 // 不该打扰的场景一个弹出动作都不给：自己发的、正看着该会话、以及传输事件。
 //
 // 传输事件刻意不弹：它的「谁发来的」没有意义（HoverText 会退化成纯计数），

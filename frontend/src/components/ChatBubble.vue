@@ -294,10 +294,12 @@ async function openFileLocation() {
   color: var(--t3);
 }
 
-/* 气泡顶部时间 */
+/* 气泡顶部时间。
+   收到消息的气泡底是浅色纸面，所以这里必须用纸面墨色而不是 --t2：
+   深色主题下 --t2 是白色，白字落在白纸上会让时间戳彻底消失。 */
 .bubble-time {
   font-size: 10px;
-  color: var(--t2);
+  color: var(--paper-ink-soft);
   margin-bottom: 4px;
   user-select: none;
 }
@@ -386,9 +388,10 @@ async function openFileLocation() {
   color: rgba(255, 255, 255, 0.9);
 }
 
+/* 同 .bubble-time：文件卡的副标题也落在纸面/粉面上，不吃全局 --t3 */
 .file-meta {
   font-size: var(--fs-xs);
-  color: var(--t3);
+  color: var(--paper-ink-soft);
 }
 
 .row.out .file-meta {
@@ -421,8 +424,13 @@ async function openFileLocation() {
   max-width: 220px;
   border-radius: var(--r-md);
   background: rgba(0, 0, 0, 0.06);
-  color: var(--t3);
+  color: var(--paper-ink-soft);
   font-size: var(--fs-xs);
+}
+
+/* 自己的图片消息落在粉面上，纸面墨色在上面会发暗，换回白 */
+.row.out .shot-broken {
+  color: rgba(255, 255, 255, 0.82);
 }
 
 .meta {

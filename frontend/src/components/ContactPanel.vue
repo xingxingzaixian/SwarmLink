@@ -21,6 +21,7 @@ import { useGroupStore } from '../stores/group'
 import { reachable, usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { listTime } from '../utils/format'
+import { previewText } from '../utils/message'
 
 defineProps<{ mock?: boolean }>()
 
@@ -76,13 +77,15 @@ function isActive(convId: string): boolean {
 /** 有消息就显示消息，没有就显示地址 —— 空列表里「什么都没有」最没用。 */
 function peerSub(p: Peer): string {
   const m = chat.previewOf(peerConvId(p))
-  if (m) return m.content
+  // 不能直接透 m.content：文件/图片消息的 content 是 JSON 信封，
+  // 透出去左栏就是一段「{"job_id":"01a0ed92-…」的裸 JSON。
+  if (m) return previewText(m)
   return p.lastAddr || '尚未通信'
 }
 
 function groupSub(g: Group): string {
   const m = chat.previewOf(g.groupId)
-  if (m) return m.content
+  if (m) return previewText(m)
   return `${groups.activeCount(g)}/${groups.MAX_MEMBERS} 人在线`
 }
 

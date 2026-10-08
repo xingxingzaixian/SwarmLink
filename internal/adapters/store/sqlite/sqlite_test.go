@@ -301,6 +301,57 @@ func TestTransferBitmapPersistsAndResumes(t *testing.T) {
 	}
 }
 
+// 等待态与退避时间必须能落库再读回来：重启恢复、sweep 是否到点全靠这两列。
+func TestJobWaitingFieldsRoundTrip(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+
+	peerID := mkID(7)
+	next := time.UnixMilli(1_760_000_000_000)
+	job := transfer.Job{
+		JobID: "job-wait-1", PeerID: peerID, FileName: "报告.pdf", FileSize: 4096,
+		ChunkSize: 1024, TotalChunks: 4, Direction: transfer.DirectionSend,
+		LocalPath: `C:\tmp\报告.pdf`, Bitmap: transfer.NewChunkBitmap(4),
+		Status: transfer.StateIdle, WaitReason: transfer.WaitPeerOffline,
+		NextTryAt: next, RetryCount: 3,
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(2, 0),
+	}
+	if err := tr.UpsertJob(job); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := tr.GetJob(job.JobID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.WaitReason != transfer.WaitPeerOffline {
+		t.Errorf("wait_reason = %q, want %q", got.WaitReason, transfer.WaitPeerOffline)
+	}
+	if !got.NextTryAt.Equal(next) {
+		t.Errorf("next_try_at = %v, want %v", got.NextTryAt, next)
+	}
+	if got.RetryCount != 3 {
+		t.Errorf("retry_count = %d, want 3", got.RetryCount)
+	}
+
+	// 零值必须干净地回到零值（不能变成 1970 之前的负数）
+	job.NextTryAt = time.Time{}
+	job.WaitReason = transfer.WaitNone
+	if err := tr.UpsertJob(job); err != nil {
+		t.Fatalf("upsert zero: %v", err)
+	}
+	got, err = tr.GetJob(job.JobID)
+	if err != nil {
+		t.Fatalf("get zero: %v", err)
+	}
+	if !got.NextTryAt.IsZero() {
+		t.Errorf("next_try_at = %v, want zero", got.NextTryAt)
+	}
+	if got.WaitReason != transfer.WaitNone {
+		t.Errorf("wait_reason = %q, want 空串", got.WaitReason)
+	}
+}
+
 func TestGroupsRoundTrip(t *testing.T) {
 	db, _ := openTest(t)
 	g := NewGroups(db)

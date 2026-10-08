@@ -150,6 +150,23 @@ CREATE TABLE IF NOT EXISTS conv_clears (
 );
 `,
 	},
+	{
+		version: 3,
+		name:    "transfer_waiting",
+		// 「等待对方上线」的两个落库字段。
+		//
+		// 为什么加列而不是加 status 取值：SQLite 改 CHECK 约束必须重建整表
+		// （建新表 → 拷数据 → 换名），而 'queued' 本来就在取值域里、
+		// 领域态 StateIdle 本来就叫"还没开始"。加两列是纯追加、零搬迁。
+		//
+		// 注意迁移是【只追加、永不修改】的：已应用过的 SQL 一旦改动，
+		// checksum 校验会直接让应用启动失败。
+		sql: `
+ALTER TABLE transfer_jobs ADD COLUMN wait_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE transfer_jobs ADD COLUMN next_try_at INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS ix_transfer_waiting ON transfer_jobs(direction, status, next_try_at);
+`,
+	},
 }
 
 func migrationChecksum(sql string) string {

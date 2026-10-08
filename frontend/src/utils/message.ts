@@ -64,3 +64,28 @@ export function parseFileFailedContent(content: string): FileFailedContent {
     reason: pick(obj, 'reason', 'Reason')
   }
 }
+
+/**
+ * 会话列表的「最后一条消息」预览文案。
+ *
+ * 为什么必须按类型分派：图片与文件（含失败）消息的 content 是 JSON 信封，
+ * 不是给人读的文字。直接透出去，左栏就会显示成
+ * 「{"job_id":"01a0ed92-0204-…」—— 用户看到的是内部标识，
+ * 而不是「对方发来了一个文件」。
+ *
+ * 只依赖最小结构（msgType + content），本模块因此保持零依赖；
+ * Go 侧 internal/app/notify_app.go 的 previewOf 是同一份规则的镜像
+ * （托盘气泡/悬停提示也要走它，否则托盘会单独漏出裸 JSON）。
+ */
+export function previewText(m: { msgType: string; content: string }): string {
+  switch (m.msgType) {
+    case 'image':
+      return '[图片]'
+    case 'file':
+      return `[文件] ${parseFileContent(m.content).fileName}`
+    case 'file_failed':
+      return `[文件] ${parseFileFailedContent(m.content).fileName}（发送失败）`
+    default:
+      return m.content
+  }
+}

@@ -15,6 +15,17 @@ const (
 	DirectionRecv Direction = "recv"
 )
 
+// WaitReason 说明一个【还没开始】的任务在等什么。
+//
+// 空串 = 不在等待。它必须落库而不只是内存标记：sweep 只允许自动拉起
+// WaitPeerOffline 的任务 —— 将来加了「用户暂停」时，它绝不能被自动重试。
+type WaitReason string
+
+const (
+	WaitNone        WaitReason = ""
+	WaitPeerOffline WaitReason = "peer_offline"
+)
+
 // DefaultChunkSize 是默认分块大小（架构书 4.8：LAN 1MB / 跨网段 256KB / 默认 512KB）。
 const DefaultChunkSize int64 = 512 * 1024
 
@@ -35,9 +46,13 @@ type Job struct {
 	Status      State
 	WindowSize  int
 	RetryCount  int
-	Error       string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// WaitReason / NextTryAt 只在 Status 为 StateIdle（"还没开始"）时有意义：
+	// 前者说明在等谁，后者说明什么时候可以再试。
+	WaitReason WaitReason
+	NextTryAt  time.Time
+	Error      string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // ChunkCount 计算总块数（向上取整）。
