@@ -176,6 +176,17 @@ func (a *TransferApp) sendFile(
 		return transfer.Job{}, fmt.Errorf("transfer: job_id 不能为空")
 	}
 
+	// 取消与启动之间的竞态：抢占成功【不代表】任务还在等待中 ——
+	// 用户可能在我们抢占到之前就点了取消（那时 isStarting 还是 false，
+	// CancelJob 会放行）。这里复读一次库：不是「等待中」就干净地放弃
+	// （不写库、不发事件），否则我们随后会把它写成「传输中」，把取消覆盖掉，
+	// 而"取消之后对方上线仍然自动传输"正是这个功能明令禁止的事。
+	//
+	// 反向窗口由 CancelJob 的 isStarting 检查兜住（我们已抢占 → 它拒绝）。
+	if prev, gerr := a.store.GetJob(jobID); gerr == nil && prev.Status != transfer.StateIdle {
+		return transfer.Job{}, fmt.Errorf("transfer: 任务已不在等待中（当前 %s）", prev.Status)
+	}
+
 	// networkAttempted 标记「失败是否已经发生在网络阶段」。
 	//
 	// 这是分类的硬前提：本地检查（stat / 打开 / 哈希）出错一律是【真失败】——

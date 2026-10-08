@@ -153,10 +153,13 @@ func (a *TransferApp) newWaitingJob(jobID string, peerID identity.NodeID, path s
 		Status:      transfer.StateIdle,
 		WindowSize:  a.windowSize(),
 		WaitReason:  transfer.WaitPeerOffline,
-		NextTryAt:   now.Add(backoff(1, a.BaseBackoff, a.MaxBackoff)),
-		RetryCount:  1,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		// 尝试次数从 0 开始：递增这件事【只由 markWaiting 做】。
+		// 这里若写成 1，第一次进入等待就成了「第 2 次尝试」，
+		// 整条退避曲线提前一档（首档变成 2s 而不是 1s）。
+		RetryCount: 0,
+		NextTryAt:  now.Add(backoff(1, a.BaseBackoff, a.MaxBackoff)),
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 }
 

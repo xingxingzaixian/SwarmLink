@@ -352,6 +352,46 @@ func TestJobWaitingFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// 清理策略必须放过「等待对方上线」的任务。
+//
+// 它们的状态是 queued，不在 done/failed/cancelled 里。这条用例把它钉住：
+// 一旦有人图省事把 queued 也塞进清理集合，等待中的文件会在 TTL 之后被
+// 静默删掉 —— 用户什么都没做，任务却消失了。
+func TestPurgeFinishedKeepsWaitingJobs(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	peerID := mkID(8)
+
+	old := time.Now().Add(-30 * 24 * time.Hour) // 比 TTL 还旧
+	mk := func(id string, st transfer.State, reason transfer.WaitReason) transfer.Job {
+		return transfer.Job{
+			JobID: id, PeerID: peerID, FileName: id + ".bin", FileSize: 4096,
+			ChunkSize: 1024, TotalChunks: 4, Direction: transfer.DirectionSend,
+			LocalPath: "/tmp/" + id, Bitmap: transfer.NewChunkBitmap(4),
+			Status: st, WaitReason: reason, CreatedAt: old, UpdatedAt: old,
+		}
+	}
+	for _, j := range []transfer.Job{
+		mk("job-waiting-old", transfer.StateIdle, transfer.WaitPeerOffline),
+		mk("job-done-old", transfer.StateDone, transfer.WaitNone),
+	} {
+		if err := tr.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := tr.PurgeFinished(0, time.Now().Add(-7*24*time.Hour)); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	if _, err := tr.GetJob("job-waiting-old"); err != nil {
+		t.Errorf("等待中的任务被清理掉了（%v）", err)
+	}
+	if _, err := tr.GetJob("job-done-old"); err == nil {
+		t.Error("过期的已结束任务应当被清理")
+	}
+}
+
 // 与 mem 侧同一组断言：两个实现必须对等，否则 app 层测试（用 mem）通过
 // 而真实运行（用 sqlite）出错，是最难查的一类漂移。
 func TestListWaitingFiltersByReasonAndDirection(t *testing.T) {

@@ -155,8 +155,10 @@ func New(name string, opts Options) (*Node, error) {
 
 	peerApp.Start()
 	chatApp.Start(ctx)
-	// 与生产装配一致：对端上线（peer.online / peer.discovered）会唤醒等待中的传输
+	// 与生产装配一致：对端上线（peer.online / peer.discovered）会唤醒等待中的传输，
+	// Recover 负责收尾上次运行留下的任务
 	transferApp.Start(ctx)
+	transferApp.Recover(ctx)
 
 	n := &Node{
 		Name: name, KP: kp,

@@ -118,10 +118,16 @@ export const useTransferStore = defineStore('transfer', () => {
     // 就会把「传输完成」打回「正在传输」—— 表现为「文件早就传完了，
     // 气泡上还写着正在传输」，而且此后再没有任何事件能把它改回来。
     if (!isActive(prev.status)) return
+    const nextStatus = p.status ?? prev.status
     jobs.value[i] = {
       ...prev,
       percent: p.percent,
-      status: p.status ?? prev.status,
+      status: nextStatus,
+      // 一旦有进度推进，就不再是「等待对方上线」了：后端不会为「开始传输」
+      // 单独发一次 transfer:state，只能靠进度事件判断。不清掉的话，界面会
+      // 一边显示进度、一边挂着「取消 / 立即重试」按钮。
+      waitReason:
+        nextStatus !== 'idle' && nextStatus !== 'queued' ? undefined : prev.waitReason,
       speed: p.speed ?? prev.speed,
       etaMs: p.etaMs ?? prev.etaMs,
       updatedAt: Date.now()

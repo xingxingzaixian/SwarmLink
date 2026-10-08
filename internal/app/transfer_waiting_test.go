@@ -312,14 +312,14 @@ func TestMidTransferDisconnectWaitsForPeer(t *testing.T) {
 
 // countAttempted 数一数「真的尝试过」的任务。
 //
-// 观测点选 RetryCount 而不是 Status：等待任务每次被重新标记时计数 +1
-// （newWaitingJob 初始为 1），因此 >=2 就说明这次尝试真的发生过。
+// 观测点选 RetryCount 而不是 Status：尝试次数只在 markWaiting 里递增
+// （newWaitingJob 从 0 起步），因此 >=1 就说明这次尝试真的发生过。
 // 而 Status 在尝试期间是 StateMetaExchange，跑完又会回到 StateIdle ——
 // 拿它当判据要跟时序赛跑。
 func countAttempted(repo *stubTransferRepo) int {
 	n := 0
 	for _, j := range repo.all() {
-		if j.RetryCount >= 2 {
+		if j.RetryCount >= 1 {
 			n++
 		}
 	}
@@ -477,6 +477,46 @@ func TestWaitingBackoffEscalatesOnOfflineShortcut(t *testing.T) {
 	}
 }
 
+// 取消与启动之间的竞态：抢占到 goroutine 之后必须复读一次库。
+//
+// 时序（真实可发生）：CancelJob 通过检查并写入 cancelled → 随后那条已经
+// 抢到 starting 的 goroutine 才跑到 sendFile。若不复读，它会用
+// StateMetaExchange 把任务写回去，取消就成了假的 —— 而「取消之后对方上线
+// 仍然自动传输」正是这个功能明令禁止的事。
+func TestStartAfterCancelDoesNotResurrectJob(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, eventbus.New(), clock.New(), nil)
+	a.ChunkSize = 1024
+
+	p := filepath.Join(t.TempDir(), "race.bin")
+	if err := os.WriteFile(p, bytes.Repeat([]byte{8}, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled := a.newWaitingJob("job-race", peerID, p, 4096)
+	cancelled.Status = transfer.StateCancelled
+	cancelled.WaitReason = transfer.WaitNone
+	cancelled.NextTryAt = time.Time{}
+	if err := repo.UpsertJob(cancelled); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.sendFile(context.Background(), peerID, p, "job-race", true); err == nil {
+		t.Fatal("已取消的任务不该被启动")
+	}
+	got, err := repo.GetJob("job-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != transfer.StateCancelled {
+		t.Errorf("status = %q，want cancelled（取消被启动流程覆盖了）", got.Status)
+	}
+	if got.WaitReason != transfer.WaitNone {
+		t.Errorf("waitReason = %q，取消的任务不该被重新标记为等待", got.WaitReason)
+	}
+}
+
 // 取消：任务变 cancelled、清掉等待标记，于是 sweep 再也拾取不到它。
 func TestCancelJobStopsWaiting(t *testing.T) {
 	peerID := mustNodeID(t, testPeerHex)
@@ -510,10 +550,12 @@ func TestCancelJobStopsWaiting(t *testing.T) {
 	//
 	// 这里【不】断言 repo.ListWaiting() 为空：测试替身刻意不做领域过滤，
 	// 要验的正是"即便仓储把取消过的任务也递上来，调度层也不会动它"。
+	// 判据用尝试次数有没有变（起点由 newWaitingJob 决定，不写死具体值）。
+	attemptsBefore := j.RetryCount
 	a.SweepWaiting(context.Background())
 	time.Sleep(50 * time.Millisecond)
-	if got, _ := repo.GetJob("job-cancel"); got.RetryCount != 1 {
-		t.Errorf("取消后仍被自动重试（RetryCount = %d）", got.RetryCount)
+	if got, _ := repo.GetJob("job-cancel"); got.RetryCount != attemptsBefore {
+		t.Errorf("取消后仍被自动重试（尝试次数 %d → %d）", attemptsBefore, got.RetryCount)
 	}
 }
 

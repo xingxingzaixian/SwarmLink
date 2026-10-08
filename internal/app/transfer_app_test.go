@@ -104,7 +104,7 @@ func TestSendFileAsPublishesErrorOnEarlyFailure(t *testing.T) {
 	a := NewTransferApp(identity.NodeID{}, repo, nil, nil, nil, bus, clock.New(), nil)
 
 	const jobID = "job-early-failure"
-	// 文件不存在 → hashFileChunks 在建任务之前就失败（连 session 都没走到）
+	// 文件不存在 → 本地检查（os.Stat）就失败，连可达性判定与哈希都走不到
 	if _, err := a.SendFileAs(context.Background(), identity.NodeID{}, "/definitely/not/here.bin", jobID); err == nil {
 		t.Fatal("expected an error for a missing file")
 	}
