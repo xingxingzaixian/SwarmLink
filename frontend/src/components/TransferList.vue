@@ -10,7 +10,7 @@ import { computed } from "vue";
 import Icon from "./Icon.vue";
 import { getApi } from "../api";
 import type { TransferJob } from "../api/types";
-import { isActive } from "../stores/transfer";
+import { isActive, isWaiting } from "../stores/transfer";
 import { usePeersStore } from "../stores/peers";
 import { useUiStore } from "../stores/ui";
 import {
@@ -41,6 +41,24 @@ async function reveal(path: string): Promise<void> {
   } catch (e: any) {
     // 最常见的原因：文件已被手动删除或移动
     ui.notify(String(e?.message ?? e) || "无法定位该文件");
+  }
+}
+
+/** 立刻重试一条等待中的任务（不等退避，也不等对方上线）。 */
+async function retry(j: TransferJob): Promise<void> {
+  try {
+    await (await getApi()).retryTransfer(j.jobId);
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || "重试失败");
+  }
+}
+
+/** 取消一条等待中的任务。正在传的任务后端会拒绝（没有中断点，假取消更糟）。 */
+async function cancel(j: TransferJob): Promise<void> {
+  try {
+    await (await getApi()).cancelTransfer(j.jobId);
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || "取消失败");
   }
 }
 
@@ -129,18 +147,39 @@ function doneBytes(j: TransferJob): number {
               {{ isActive(j.status) ? percentOf(j).toFixed(0) + "%" : "" }}
             </span>
 
-            <span class="tag" :class="transferStatus(j.status).cls">
-              {{ transferStatus(j.status).text }}
+            <span class="tag" :class="transferStatus(j.status, j.waitReason).cls">
+              {{ transferStatus(j.status, j.waitReason).text }}
             </span>
 
+            <!-- 末尾固定两个槽位，保证各行右侧对齐（等待中占用两格） -->
             <button
-              v-if="j.status === 'done' && j.localPath"
+              v-if="isWaiting(j)"
+              class="reveal"
+              title="立即重试（不等退避，也不等对方上线）"
+              aria-label="立即重试"
+              @click="retry(j)"
+            >
+              <Icon name="refresh" :size="13" />
+            </button>
+            <button
+              v-else-if="j.status === 'done' && j.localPath"
               class="reveal"
               :title="`定位到：${j.localPath}`"
               aria-label="在文件管理器中显示该文件"
               @click="reveal(j.localPath)"
             >
               <Icon name="folder" :size="13" />
+            </button>
+            <span v-else class="reveal-ph" />
+
+            <button
+              v-if="isWaiting(j)"
+              class="reveal"
+              title="取消传输"
+              aria-label="取消传输"
+              @click="cancel(j)"
+            >
+              <Icon name="x" :size="13" />
             </button>
             <span v-else class="reveal-ph" />
           </div>

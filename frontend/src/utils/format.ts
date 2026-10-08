@@ -153,7 +153,7 @@ export interface Tone {
  * 集中一处的理由：状态字符串来自 domain 层，UI 若各处自己 switch，
  * 新增一个状态时必然有地方漏改，表现为「某个任务显示原始英文状态」。
  */
-export function transferStatus(status: string): Tone {
+export function transferStatus(status: string, waitReason?: string): Tone {
   switch (status) {
     case 'done':
       return { text: '已完成', cls: 'ok', final: true }
@@ -165,10 +165,17 @@ export function transferStatus(status: string): Tone {
       return { text: '校验中', cls: 'warn', final: false }
     case 'paused':
       return { text: '已暂停', cls: 'warn', final: false }
-    case 'queued':
-      return { text: '排队中', cls: '', final: false }
-    // 任务已建但还没开始发块（等并发额度 / 等对端位图）
+    // 等待对方上线与「还没轮到」共用 idle/queued，靠 waitReason 区分。
+    // 等待是【非终态】：它会在对方上线后自己继续，不能标成结束。
     case 'idle':
+    case 'queued':
+      if (waitReason === 'peer_offline') {
+        return { text: '等待对方上线', cls: 'warn', final: false }
+      }
+      return status === 'queued'
+        ? { text: '排队中', cls: '', final: false }
+        : { text: '协商中', cls: 'brand', final: false }
+    // 任务已建但还没开始发块（等对端位图）
     case 'meta_exchange':
       return { text: '协商中', cls: 'brand', final: false }
     default:

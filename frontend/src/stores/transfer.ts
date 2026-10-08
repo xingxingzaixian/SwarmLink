@@ -22,6 +22,16 @@ export function isActive(status: string): boolean {
 }
 
 /**
+ * 该任务是否在等对方上线。
+ *
+ * 判据是 waitReason 而【不是】status：等待态与「还没轮到」在状态上
+ * 都是 idle/queued（后端 DB 里都是 queued），只有 waitReason 分得开。
+ */
+export function isWaiting(j: TransferJob): boolean {
+  return j.waitReason === 'peer_offline'
+}
+
+/**
  * 传输任务状态。
  *
  * 进度的数据来源有两条，职责必须分清：
@@ -188,6 +198,47 @@ export const useTransferStore = defineStore('transfer', () => {
   }
 
   /**
+   * 后端推来的状态变化（transfer:state 事件）。
+   *
+   * 不用 progress 事件表达这件事：progress 的语义是「进度在动」，
+   * 而「进入等待」恰恰是停下来了。
+   */
+  function applyState(s: { jobId: string; status: string; reason?: string }): void {
+    const i = jobs.value.findIndex((j) => j.jobId === s.jobId)
+    if (i < 0) {
+      scheduleHydrate()
+      return
+    }
+    jobs.value[i] = {
+      ...jobs.value[i],
+      status: s.status,
+      waitReason: s.reason || undefined,
+      // 进入等待时把速率/ETA 抹掉：它们描述的是「正在跑」，留着会让
+      // 界面显示「等待对方上线 · 2.1 MB/s」这种自相矛盾的东西。
+      speed: undefined,
+      etaMs: undefined,
+      updatedAt: Date.now()
+    }
+  }
+
+  /** 取消一条等待中的任务。 */
+  async function cancelJob(jobId: string): Promise<void> {
+    await (await getApi()).cancelTransfer(jobId)
+    // 乐观更新 + 后端事件双保险：事件丢了界面也不会卡在「等待对方上线」
+    applyState({ jobId, status: 'cancelled' })
+  }
+
+  /**
+   * 立刻重试一条等待中的任务。
+   *
+   * 不做乐观更新：真正的状态由后端的 transfer:state / 进度事件推来，
+   * 乐观改成「传输中」会在对端其实仍然离线时骗用户。
+   */
+  async function retryJob(jobId: string): Promise<void> {
+    await (await getApi()).retryTransfer(jobId)
+  }
+
+  /**
    * 用「刚发出的任务」建一条本地条目。
    *
    * 文件名从用户选中的本地路径取：这是发起方唯一确定知道、
@@ -263,6 +314,9 @@ export const useTransferStore = defineStore('transfer', () => {
     applyProgress,
     applyDone,
     applyError,
+    applyState,
+    cancelJob,
+    retryJob,
     registerPending,
     sendFile,
     sendFiles

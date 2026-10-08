@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { fileSize, transferredBytes } from '../src/utils/format.ts'
+import { fileSize, transferStatus, transferredBytes } from '../src/utils/format.ts'
 
 const MB = 1024 * 1024
 
@@ -34,4 +34,19 @@ test('百分比缺失或越界不会产生负数/超额', () => {
 test('未知文件大小时返回 0（DTO 尚未补齐时列表不该显示乱数）', () => {
   assert.equal(transferredBytes(0, 100, false), 0)
   assert.equal(transferredBytes(0, 100, true), 0)
+})
+
+test('等待对方上线要显示出来，而且不能算终态', () => {
+  // 等待态与「还没轮到」共用 idle/queued，判据只能是 waitReason。
+  // 标成终态会让它从「进行中」列表里掉出去，用户以为这条任务已经结束了。
+  assert.equal(transferStatus('idle', 'peer_offline').text, '等待对方上线')
+  assert.equal(transferStatus('queued', 'peer_offline').text, '等待对方上线')
+  assert.equal(transferStatus('idle', 'peer_offline').final, false)
+
+  // 没有 waitReason 时语义不变
+  assert.equal(transferStatus('idle').text, '协商中')
+  assert.equal(transferStatus('queued').text, '排队中')
+  // 其它终态不受影响
+  assert.equal(transferStatus('done').final, true)
+  assert.equal(transferStatus('failed').final, true)
 })

@@ -58,6 +58,13 @@ export interface TransferJob {
   direction: 'send' | 'recv' | string
   localPath: string
   /**
+   * 非空表示这条任务在等（目前只有 'peer_offline'）。
+   *
+   * 判据必须看它而不是 status：等待中的任务 status 是 idle（DB 里是 queued），
+   * 与「还没轮到」共用同一个状态，光看状态分不出来。
+   */
+  waitReason?: string
+  /**
    * 已确认的【分块数】，不是字节数（后端 Job.Completed ← Bitmap.CompletedCount）。
    * 展示已传字节请用 utils/format 的 transferredBytes：直接 fileSize(completed)
    * 会把 15MB 的文件显示成「30 B」。
@@ -230,6 +237,10 @@ export interface SwarmApi {
   revealFile(path: string): Promise<void>
   /** 清空已结束的传输记录，返回删除条数。 */
   clearTransfers(): Promise<number>
+  /** 取消一条尚未开始的传输（等待中的那种）。已在传的任务会被后端拒绝。 */
+  cancelTransfer(jobId: string): Promise<void>
+  /** 立刻重试一条等待中的传输（不等退避，也不要求对端在目录里在线）。 */
+  retryTransfer(jobId: string): Promise<void>
 
   // 节点与诊断
   self(): Promise<Self>
@@ -256,11 +267,15 @@ export const EV = {
   transferProgress: 'transfer:progress',
   transferDone: 'transfer:done',
   transferError: 'transfer:error',
+  /** 任务状态变化（载荷 { jobId, status, reason }）。 */
+  transferState: 'transfer:state',
   netError: 'net:error',
   configChanged: 'config:changed',
   debug: 'debug:event',
   /** 拖入窗口的文件路径（由桌面外壳转发，非领域事件）。 */
-  fileDropped: 'file:dropped'
+  fileDropped: 'file:dropped',
+  /** 用户点击了系统通知（由桌面外壳转发，非领域事件）。 */
+  notifyActivated: 'notify:activated'
 } as const
 
 /** `file:dropped` 的载荷。 */
@@ -268,6 +283,12 @@ export interface FilesDroppedEvent {
   paths: string[]
   /** 命中的 data-file-drop-target 属性值。 */
   target: string
+}
+
+/** `notify:activated` 的载荷。 */
+export interface SystemNotifyEvent {
+  /** 点击的那条通知对应的会话；取不到时为空串。 */
+  convId: string
 }
 
 export interface DebugEvent {

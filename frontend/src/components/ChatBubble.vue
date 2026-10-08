@@ -90,6 +90,9 @@ const transferStatus = computed(() => {
   if (job.status === 'failed') return '传输失败'
   if (job.status === 'cancelled') return '已取消'
   if (job.status === 'paused') return '已暂停'
+  // 等待对方上线：判据与传输列表一致（看 waitReason，不看 status）——
+  // 等待态与「还没轮到」共用 idle/queued
+  if (job.waitReason === 'peer_offline') return '等待对方上线'
   if (job.status === 'queued') return '排队中'
   return '正在传输...'
 })

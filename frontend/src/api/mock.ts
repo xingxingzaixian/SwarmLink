@@ -141,7 +141,8 @@ export function createMockApi(): SwarmApi {
     requireAuth: true,
     encryption: 'off',
     notifySound: true,
-    notifyMinimizeToTray: true
+    notifyMinimizeToTray: true,
+    autoStart: false
   }
 
   const diagnostics: Diagnostics = {
@@ -299,6 +300,15 @@ export function createMockApi(): SwarmApi {
     async saveSettings() {
       return ['tcp_port']
     },
+    async autoStartEnable() {
+      settings.autoStart = true
+    },
+    async autoStartDisable() {
+      settings.autoStart = false
+    },
+    async autoStartIsEnabled() {
+      return settings.autoStart
+    },
     async listInterfaces() {
       return diagnostics.interfaceSummary
     },
@@ -433,6 +443,20 @@ export function createMockApi(): SwarmApi {
       // jobs 是 const，原地替换而不是重新赋值
       jobs.splice(0, jobs.length, ...kept)
       return before - jobs.length
+    },
+    // 预览模式下没有真实传输：这两个动作只把状态改到位，
+    // 保证「等待对方上线 → 取消 / 立即重试」这两条交互在浏览器里能走通。
+    async cancelTransfer(jobId) {
+      const j = jobs.find((x) => x.jobId === jobId)
+      if (!j) throw new Error('任务不存在')
+      j.status = 'cancelled'
+      j.waitReason = undefined
+    },
+    async retryTransfer(jobId) {
+      const j = jobs.find((x) => x.jobId === jobId)
+      if (!j) throw new Error('任务不存在')
+      j.waitReason = undefined
+      j.status = 'active'
     },
 
     async self() {

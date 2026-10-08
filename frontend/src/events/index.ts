@@ -13,6 +13,7 @@ import {
   type FilesDroppedEvent,
   type Message,
   type Peer,
+  type SystemNotifyEvent,
   type TransferJob
 } from '../api/types'
 
@@ -72,6 +73,30 @@ async function handleFilesDropped(data: FilesDroppedEvent): Promise<void> {
       ? `已开始发送 ${sent} 个文件`
       : `已发起 ${sent}/${files.length} 个文件，失败的请看右侧`
   )
+}
+
+/**
+ * 点击系统通知 → 切到对应会话。
+ *
+ * 窗口已经被 Go 侧叫到前台，这里只负责「切过去」。
+ *
+ * 会话表里可能还没有这个会话（通知是几分钟前弹的，期间列表可能没刷新过），
+ * 查不到时先拉一遍列表再查：直接放弃会让「点了通知没反应」变成一个
+ * 无法复现的玄学问题。
+ */
+async function handleSystemNotify(data: SystemNotifyEvent): Promise<void> {
+  const convId = data?.convId ?? ''
+  if (!convId) return
+
+  const chat = useChatStore()
+  let conv = chat.conversations.find((c) => c.convId === convId)
+  if (!conv) {
+    await chat.loadConversations()
+    conv = chat.conversations.find((c) => c.convId === convId)
+  }
+  if (!conv) return
+
+  await chat.open(conv)
 }
 
 type Handler = (data: any) => void
@@ -197,6 +222,11 @@ export function registerEvents(): void {
     transfers.applyError(data)
   })
 
+  // 状态变化（目前用于「等待对方上线」）：与进度分开，见 eventbridge.go 的说明
+  on(EV.transferState, (data: { jobId: string; status: string; reason?: string }) => {
+    transfers.applyState(data)
+  })
+
   on(EV.groupUpdated, (data: { groupId: string; name: string; epoch: number }) => {
     // 群元数据只推摘要；成员详情由 GroupService.List() 拉取
     void chat.loadConversations()
@@ -205,6 +235,10 @@ export function registerEvents(): void {
 
   on(EV.fileDropped, (data: FilesDroppedEvent) => {
     void handleFilesDropped(data)
+  })
+
+  on(EV.notifyActivated, (data: SystemNotifyEvent) => {
+    void handleSystemNotify(data)
   })
 
   on(EV.netError, (data: { op: string; peerId: string; error: string }) => {
