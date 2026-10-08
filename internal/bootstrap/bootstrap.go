@@ -267,6 +267,11 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	n.ChatApp.Start(ctx)
 	n.DiscApp.Start(ctx)
 
+	// 文件传输的等待重试：对端上线（peer.online / peer.discovered）是主触发源，
+	// Recover 负责收尾上次运行留下的任务并立刻试一轮等待中的那些。
+	n.TransferApp.Start(ctx)
+	n.TransferApp.Recover(ctx)
+
 	// 后台维护：目录 TTL、outbox 重发、空闲连接回收。
 	// 不用真实定时器驱动领域逻辑，而是让 App 暴露 Sweep() 由这里统一节拍。
 	stop := make(chan struct{})
@@ -283,6 +288,7 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 				peerApp.Sweep()
 				n.ChatApp.SweepOutbox(ctx)
 				n.GroupApp.SweepOutbox(ctx)
+				n.TransferApp.SweepWaiting(ctx)
 			}
 		}
 	}()

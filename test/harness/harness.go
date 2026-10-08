@@ -231,6 +231,7 @@ func (n *Node) Tick() {
 	n.PeerApp.Sweep()
 	n.ChatApp.SweepOutbox(n.ctx)
 	n.GroupApp.SweepOutbox(n.ctx)
+	n.TransferApp.SweepWaiting(n.ctx)
 	n.Conn.Sweep()
 }
 
