@@ -188,6 +188,39 @@ func TestSendFileReturnsTheRealJobID(t *testing.T) {
 	}
 }
 
+// 取消与立即重试的入参校验：空 job_id 必须在服务层就被挡住，
+// 不要下探到 app 层（那里会去查库，错误信息也会更晦涩）。
+func TestTransferServiceCancelAndRetryValidateInput(t *testing.T) {
+	svc := &TransferService{}
+	if err := svc.CancelTransfer(""); err == nil {
+		t.Error("空 job_id 必须被拒绝")
+	}
+	if err := svc.RetryTransfer(""); err == nil {
+		t.Error("空 job_id 必须被拒绝")
+	}
+}
+
+// 等待原因必须透给前端：界面靠它区分「等待对方上线」与「排队中」——
+// 两者在 status 上都是 idle/queued，光看状态分不出来。
+func TestTransferDTOCarriesWaitReason(t *testing.T) {
+	j := transfer.Job{
+		JobID: "j1", Status: transfer.StateIdle,
+		WaitReason: transfer.WaitPeerOffline, ChunkSize: 1024, FileSize: 2048, TotalChunks: 2,
+	}
+	if got := ToTransferDTO(j).WaitReason; got != string(transfer.WaitPeerOffline) {
+		t.Errorf("waitReason = %q, want %q", got, transfer.WaitPeerOffline)
+	}
+
+	// 非等待态不该带这个字段（omitempty 之外也要保证值是空串）
+	running := transfer.Job{
+		JobID: "j2", Status: transfer.StateTransferring,
+		ChunkSize: 1024, FileSize: 2048, TotalChunks: 2,
+	}
+	if got := ToTransferDTO(running).WaitReason; got != "" {
+		t.Errorf("非等待任务的 waitReason = %q，期望空串", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 图片消息：路径/字节两个入口 + 另存为
 // ---------------------------------------------------------------------------

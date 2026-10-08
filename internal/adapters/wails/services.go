@@ -625,6 +625,25 @@ func (s *TransferService) SendFile(peerID, path string) (string, error) {
 	return jobID, nil
 }
 
+// CancelTransfer 取消一条尚未开始的传输任务（等待中的那种）。
+//
+// 已在传输的任务会被 app 层拒绝：当前 sender 没有中断点，
+// 假取消（点了没反应，或传了一半留下半截临时文件）比拒绝更糟。
+func (s *TransferService) CancelTransfer(jobID string) error {
+	if jobID == "" {
+		return fmt.Errorf("请选择任务")
+	}
+	return s.d.Transfer.CancelJob(jobID)
+}
+
+// RetryTransfer 立刻重试一条等待中的传输任务（不等退避，也不要求对端在目录里在线）。
+func (s *TransferService) RetryTransfer(jobID string) error {
+	if jobID == "" {
+		return fmt.Errorf("请选择任务")
+	}
+	return s.d.Transfer.RetryNow(context.Background(), jobID)
+}
+
 // Reveal 在系统文件管理器中定位该路径（尽可能选中文件本身）。
 //
 // 三个平台语义不同：Windows 用 `explorer /select,`、macOS 用 `open -R`

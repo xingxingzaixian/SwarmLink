@@ -15,6 +15,16 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * CancelTransfer 取消一条尚未开始的传输任务（等待中的那种）。
+ * 
+ * 已在传输的任务会被 app 层拒绝：当前 sender 没有中断点，
+ * 假取消（点了没反应，或传了一半留下半截临时文件）比拒绝更糟。
+ */
+export function CancelTransfer(jobID: string): $CancellablePromise<void> {
+    return $Call.ByID(2371186184, jobID);
+}
+
+/**
  * ClearFinished 清空已结束的传输记录，返回删除条数。
  * 
  * 与启动时的自动清理共用 PurgeFinished：keep=0 表示一条都不保留，
@@ -39,6 +49,13 @@ export function Get(jobID: string): $CancellablePromise<$models.TransferDTO> {
  */
 export function List(): $CancellablePromise<$models.TransferDTO[] | null> {
     return $Call.ByID(3831912297);
+}
+
+/**
+ * RetryTransfer 立刻重试一条等待中的传输任务（不等退避，也不要求对端在目录里在线）。
+ */
+export function RetryTransfer(jobID: string): $CancellablePromise<void> {
+    return $Call.ByID(2255565650, jobID);
 }
 
 /**

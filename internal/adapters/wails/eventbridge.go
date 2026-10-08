@@ -29,8 +29,14 @@ const (
 	EventTransferProgress = "transfer:progress"
 	EventTransferDone     = "transfer:done"
 	EventTransferError    = "transfer:error"
-	EventNetError         = "net:error"
-	EventConfigChanged    = "config:changed"
+	// EventTransferState 是任务状态变化（载荷：jobId / status / reason）。
+	//
+	// 与 progress 分开的原因：progress 的语义是「进度在动」，而"进入等待
+	// 对方上线"恰恰是停下来了；用进度事件表达状态变化迟早会撞上
+	// 「已结束的任务不再接受进度更新」那条前端护栏。
+	EventTransferState = "transfer:state"
+	EventNetError      = "net:error"
+	EventConfigChanged = "config:changed"
 	// EventDebug 把原始总线事件整体送到前端「调试面板」。
 	//
 	// P2P 排障极难，这个面板的投入产出比极高（架构书 3.5）。
@@ -46,6 +52,13 @@ const (
 	//
 	// 载荷：{ args: []string, workingDir: string }
 	EventSecondInstanceLaunched = "second-instance:launched"
+	// EventSystemNotifyActivated 表示用户点击了一条系统通知。
+	//
+	// 与 EventFilesDropped 同类：它不是领域事件（点击发生在操作系统侧，
+	// 已经离开本进程的边界），因此同样由外壳直接发往前端，不过事件总线。
+	// 窗口已经由外壳叫到前台，这里只负责让前端切到对应会话。
+	// 载荷：{ convId: string }，取不到会话时为空串。
+	EventSystemNotifyActivated = "notify:activated"
 )
 
 // ProgressThrottle 是进度事件的最小间隔。
@@ -198,6 +211,19 @@ func (b *Bridge) Start() {
 		b.emitter.Emit(EventTransferError, map[string]any{
 			"jobId": ev.JobID,
 			"error": msg,
+		})
+	})
+
+	b.on(eventbus.TopicTransferState, func(p any) {
+		ev, ok := p.(eventbus.TransferState)
+		if !ok {
+			return
+		}
+		b.debug(eventbus.TopicTransferState, p)
+		b.emitter.Emit(EventTransferState, map[string]any{
+			"jobId":  ev.JobID,
+			"status": ev.To,
+			"reason": ev.Reason,
 		})
 	})
 

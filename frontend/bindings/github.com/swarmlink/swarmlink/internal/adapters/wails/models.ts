@@ -170,6 +170,12 @@ export interface TransferDTO {
     "totalChunks": number;
     "percent": number;
     "status": string;
+
+    /**
+     * WaitReason 非空表示这条任务在等（目前只有 "peer_offline"）。
+     * 界面靠它区分「等待对方上线」与「排队中」—— 两者在 status 上都是 idle/queued。
+     */
+    "waitReason"?: string;
     "error"?: string;
     "updatedAt": number;
 }
