@@ -1688,7 +1688,19 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 6. **`internal/app/transfer_app_test.go` 的 `stubTransferRepo` 与 `internal/adapters/wails/services_test.go` 的 `memTransferRepo` 都必须补 `ListByBatch`**：计划漏了后者的连带影响，第一次提交因此让 `internal/adapters/wails` 测试包编译失败（`go build` 通过、`go vet ./internal/...` 全红）。这条固化成了前置约定里的「验证必须跑全仓」。
 7. **补 `TestMigrateFromV3AppliesV4`**：计划只写了「v3→v4 迁移回归」为可选，实测发现退库并重放是唯一能证明「老库升级不炸」的路径，且必须先删索引才能 `DROP COLUMN`。
 
+### Task 1 复审回合（提交 `dd4ba86`、`9e2595e`）
+
+代码质量复审又找出两条，都由本次修复：
+
+8. **`placeholders(n<=0)` 返回空串是错的**：空串正是 `WaitNone`（用户取消过）的取值，`IN ('')` 会把**最不该被自动拉起**的那一类整批捞出来 —— 与它自己那句注释声称的"匹配不上任何行"正好相反。改成返回 `NULL`（`IN (NULL)` 的比较结果是 unknown，一行都匹配不上），并补 `TestPlaceholdersEmptyListMatchesNothing`。这条目前被 `startJobs` 里第三份手写守卫兜着，而 Task 2 正要删掉那份守卫 —— 属于"再晚一步就变成真 bug"。
+9. **排序承诺没兑现**：第二排序键 `job_id` 只给了确定性，没给语义。实测 20000 次 `time.Now()` 只有 2 个毫秒桶，而 `job_id` 是 UUIDv7（同毫秒随机尾）→ 同刻并列是常态，第二键实际成了主键。**改为按 `rel_path`（目录树）**：`ListByBatch` 用 `ORDER BY rel_path, job_id`，`ListWaiting` 用 `ORDER BY created_at, rel_path, job_id`（内存实现同一套比较）。计划原先写的"枚举顺序即发送顺序"这个承诺**作废**——它建立在"插入序稳定"这个不成立的假设上。
+10. **替身跟进空值守卫与本轮修的其它细节**：两个 `ListByBatch` 替身（`internal/app`、`internal/adapters/wails`）同样拒绝空 id；`mem.ListActive` 与 `sqlite.ListActive` 的排序键对齐（原来只有一边改了）；`ports.ErrEmptyBatchID` 让两实现的错误可判别；补了 `ListWaiting` 的顺序用例（删掉第二键时之前**全仓零失败**，覆盖缺口已补）。
+
 ### 尚未执行、但已挂上验收条件
 
 - **Task 7 必须同时收紧续传键**：`FindResumable(peer, file_hash)` → 批次内按 `rel_path`。否则一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。这是代码质量审查发现的既有语义在批次下被放大，必须在批次上线前解决。
-- **`ListRecent(50)` 与 `PurgeFinished(keep)` 的保留窗口以 job 计数**：一个 20000 文件的文件夹会把单文件历史挤出窗口。本次不动，Task 6 之后需要重新考虑保留策略。
+- **`ListRecent(50)` 与 `PurgeFinished(keep)` 的保留窗口以 job 计数**：一个 20000 文件的文件夹会把单文件历史挤出窗口。本次不动，Task 6 之后需要重新考虑保留策略。（复审 M-9）
+- **明知未修且不改**（复审 M-7 / M-8，记在这里以免下次又被重新提出）：
+  - 迁移能给 `is_dir` 加 `CHECK(is_dir IN (0,1))`，但 SQLite 无法 `ALTER` 加 CHECK（要重建整表），为它单独开一次迁移不值；驱动只写 0/1，读到别的值也是"非 0 即真"，方向安全。
+  - `PurgeFinished` 与 `ListActive`/`FindResumable` 各自硬编码状态集合（3 处），是本仓既有的"两处真相"；本次只收敛了"等待原因"这一处，状态那一处更严重但不在本功能范围内，属既有技术债。
+- **`transfer_waiting.go:348` 是第三份手写的成员判断**（`!= WaitPeerOffline`），Task 2 会把它换成 `AutoStartable()`；在 Task 2 落地前，"取消过的任务不会被拉起"这条红线是**两处守卫叠加**的结果（另两处是领域层方法与 SQL 的派生列表），不要误以为是单一真相已经生效。

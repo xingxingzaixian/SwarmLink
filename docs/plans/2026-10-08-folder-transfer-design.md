@@ -111,7 +111,9 @@ func (a *TransferApp) SendFolderAs(ctx context.Context, peerID identity.NodeID, 
 WaitQueued WaitReason = "batch_queued"
 ```
 
-`ListWaiting` 的 SQL 从 `wait_reason = ?` 改为 `wait_reason IN (?, ?)`（`transfers.go:118-122`），并把「只自动拉起」的守卫从「等于 `peer_offline`」改成「属于可自动拉起集合」，**取消态的 `None` 依旧被排除**。
+`ListWaiting` 的 SQL 从 `wait_reason = ?` 改为 `wait_reason IN (…)`（`transfers.go:118-122`），取值由 `transfer.AutoStartableReasons()` 派生（**不许在仓储里手写第二份清单**），并把「只自动拉起」的守卫改成「属于可自动拉起集合」，**取消态的 `None` 依旧被排除**。
+
+**批次的顺序取 `rel_path`（目录树顺序），不是枚举顺序、也不是创建顺序。** 原因被实测打脸过：批次是同一个紧循环里建的，`created_at` 以**毫秒**落库（20000 次 `time.Now()` 只有 2 个毫秒桶），而 `job_id` 是 UUIDv7（同毫秒内是随机尾）—— 按它们排出来的顺序虽然确定，却与用户看到的目录结构无关，等于"确定地无意义"。`rel_path` 升序是两端都能复现、且与界面语义一致的顺序：`ListByBatch` 用 `ORDER BY rel_path, job_id`，`ListWaiting` 用 `ORDER BY created_at, rel_path, job_id`（不同时刻的任务先来先传，同刻按目录树）。两种存储必须给出同一种顺序（内存实现用同一套比较函数）。
 
 **批次字段承接（易错点）**：`sendFile`（`transfer_app.go:304-320`）与 `newWaitingJob`（`transfer_waiting.go:143-163`）都是从零构造 Job 再 Upsert，会把 `BatchID/RelPath/IsDir` 抹成零值，表现为「传输列表里文件的相对路径没了、聚合进度算不出来」。处理方式与既有的 `RetryCount` 完全一致：同一处已经在读 `prev`，一并把这三个字段承接过来（抽一个 `carryOverBatch(prev, job)` 小函数，两条路径共用）。
 
