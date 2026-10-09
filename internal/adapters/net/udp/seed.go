@@ -81,6 +81,11 @@ func (p *Prober) Probe(ctx context.Context, addr peer.SeedAddr) (*peer.Announcem
 		if !identity.Verify(a.PublicKey, a.SigningBytes(), a.Sig) {
 			continue
 		}
+		// 身份自洽：与 broadcast.go 的 decodeAnnounce 同一口径（发现协议设计书 §15.1）。
+		// 种子是跨网段唯一的入口，这里放行一条自相矛盾的条目，被污染的不只是本机目录。
+		if identity.Fingerprint(a.PublicKey) != a.NodeID {
+			continue
+		}
 		a.Source = peer.SourceSeed
 		a.ObservedIP = addr.IP
 		return &a, nil

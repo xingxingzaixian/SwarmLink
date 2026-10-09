@@ -259,6 +259,17 @@ func (b *Broadcaster) decodeAnnounce(body []byte) (peer.Announcement, bool) {
 	if !identity.Verify(a.PublicKey, a.SigningBytes(), a.Sig) {
 		return peer.Announcement{}, false
 	}
+	// 身份自洽：公钥必须真的对应它声称的 node_id。
+	//
+	// 只验签是不够的 —— 签名与「报文自带的公钥」确实配套，所以任何人都能用自己
+	// 的一套密钥去声称别人的 node_id，把目录塞满自相矛盾的条目（发现协议设计书
+	// §15.1）。校验口径与 TCP 握手侧完全一致（handshake.go:141 与 :222）。
+	//
+	// ANNOUNCE 与 BYE 共用本函数，因此这一行同时挡住「伪造他人的下线通知」——
+	// 那本来是本函数注释里点名的、最不能漏掉验签的一条路径。
+	if identity.Fingerprint(a.PublicKey) != a.NodeID {
+		return peer.Announcement{}, false
+	}
 	return a, true
 }
 
