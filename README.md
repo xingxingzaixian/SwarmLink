@@ -39,12 +39,20 @@ L1 出站适配器   adapters/{net/{tcp,udp},store/{sqlite,mem},config,filesink,
 ```bash
 make build              # 编译后端
 make test               # 全部测试
-make lint-arch          # 架构红线
+make lint-arch          # 架构红线（+ gofmt 格式闸门）
 make test-e2e           # 端到端（含跨网段收敛）
 make test-scale         # 20 节点规模验证
 make test-fuzz          # 协议畸形输入
 make ci                 # 等价于 CI 的一条命令
 ```
+
+> **Windows 上通常没有 `make`**（本仓开发机实测就没有），而 `make` 只是这些命令的
+> 一层包装。等价做法：
+>
+> - **测试**：直接 `go test ./...`（不带 `make` 也能跑）。三条架构红线与 gofmt 闸门
+>   就在 `internal/archtest` 里，随 `go test ./...` 自动执行 —— 它们不依赖 `make`，
+>   这正是当初把它们从 Makefile 里搬出来的原因。
+> - **构建 / 打包**：用 [`scripts/pack.ps1`](scripts/pack.ps1)，见 §2.3。
 
 ### 2.2 部署前置条件自检（**部署前必做**）
 
@@ -54,9 +62,15 @@ make ci                 # 等价于 CI 的一条命令
 
 ### 2.3 桌面 GUI
 
-前置：**Go ≥ 1.25**、**Node ≥ 24**（见 [`frontend/.nvmrc`](frontend/.nvmrc)，
+前置：**Go ≥ 1.26**、**Node ≥ 24**（见 [`frontend/.nvmrc`](frontend/.nvmrc)，
 CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.24**。
 
+> Go 的下限以 `go.mod` 的 `go 1.26.0` 为准，**不是**更早文档里写的 1.25。
+> 用 1.25 也能编，但那会触发 `GOTOOLCHAIN=auto` 去下载第二份工具链，进而出现
+> `GOROOT` 与实际使用的 go 不一致的经典报错
+> （`compile: version "go1.25.5" does not match go tool version "go1.26.3"`）——
+> `scripts/pack.ps1` 里有一整段专门处理这个坑的代码。
+>
 > Node 的下限是 24 而不是 20：`npm run test` 直接执行 `.ts`
 > （`node --test "tests/**/*.test.ts"`），依赖 Node 的类型擦除，而类型擦除要到
 > Node 23.6 才默认开启。
@@ -66,8 +80,47 @@ make gui            # = 生成绑定 + wails3 build → bin/SwarmLink
 ./bin/SwarmLink      # 运行（会打开窗口）
 
 make gui-dev         # 开发模式（改 Go/前端都热重载）
-wails3 package -tags wails   # 打包成 .app / .dmg（分发用）
+make package          # 出安装包（Windows → NSIS 安装器）
 ```
+
+#### 2.3.1 没有 `make` 时（Windows 的常态）
+
+用 [`scripts/pack.ps1`](scripts/pack.ps1)：它做的是同一件事，并强制导出
+`EXTRA_TAGS=wails` —— 漏了那个 tag，产物会是一个 2.4MB 的占位程序，**却照样能打包
+成安装包并「构建成功」**，是本项目最隐蔽的失败模式（脚本末尾会按体积再挡一次）。
+
+```powershell
+.\scripts\pack.ps1 windows build      # 只出 bin/SwarmLink.exe
+.\scripts\pack.ps1 windows package    # 出 NSIS 安装包（需要 makensis）
+```
+
+开发模式另有启动器：
+
+```powershell
+.\start_dev.bat                       # 默认端口 9245（参数会透传给 wails3 dev）
+.\start_dev.bat -port 9250
+```
+
+> **`pack.ps1` 首次运行常被执行策略拦住**，报
+> `未对文件进行数字签名`。本脚本没有「来自互联网」标记，所以
+> `Unblock-File` **解决不了**它。用只对这一次调用生效的方式跑：
+>
+> ```powershell
+> powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\pack.ps1 windows build
+> ```
+>
+> 或者在当前 shell 里临时放宽（关掉窗口即失效，不写注册表）：
+>
+> ```powershell
+> Set-ExecutionPolicy -Scope Process Bypass
+> .\scripts\pack.ps1 windows build
+> ```
+>
+> 不要用 `-Scope CurrentUser Unrestricted`：它是持久的，且比 `RemoteSigned` 弱。
+>
+> 若本机 `CurrentUser` 已是 `RemoteSigned`（允许本地未签名脚本）却仍被拦，说明
+> **你所在的那个 shell 的有效策略更严**：在同一 shell 里跑
+> `Get-ExecutionPolicy -List` 看是哪个作用域把它收紧了。
 
 手工等价命令：
 
@@ -196,12 +249,16 @@ docs/adr/        11 条架构决策记录
 
 **当前限制**
 
-- 传输页用「路径输入框」而非原生文件选择对话框（Wails 的 Dialog 服务尚未接入）；
+- 原生文件/文件夹/图片选择**已经接入**（`frontend/src/api/dialog.ts` 直接用
+  `@wailsio/runtime` 的 `Dialogs.OpenFile` / `Dialogs.SaveFile`）。只有在没有原生
+  对话框的环境（浏览器预览模式）才降级：文件给一个路径输入框，文件夹与图片只给提示；
 - 空闲回收后的「连接不再可用」不触发自动重连，下次发消息时才按需拨号（符合 ADR-009，但首条消息有 +1 RTT）；
 - 群聊离线成员不暂存消息（诚实取舍，UI 明确标注）；
 - 未接入混沌测试（随机杀连接）的自动化 CI 任务；
-- 分发包（`.app` / `.dmg`）需自行执行 `wails3 package -tags wails`；
-  `build/` 内的图标与 DMG 资源仍是 Wails 模板默认值 —— 替换 `build/appicon.png` 后重新 `make gui` 即换成自己的图标。
+- 分发包需自行触发：`make package`；Windows 上没有 `make` 时用
+  `.\scripts\pack.ps1 windows package`（需要 NSIS 的 `makensis`，脚本会去标准安装位置找它）。
+  三平台产物由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 在对应 runner 上出；
+  `build/` 内的图标与 DMG 资源仍是 Wails 模板默认值 —— 替换 `build/appicon.png` 后重新构建即换成自己的图标。
 
 **v1.1 计划（接缝已留）**
 
