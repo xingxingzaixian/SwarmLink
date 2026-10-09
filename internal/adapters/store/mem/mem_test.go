@@ -1,6 +1,7 @@
 package mem
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -316,6 +317,46 @@ func TestListByBatchFiltersAndKeepsFinished(t *testing.T) {
 	// 空 batch_id 必须报错：否则 CancelBatch("") 会把本机全部单文件传输一起停掉
 	if _, err := m.ListByBatch(""); err == nil {
 		t.Fatal("空 batch_id 必须报错")
+	} else if !errors.Is(err, ports.ErrEmptyBatchID) {
+		t.Errorf("错误应可用 errors.Is(ports.ErrEmptyBatchID) 判别（与 sqlite 实现一致），得到 %v", err)
+	}
+}
+
+// 同刻并列时按目录树排（镜像 sqlite 侧），并顺带钉住 ListActive 用的同一套顺序。
+//
+// job_id 顺序与 rel_path 顺序刻意【相反】：同向的话删掉第二键也照样绿，
+// 那等于没有测试 —— 本用例第一版正是这么写错的（同刻数据全取 a、z）。
+func TestListWaitingAndActiveOrderByTreePathWhenSameTick(t *testing.T) {
+	m := NewMessages(clock.New())
+	peerID := mkID(11)
+	same := time.Unix(11, 0)
+	for _, spec := range []struct{ id, rel string }{
+		{"j1", "照片/z.txt"}, // job_id 更小，树序在后
+		{"j2", "照片/a.txt"}, // job_id 更大，树序在前
+	} {
+		j := newJob(spec.id, peerID, "hash-"+spec.id)
+		j.Status, j.WaitReason, j.Direction = transfer.StateIdle, transfer.WaitQueued, transfer.DirectionSend
+		j.BatchID, j.RelPath = "b-order", spec.rel
+		j.CreatedAt, j.UpdatedAt = same, same
+		if err := m.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waiting, err := m.ListWaiting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(waiting) != 2 || waiting[0].JobID != "j2" || waiting[1].JobID != "j1" {
+		t.Fatalf("ListWaiting 顺序 = %v，期望 j2,j1（同刻按目录树）", jobIDsOf(waiting))
+	}
+
+	active, err := m.ListActive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 2 || active[0].JobID != "j2" || active[1].JobID != "j1" {
+		t.Fatalf("ListActive 顺序 = %v，期望与 ListWaiting 同一套顺序 j2,j1", jobIDsOf(active))
 	}
 }
 

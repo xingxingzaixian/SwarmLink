@@ -109,7 +109,7 @@ func (t *Transfers) SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed 
 func (t *Transfers) ListActive() ([]transfer.Job, error) {
 	rows, err := t.db.Query(`
 SELECT ` + transferColumns + ` FROM transfer_jobs
-WHERE status NOT IN ('done','cancelled') ORDER BY created_at, job_id`)
+WHERE status NOT IN ('done','cancelled') ORDER BY created_at, rel_path, job_id`)
 	if err != nil {
 		return nil, err
 	}

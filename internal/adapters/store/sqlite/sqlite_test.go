@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -491,8 +492,14 @@ func TestListByBatchRejectsEmptyID(t *testing.T) {
 	if err := tr.UpsertJob(single); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := tr.ListByBatch(""); err == nil {
+	got, err := tr.ListByBatch("")
+	if err == nil {
 		t.Fatalf("空 batch_id 必须报错，实际返回 %d 条", len(got))
+	}
+	// 错误必须可判别：上层要把「调用方传了空 id」这类编程错误与存储故障分开，
+	// 而两个存储实现也必须给出同一种错误（否则只能比字符串）。
+	if !errors.Is(err, ports.ErrEmptyBatchID) {
+		t.Errorf("错误应可用 errors.Is(ports.ErrEmptyBatchID) 判别，得到 %v", err)
 	}
 }
 
@@ -534,8 +541,10 @@ func TestListByBatchOrdersByRelPath(t *testing.T) {
 
 // 队列顺序：不同时刻按时间（先来先传），同一毫秒内按目录树。
 //
-// 这一条是补覆盖缺口的：把 ListWaiting 的 rel_path/job_id 第二键删掉时，
-// 之前全仓测试【一条都不会红】—— 而队列顺序决定了用户先收到哪个文件。
+// 【断言必须能证伪】：同刻那两个任务的 job_id 顺序与 rel_path 顺序刻意【相反】
+// （j1→z、j2→a），因此把 ORDER BY 里的 rel_path 去掉后，返回顺序会变成
+// j1,j2 —— 用例就会红。若两者同向（例如都给 a、z），删掉 rel_path 也照样绿，
+// 那就等于没有测试（这是本用例第一版真实犯过的错）。
 func TestListWaitingOrdersByTimeThenTreePath(t *testing.T) {
 	db, _ := openTest(t)
 	tr := NewTransfers(db)
@@ -546,8 +555,8 @@ func TestListWaitingOrdersByTimeThenTreePath(t *testing.T) {
 		rel string
 		at  time.Time
 	}{
-		{"j2", "照片/z.txt", tick},
-		{"j1", "照片/a.txt", tick},
+		{"j1", "照片/z.txt", tick}, // job_id 更小，但树序在后
+		{"j2", "照片/a.txt", tick}, // job_id 更大，但树序在前
 		{"j0", "照片/0-更早.txt", tick.Add(-time.Second)},
 	} {
 		if err := tr.UpsertJob(transfer.Job{
@@ -563,10 +572,22 @@ func TestListWaitingOrdersByTimeThenTreePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"j0", "j1", "j2"}
+	want := []string{"j0", "j2", "j1"}
 	for i, id := range want {
 		if i >= len(got) || got[i].JobID != id {
 			t.Fatalf("队列顺序 = %v，期望 %v（先按时间，同刻按目录树）", jobIDs(got), want)
+		}
+	}
+
+	// ListActive 必须给出同一套顺序：它与内存实现（同一个比较函数）以及
+	// ListWaiting（同一批排序键）的一致性，是「跨存储行为不分叉」的一部分。
+	active, err := tr.ListActive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, id := range want {
+		if i >= len(active) || active[i].JobID != id {
+			t.Fatalf("ListActive 顺序 = %v，期望与 ListWaiting 相同 %v", jobIDs(active), want)
 		}
 	}
 }
