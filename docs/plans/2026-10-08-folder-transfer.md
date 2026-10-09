@@ -939,7 +939,9 @@ func (a *TransferApp) SendFolderAs(ctx context.Context, peerID identity.NodeID, 
 	//    - 符号链接：d.Type()&fs.ModeSymlink != 0 → skipped++
 	//    - 超过 MaxFolderEntries → 直接返回错误（一条任务都不建）
 	//    - 空目录 → 追加一条 isDir 条目
-	//    - 目录为空 → 为根目录本身追加一条 isDir 条目
+	//    - 目录为空 → 为根目录本身追加一条 isDir 条目（rel_path 只有一段 = 根名）
+	//    - rel_path 一律用 filepath.ToSlash 生成（接收端把 \ 也当分隔符，
+	//      不统一的话 POSIX 上名字里带反斜杠的文件两端会对不上）
 	// 4) 为每条条目建一个轻量 job（照 newWaitingJob 的字段，改成 WaitQueued，
 	//    RelPath/BatchID/IsDir 填好），UpsertJob 落库
 	// 5) a.startJobs(ctx, jobs) 立刻试第一轮，不让用户等下一个 1 秒节拍
@@ -1058,6 +1060,7 @@ go test ./internal/app/ -run "TestHandleFileMetaWithRelPath|TestHandleFileMetaDi
 ```
 
 - 落库的 `job` 填 `BatchID/RelPath/IsDir`；`IsDir` 时 `Bitmap` 长度为 0，`handle.TempPath` 为空 → 不要调用 `OpenTemp`（现有代码在 `recvJob` 里打开临时文件，需按 `IsDir` 分支跳过）。
+- **单段 `rel_path`（空文件夹的根目录条目）必须走 `IsDir` 分支**：`Sink.CreateIn` 会在单段时返回**分配后的**根目录（可能已被改名），而不是让调用方自己拼；`HandleFileMeta` 侧要保证这种 META 的 `IsDir` 为真且 `total_chunks == 0`。
 - **续传键必须按批次收紧**（本任务的关键修正）：把 `FindResumable(peerID, fileHash)` 升为 `FindResumable(peerID, fileHash, relPath)` —— `relPath == ""` 时保持单文件的旧语义（`(peer, hash)`），非空时按 `rel_path` 区分。端口、sqlite、mem 三处同步改，并补一条「同 hash 不同 rel_path 互不命中」的仓储用例。不修的话，一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。
 - `IsDir` 条目**显式不进**续传查找（它没有文件内容，`FileID` 为空）：现在是靠 `existing.TempPath != ""` 这个次生条件偶然挡住的，不要依赖它。
 - `HandleFileChunk`：`IsDir` 的接收任务直接 `return nil`（防御性，正常不会收到）。
@@ -1697,6 +1700,21 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 10. **替身跟进空值守卫与本轮修的其它细节**：两个 `ListByBatch` 替身（`internal/app`、`internal/adapters/wails`）同样拒绝空 id；`mem.ListActive` 与 `sqlite.ListActive` 的排序键对齐（原来只有一边改了）；`ports.ErrEmptyBatchID` 让两实现的错误可判别（并补了 `errors.Is` 断言 —— 原来只断言 `err != nil`，可判别性没被钉住）。
 11. **排序用例第一版是假绿的，已重写并做变异验证**：`TestListWaitingOrdersByTimeThenTreePath` 最初给同刻的两条任务取了 `照片/a.txt` / `照片/z.txt`，而它们与 `job_id` 顺序**恰好同向** —— 删掉 `rel_path` 排序键照样通过，等于没有测试。现在同刻数据刻意反向（`j1→z`、`j2→a`），并给内存实现补了同刻并列的用例、给两边的 `ListActive` 也加了同序断言。**变异验证结果**：把 sqlite `ListWaiting` 的 `rel_path` 去掉 → 红；把 `ListActive` 的去掉 → 红；把内存 `sortJobsByCreated` 的第二键去掉 → 红。这条教训值得记住：**同刻数据如果与主键同向，第二排序键就等于没测**。
 
+### Task 2–5 审查回合（提交 `fb82faf`）
+
+一次批次审查（规格 + 质量）在 Task 5 抓到一个 **Critical**，另有三条 Important，都已修：
+
+12. **`CreateIn` 对单段 `rel_path` 越界 panic**（`segs[1:len(segs)-1]` 即 `segs[1:0]`）：而这条输入正是我们自己的发送端在**空文件夹**时必然发出的（设计 3.3）。更糟的是 panic 发生在 `s.mu.Lock()` 之后、手写 `Unlock` 之前 —— 锁永久占用，之后每条接收任务都卡死（审查实测 10 分钟超时），而生产代码里没有任何 `recover`，帧处理器裸跑在 session goroutine 里。修法：路径分配收进一个只用 `defer` 解锁的 `allocLocked`，并给单段加显式分支（`IsDir` → 返回**分配后的**根目录；文件 → 明确报错）。补了 `TestCreateInSingleSegmentIsRootDirOnly`。
+13. **`AdoptRoot` 不校验路径**：认领接收目录之外的目录会让整批文件写到下载目录之外（审查实测越界成功）。当时唯一的拦截是 Task 9 里一行方向过滤 —— 那是把安全性寄托在"调用方会传对"。修法：Sink 内部只认领接收目录之内的路径，越界忽略（后果退化成重新分配一个根）。
+14. **同批首段名被静默忽略**：先 `甲/a.txt` 分配根 `甲`，再来 `乙/b.txt` 会落到 `甲/b.txt`。修法：记住已分配根的首段名，不一致直接拒绝。
+15. **`RetryNow` 是第四份手写的成员判断**（`!= WaitPeerOffline`），导致批次里"排队中"的任务点「立即重试」会报"该任务不在等待中"。已改为 `!AutoStartable()`。
+16. 顺带：`CreateIn` 空 batchID 改用 `ports.ErrEmptyBatchID`（可判别，与 Task 1 刚立的规范一致）；`relpath.go` 里那条不可达分支改成防御性措辞（原来把不可达说成现实风险）；`dto.go` 里"目前只有 peer_offline"的过期注释已更新。
+
+**审查确认的两处"计划自身写错、实现改对"**：
+- 计划 Step 3 用 `strings.FieldsFunc` 切分，但 Step 1 的拒绝集要求 `照片//a.txt` 被拒 —— `FieldsFunc` 会折叠连续分隔符，两者互相矛盾。实现改用 `Split` 让计划自洽。
+- 计划断言 `C:\Windows\evil.dll` 会被 `SanitizeFileName` 拒 —— **它不检查冒号**，照计划写会在 Linux 上真建出名为 `C:` 的目录。实现补了显式冒号检查。
+- 计划把"单段超长"列进拒绝集，而 `SanitizeFileName` 的既有契约是**截断**；实现继承截断（两处规则只能有一份），并单独出用例。
+
 ### 尚未执行、但已挂上验收条件
 
 - **Task 7 必须同时收紧续传键**：`FindResumable(peer, file_hash)` → 批次内按 `rel_path`。否则一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。这是代码质量审查发现的既有语义在批次下被放大，必须在批次上线前解决。
@@ -1704,4 +1722,5 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 - **明知未修且不改**（复审 M-7 / M-8，记在这里以免下次又被重新提出）：
   - 迁移能给 `is_dir` 加 `CHECK(is_dir IN (0,1))`，但 SQLite 无法 `ALTER` 加 CHECK（要重建整表），为它单独开一次迁移不值；驱动只写 0/1，读到别的值也是"非 0 即真"，方向安全。
   - `PurgeFinished` 与 `ListActive`/`FindResumable` 各自硬编码状态集合（3 处），是本仓既有的"两处真相"；本次只收敛了"等待原因"这一处，状态那一处更严重但不在本功能范围内，属既有技术债。
-- **`transfer_waiting.go:348` 是第三份手写的成员判断**（`!= WaitPeerOffline`），Task 2 会把它换成 `AutoStartable()`；在 Task 2 落地前，"取消过的任务不会被拉起"这条红线是**两处守卫叠加**的结果（另两处是领域层方法与 SQL 的派生列表），不要误以为是单一真相已经生效。
+- **`transfer_waiting.go:348` 是第三份手写的成员判断**（`!= WaitPeerOffline`），Task 2 会把它换成 `AutoStartable()`；在 Task 2 落地前，"取消过的任务不会被拉起"这条红线是**两处守卫叠加**的结果（另两处是领域层方法与 SQL 的派生列表），不要误以为是单一真相已经生效。（Task 2 已落地；`RetryNow` 里那第四处也在 `fb82faf` 一并收敛。）
+- **`rel_path` 的总长度上限未实现**：设计 3.4 提过"总长度超过平台上限"，目前只实现了层数上限（32 层）。审查实测在 Windows 下 32 层 × 200 字节可正常创建（Go 的 `fixLongPath` 兜住），当前影响有限；若真遇到平台长路径限制，再补总长判断。
