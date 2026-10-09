@@ -173,8 +173,17 @@ const folderStatus = computed(() => {
   return `已完成 ${p.done}/${p.total}`
 })
 
-/** 还有没结束的任务才给「取消全部」。 */
-const canCancelFolder = computed(() => progress.value.total > 0 && !progress.value.allFinished)
+/**
+ * 还有没结束的任务、且这一批是【我们发出去的】才给「取消全部」。
+ *
+ * 两个条件缺一不可：
+ *   - 全结束了就没什么可取消的；
+ *   - 收到的文件夹没有「让对方停下」这种协议（CancelJob 只接受 send 方向），
+ *     给一个点了必然报错的按钮，比不给按钮更糟 —— 用户会以为是自己点错了。
+ */
+const canCancelFolder = computed(
+  () => props.out && progress.value.total > 0 && !progress.value.allFinished
+)
 
 const ui = useUiStore()
 

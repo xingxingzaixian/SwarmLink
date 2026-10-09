@@ -106,6 +106,34 @@ export function createMockApi(): SwarmApi {
     sentAt: now - 34 * 60_000
   })
 
+  /**
+   * 预置一个「已发出的文件夹批次」：一条卡片 + 四条任务。
+   *
+   * 为什么必须在预览里预置：浏览器里没有原生对话框，pickFolder 永远不可用，
+   * 于是 sendFolder 这条路【点不出来】—— 不预置的话，文件夹卡片在预览模式下
+   * 根本渲染不到，走查等于没走（与预置那条入站图片消息是同一个理由）。
+   *
+   * 四条任务刻意摆成四种形态（完成 / 失败 / 空目录 / 排队中），因为卡片上
+   * 最容易写错的就是这几种结局的文案与配色。
+   */
+  const SEED_BATCH = 'mock-batch-seed'
+  push(convAlice, {
+    msgId: 'seed-folder-1',
+    convId: convAlice,
+    senderId: self.nodeId,
+    direction: 'out',
+    content: JSON.stringify({
+      batch_id: SEED_BATCH,
+      folder_name: '照片',
+      file_count: 4,
+      total_size: 15 * 1024 * 1024,
+      skipped: 1
+    }),
+    msgType: 'folder',
+    state: 'delivered',
+    sentAt: now - 8 * 60_000
+  })
+
   const jobs: TransferJob[] = [
     {
       jobId: 'mock-done-1',
@@ -120,6 +148,69 @@ export function createMockApi(): SwarmApi {
       percent: 100,
       status: 'done',
       updatedAt: now - 600_000
+    },
+    {
+      jobId: `${SEED_BATCH}-0`,
+      peerId: ALICE,
+      fileName: 'a.jpg',
+      fileSize: 3 * 1024 * 1024,
+      direction: 'send',
+      localPath: '',
+      completed: 6,
+      totalChunks: 6,
+      percent: 100,
+      status: 'done',
+      batchId: SEED_BATCH,
+      relPath: '照片/2024/a.jpg',
+      updatedAt: now - 7 * 60_000
+    },
+    {
+      jobId: `${SEED_BATCH}-1`,
+      peerId: ALICE,
+      fileName: 'b.jpg',
+      fileSize: 2 * 1024 * 1024,
+      direction: 'send',
+      localPath: '',
+      completed: 0,
+      totalChunks: 4,
+      percent: 0,
+      status: 'failed',
+      error: '文件已被删除或移动',
+      batchId: SEED_BATCH,
+      relPath: '照片/2024/b.jpg',
+      updatedAt: now - 6 * 60_000
+    },
+    {
+      jobId: `${SEED_BATCH}-2`,
+      peerId: ALICE,
+      fileName: '空目录',
+      fileSize: 0,
+      direction: 'send',
+      localPath: '',
+      completed: 0,
+      totalChunks: 0,
+      percent: 100,
+      status: 'done',
+      batchId: SEED_BATCH,
+      relPath: '照片/空目录',
+      isDir: true,
+      updatedAt: now - 6 * 60_000
+    },
+    {
+      jobId: `${SEED_BATCH}-3`,
+      peerId: ALICE,
+      fileName: '报告.pdf',
+      fileSize: 12 * 1024 * 1024,
+      direction: 'send',
+      localPath: '',
+      completed: 0,
+      totalChunks: 24,
+      percent: 0,
+      status: 'idle',
+      waitReason: 'batch_queued',
+      batchId: SEED_BATCH,
+      relPath: '照片/报告.pdf',
+      updatedAt: now - 5 * 60_000
     }
   ]
 
