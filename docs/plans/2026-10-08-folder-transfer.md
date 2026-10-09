@@ -1694,7 +1694,8 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 
 8. **`placeholders(n<=0)` 返回空串是错的**：空串正是 `WaitNone`（用户取消过）的取值，`IN ('')` 会把**最不该被自动拉起**的那一类整批捞出来 —— 与它自己那句注释声称的"匹配不上任何行"正好相反。改成返回 `NULL`（`IN (NULL)` 的比较结果是 unknown，一行都匹配不上），并补 `TestPlaceholdersEmptyListMatchesNothing`。这条目前被 `startJobs` 里第三份手写守卫兜着，而 Task 2 正要删掉那份守卫 —— 属于"再晚一步就变成真 bug"。
 9. **排序承诺没兑现**：第二排序键 `job_id` 只给了确定性，没给语义。实测 20000 次 `time.Now()` 只有 2 个毫秒桶，而 `job_id` 是 UUIDv7（同毫秒随机尾）→ 同刻并列是常态，第二键实际成了主键。**改为按 `rel_path`（目录树）**：`ListByBatch` 用 `ORDER BY rel_path, job_id`，`ListWaiting` 用 `ORDER BY created_at, rel_path, job_id`（内存实现同一套比较）。计划原先写的"枚举顺序即发送顺序"这个承诺**作废**——它建立在"插入序稳定"这个不成立的假设上。
-10. **替身跟进空值守卫与本轮修的其它细节**：两个 `ListByBatch` 替身（`internal/app`、`internal/adapters/wails`）同样拒绝空 id；`mem.ListActive` 与 `sqlite.ListActive` 的排序键对齐（原来只有一边改了）；`ports.ErrEmptyBatchID` 让两实现的错误可判别；补了 `ListWaiting` 的顺序用例（删掉第二键时之前**全仓零失败**，覆盖缺口已补）。
+10. **替身跟进空值守卫与本轮修的其它细节**：两个 `ListByBatch` 替身（`internal/app`、`internal/adapters/wails`）同样拒绝空 id；`mem.ListActive` 与 `sqlite.ListActive` 的排序键对齐（原来只有一边改了）；`ports.ErrEmptyBatchID` 让两实现的错误可判别（并补了 `errors.Is` 断言 —— 原来只断言 `err != nil`，可判别性没被钉住）。
+11. **排序用例第一版是假绿的，已重写并做变异验证**：`TestListWaitingOrdersByTimeThenTreePath` 最初给同刻的两条任务取了 `照片/a.txt` / `照片/z.txt`，而它们与 `job_id` 顺序**恰好同向** —— 删掉 `rel_path` 排序键照样通过，等于没有测试。现在同刻数据刻意反向（`j1→z`、`j2→a`），并给内存实现补了同刻并列的用例、给两边的 `ListActive` 也加了同序断言。**变异验证结果**：把 sqlite `ListWaiting` 的 `rel_path` 去掉 → 红；把 `ListActive` 的去掉 → 红；把内存 `sortJobsByCreated` 的第二键去掉 → 红。这条教训值得记住：**同刻数据如果与主键同向，第二排序键就等于没测**。
 
 ### 尚未执行、但已挂上验收条件
 
