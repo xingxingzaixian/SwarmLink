@@ -22,8 +22,13 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,11 +92,78 @@ var singleInstanceKey = [32]byte{
 	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
 }
 
+// setupFileLog 让日志同时落盘，返回日志文件（失败时返回 nil 与原因）。
+//
+// 为什么这不是锦上添花：产物以 -ldflags "-H windowsgui" 链接，**没有控制台**，
+// 任何发生在窗口出现之前的失败都只会写进一个没人接的句柄。用户看到的现象就是
+// 「双击了没反应，进程也没有」—— 本次事故正是如此：bootstrap 报
+// `sqlite: attempt to write a readonly database`，Wails 报 WebView2 控制器
+// 创建失败，两条信息全部丢失，只能靠事后用重定向复现才看到。
+//
+// 用标准库 log.SetOutput 而不是只重定向 os.Stderr：Wails 与 WebView2 的报错
+// 和完整堆栈走的是标准库 log，改 os.Stderr 抓不到它们。同时保留原 stderr，
+// 所以开发构建（带控制台）依旧能在终端里看到同样的内容。
+func setupFileLog() (*os.File, error) {
+	dir, err := config.Dir()
+	if err != nil {
+		return nil, err
+	}
+	logDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(logDir, "swarmlink.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	return f, nil
+}
+
+// reportFatalStartup 在窗口出现之前就把失败讲清楚：写日志 + 弹原生对话框。
+//
+// 这里兑现的是 main 里那句注释的承诺（「GUI 必须明确报错而不是静默半死」）。
+// 原实现只有 slog.Error + os.Exit(1)：在 -H windowsgui 的产物上，slog 的 handler
+// 绑在 os.Stderr 上，等于把错误丢进黑洞 —— 注释承诺的事一件也没做。
+func reportFatalStartup(logFile *os.File, logErr error, cause error) {
+	dir, _ := config.Dir()
+	logPath := filepath.Join(dir, "logs", "swarmlink.log")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "SwarmLink 启动失败。\n\n原因：\n%v\n\n", cause)
+	fmt.Fprintf(&b, "日志文件：%s\n", logPath)
+	fmt.Fprintf(&b, "配置目录：%s\n", dir)
+	if logErr != nil {
+		fmt.Fprintf(&b, "\n（日志文件本身也写不了：%v）\n", logErr)
+	}
+	fmt.Fprintf(&b, "\n排查提示：日志里有完整的失败链路。若日志显示数据库无法写入，\n"+
+		"请检查安全软件（火绒 / 亚信等）是否拦住了本程序对配置目录的写入；\n"+
+		"若显示 WebView2 控制器创建失败，通常是上一次的残留进程占着\n"+
+		"%%APPDATA%%\\SwarmLink.exe\\EBWebView，注销后重开即可。")
+
+	slog.Error("后端启动失败", "err", cause)
+	if logFile != nil {
+		fmt.Fprintf(logFile, "%s ERROR 后端启动失败 err=%v\n",
+			time.Now().Format(time.RFC3339), cause)
+	}
+	// 自动化/脚本场景下模态对话框会把进程挂住，给一个显式开关。
+	if os.Getenv("SWARMLINK_NO_STARTUP_DIALOG") == "1" {
+		return
+	}
+	showFatalDialog("SwarmLink 启动失败", b.String())
+}
+
 func main() {
+	logFile, logErr := setupFileLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+
 	// 1. 先起后端：网络/存储起不来时，GUI 必须明确报错而不是静默半死。
 	node, err := bootstrap.Start(context.Background(), bootstrap.Options{Level: slog.LevelInfo})
 	if err != nil {
-		slog.Error("后端启动失败", "err", err)
+		reportFatalStartup(logFile, logErr, err)
 		os.Exit(1)
 	}
 	defer node.Close()

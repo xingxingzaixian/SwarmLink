@@ -49,7 +49,10 @@ func Open(path string) (*DB, error) {
 
 	if err := sqldb.Ping(); err != nil {
 		_ = sqldb.Close()
-		return nil, fmt.Errorf("sqlite: ping: %w", err)
+		// 必须带上路径：ping 失败最常见的原因是「这个文件写不了」，
+		// 而在 Windows 上那既可能是权限、也可能是安全软件拦截或文件被占用。
+		// 不带路径的错误信息让这几种情况完全无法区分（本次事故里就吃了这个亏）。
+		return nil, fmt.Errorf("sqlite: ping %s: %w", path, err)
 	}
 
 	d := &DB{db: sqldb, path: path}
