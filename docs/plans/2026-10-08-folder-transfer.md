@@ -1669,7 +1669,7 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 - [ ] 取消中断点 + `CancelBatch`（取消绝不能退化成等待）
 - [ ] `Recover` 认领批次根目录
 - [ ] `MsgTypeFolder` + 服务方法与绑定
-- [ ] 前端聚合卡片、目录入口、逐文件传输行与整体取消
+- [x] 前端聚合卡片、目录入口、逐文件传输行与整体取消（手工验收见 T14，尚未做）
 - [ ] 批次内续传键按 `rel_path` 收紧（Task 7，防同 hash 文件互相覆盖）
 - [ ] 文档从不做清单移到已实现
 
@@ -1731,3 +1731,16 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
   - `PurgeFinished` 与 `ListActive`/`FindResumable` 各自硬编码状态集合（3 处），是本仓既有的"两处真相"；本次只收敛了"等待原因"这一处，状态那一处更严重但不在本功能范围内，属既有技术债。
 - **`transfer_waiting.go:348` 是第三份手写的成员判断**（`!= WaitPeerOffline`），Task 2 会把它换成 `AutoStartable()`；在 Task 2 落地前，"取消过的任务不会被拉起"这条红线是**两处守卫叠加**的结果（另两处是领域层方法与 SQL 的派生列表），不要误以为是单一真相已经生效。（Task 2 已落地；`RetryNow` 里那第四处也在 `fb82faf` 一并收敛。）
 - **`rel_path` 的总长度上限未实现**：设计 3.4 提过"总长度超过平台上限"，目前只实现了层数上限（32 层）。审查实测在 Windows 下 32 层 × 200 字节可正常创建（Go 的 `fixLongPath` 兜住），当前影响有限；若真遇到平台长路径限制，再补总长判断。
+
+### Task 12–13 实施记录（提交 `0dd90e9`、`ca1caae`、`ed9f877`）
+
+21. **`tsconfig.json` 打开 `allowImportingTsExtensions`**（计划没提）。原因链：`npm run test` 用 Node 内置运行器直接加载 `.ts`，而 Node 的 ESM 解析**不补扩展名** —— 被测试直接引入的 src 模块（`utils/batch.ts` 引入 `utils/format`）必须写成 `'./format.ts'`。既有约定的代价写在 `tests/delivery.test.ts` 的注释里（"import 必须写全扩展名"），但那条约定此前只约束测试文件本身；这次是**被测的 src 模块之间**需要它。不开这一项 `vue-tsc` 报 TS5097，开了对 Vite 无影响（实测 `npm run build` 通过）。
+22. **`utils/batch.ts` 不新造终态表**：`allFinished` 的判据用 `format.ts` 的 `transferStatus().final`，`transferred` 用同一个文件的 `transferredBytes`。"哪些状态算结束"与"已传多少字节"在这个仓已经各有一份权威实现（一个在 `format.ts`、一个在 `stores/transfer.ts`），第三份就是下一次分叉的起点。
+23. **`folderProgress` 在 `total === 0` 时 `allFinished = false`**（计划只写了"没有非终态任务"）。`total === 0` 的含义是"还不知道这批有什么"（重启后 store 是空的、ListBatch 还没回来），把它说成"已完成"会让卡片显示"已完成 0/0"。
+24. **计划漏了 `frontend/src/utils/message.ts`**：卡片的 `content` 与文件消息同为 JSON 信封，必须像 `file`/`file_failed` 一样解析，并补 `previewText` 的 `folder` 分支 —— 否则左栏联系人行显示成 `{"batch_id":"…`（与 file_failed 当年的事故同形）。新增 `parseFolderContent` + 4 条用例。
+25. **计划漏了 `frontend/src/views/ChatView.vue`**：只写 `useFileSend.attachFolder` 而不加按钮，入口**不可达**。工具栏在回形针旁加了一个文件夹按钮（群里禁用，标题说明原因）。
+26. **T10 的遗留缺陷，另提交 `ed9f877` 修复**：`MsgTypeFolder` 加了类型但 `notify_app.go` 的 `previewOf` 没有分派 —— 它落到"取首行"的兜底分支，**托盘悬停会显示成一段裸 JSON**。这是 `previewText` 的镜像规则（两处注释互相声明"只改一边会不一致"），因此两侧一起补。顺带把 `fileNameOf` 里那份"认三种历史写法"的容错抽成 `pickString`（文件与文件夹两种信封共用）。
+27. **`frontend/tests/message.test.ts` 此前未入库**，本次要在其中补文件夹消息的用例，故一并入库（它覆盖的正是本次改动的 `parseFolderContent`/`previewText`）。计划的前置约定只要求"不要用目录级 `git add` 把它扫进来"，这里是**显式**加入。
+28. **mock 的文件夹发送是"排队 + 串行"模拟**（计划只要求"造几条假的 batchId 任务即可"）：同一对端同时只传一个文件、且"取消全部"真的能停下后面还没开始的文件。预览模式若让它们并行跑，走查看到的界面与真机不是一回事。
+29. **卡片的补拉条件是"store 里的条数 < 消息声明的条目数"**（计划只写了"store 里没有就拉一次"）：`List()` 走 `ListRecent(50)` 窗口，重启后 store 里**有**若干条（但可能只有 50 条中的一部分），只判"有没有"会拿一份缺斤少两的数据算进度。补拉只做一次，避免每张卡片都发一次 RPC。
+30. **本轮的验证范围**：`npm run typecheck`、`npm run test`（42 条全绿）、`npm run build`，以及全仓 `go test -tags wails ./...`（只剩前置约定里那 4 个既有失败）。**T14 的九条手工验收（需要两个真实实例）尚未执行**，因此"文件夹卡片在真机上长什么样"仍未经人眼确认。
