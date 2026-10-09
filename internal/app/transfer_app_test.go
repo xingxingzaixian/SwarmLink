@@ -45,7 +45,26 @@ func (s *stubTransferRepo) GetJob(jobID string) (transfer.Job, error) {
 	return j, nil
 }
 
-func (s *stubTransferRepo) FindResumable(identity.NodeID, string) (transfer.Job, bool) {
+// FindResumable 实现【真实语义】而不是恒返回 false。
+//
+// 恒 false 会让「批次内同 hash 的两个文件互相覆盖」这类用例变成空测：
+// 没有命中的可能，断言当然通过。这里照抄端口契约（含 rel_path 维度），
+// 让用例验证的是调用方有没有把 rel_path 传对。
+func (s *stubTransferRepo) FindResumable(peerID identity.NodeID, fileHash, relPath string) (transfer.Job, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if j.PeerID != peerID || j.FileHash != fileHash {
+			continue
+		}
+		if j.Status == transfer.StateDone || j.Status == transfer.StateCancelled {
+			continue
+		}
+		if relPath != "" && j.RelPath != relPath {
+			continue
+		}
+		return j, true
+	}
 	return transfer.Job{}, false
 }
 

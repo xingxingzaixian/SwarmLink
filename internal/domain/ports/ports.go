@@ -104,7 +104,13 @@ var ErrEmptyBatchID = errors.New("transfer: empty batch id")
 type TransferRepo interface {
 	UpsertJob(j transfer.Job) error
 	GetJob(jobID string) (transfer.Job, error)
-	FindResumable(peerID identity.NodeID, fileHash string) (transfer.Job, bool)
+	// FindResumable 找可续传的任务。relPath 非空时（文件夹批次）必须一起匹配。
+	//
+	// 为什么必须带上 rel_path：同一张文件夹里两份内容相同的文件 file_hash
+	// 也相同，只按 (peer, file_hash) 匹配会让第二条命中第一条并继承它的
+	// 临时文件与最终路径 —— 结果是目录里少一个文件、另一个内容错位。
+	// relPath 为空（单文件传输）时保持旧的 (peer, file_hash) 语义。
+	FindResumable(peerID identity.NodeID, fileHash, relPath string) (transfer.Job, bool)
 	// SaveBitmap 批量落盘，避免每块一次事务（P1-9）。
 	SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed int64) error
 	ListActive() ([]transfer.Job, error)

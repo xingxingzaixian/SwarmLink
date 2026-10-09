@@ -533,7 +533,9 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 	}
 	peerID := sess.PeerID()
 	total := transfer.ChunkCount(meta.FileSize, meta.ChunkSize)
-	if total == 0 {
+	// 目录条目（空目录）天生没有分块，必须放行；其余情况下 total_chunks == 0
+	// 仍按协议非法处理（对方算错了）。
+	if total == 0 && !meta.IsDir {
 		return fmt.Errorf("transfer: invalid meta (total_chunks=0)")
 	}
 
@@ -542,10 +544,8 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 		handle ports.SinkHandle
 	)
 
-	// 断点续传：同一 peer + 同一 file_hash 已有未完成任务则复用其【临时文件与位图】。
-	//
 	// 注意：任务标识必须采用本次的 meta.JobID（发送方是按新 job_id 发块的），
-	// 只继承 TempPath / LocalPath / Bitmap —— 若沿用旧 job_id，接收端会认不出新块。
+	// 续传只继承 TempPath / LocalPath / Bitmap —— 若沿用旧 job_id，接收端会认不出新块。
 	job = transfer.Job{
 		JobID:       meta.JobID,
 		PeerID:      peerID,
@@ -558,11 +558,44 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 		Bitmap:      transfer.NewChunkBitmap(total),
 		Status:      transfer.StateTransferring,
 		WindowSize:  a.windowSize(),
+		BatchID:     meta.BatchID,
+		RelPath:     meta.RelPath,
+		IsDir:       meta.IsDir,
 		CreatedAt:   a.clk.Now(),
 		UpdatedAt:   a.clk.Now(),
 	}
 
-	if existing, ok := a.store.FindResumable(peerID, meta.FileID); ok && existing.TempPath != "" {
+	// 目录条目：只建目录。既不参与续传（它没有内容可续，FileID 也是空的），
+	// 也不建临时文件 —— 否则下面那个 OpenFile("") 会失败，HandleFileDone 还会
+	// 去 Close 一个 nil 句柄。
+	if meta.IsDir {
+		h, err := a.sink.CreateIn(ports.SinkRequest{
+			JobID: meta.JobID, BatchID: meta.BatchID, RelPath: meta.RelPath, IsDir: true,
+		})
+		if err != nil {
+			return err
+		}
+		job.LocalPath = h.FinalPath
+		job.UpdatedAt = a.clk.Now()
+		if err := a.store.UpsertJob(job); err != nil {
+			return err
+		}
+		rj := &recvJob{
+			job:          job,
+			handle:       h,
+			bitmap:       transfer.NewChunkBitmap(0),
+			expectHashes: meta.ChunkHashes,
+			lastFlush:    a.clk.Now(),
+			lastAck:      a.clk.Now(),
+		}
+		a.putReceiver(rj)
+		return a.sendMetaAck(sess, rj)
+	}
+
+	// 断点续传：同一 peer + 同一 file_hash + 同一相对路径 已有未完成任务则
+	// 复用其【临时文件与位图】。批次内必须带上 rel_path（见端口契约）：
+	// 同 hash 的两个文件只按 hash 匹配会互相继承落点。
+	if existing, ok := a.store.FindResumable(peerID, meta.FileID, meta.RelPath); ok && existing.TempPath != "" {
 		inherited := existing.Bitmap.Copy()
 		inherited.EnsureLen(total)
 		job.Bitmap = inherited
@@ -572,7 +605,19 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 		handle = ports.SinkHandle{
 			JobID: meta.JobID, TempPath: existing.TempPath, FinalPath: existing.LocalPath,
 		}
+	} else if meta.BatchID != "" || meta.RelPath != "" {
+		// 批次：按相对路径还原目录树（根目录只分配一次）。
+		h, err := a.sink.CreateIn(ports.SinkRequest{
+			JobID: meta.JobID, BatchID: meta.BatchID, RelPath: meta.RelPath,
+		})
+		if err != nil {
+			return err
+		}
+		handle = h
+		job.LocalPath = h.FinalPath
+		job.TempPath = h.TempPath
 	} else {
+		// 单文件：维持原有的扁平落盘 + 同名去重。
 		h, err := a.sink.Create(meta.JobID, meta.FileName)
 		if err != nil {
 			return err
@@ -616,6 +661,10 @@ func (a *TransferApp) HandleFileChunk(sess ports.Session, f protocol.Frame) erro
 	rj := a.getReceiver(c.JobID)
 	if rj == nil {
 		return nil // 元数据尚未到达或任务已结束：丢弃
+	}
+	if rj.job.IsDir {
+		// 目录条目没有分块，也没有文件句柄；正常不会收到，收到就忽略。
+		return nil
 	}
 	if _, err := rj.f.WriteAt(c.Data, c.Offset); err != nil {
 		return err
@@ -665,6 +714,23 @@ func (a *TransferApp) HandleFileDone(sess ports.Session, f protocol.Frame) error
 	}
 	rj := a.getReceiver(done.JobID)
 	if rj == nil {
+		return nil
+	}
+
+	// 目录条目：目录在 META 阶段就已经建好，没有内容可校验、也没有句柄可关。
+	if rj.job.IsDir {
+		rj.job.Status = transfer.StateDone
+		rj.job.UpdatedAt = a.clk.Now()
+		_ = a.store.UpsertJob(rj.job)
+		a.dropReceiver(rj.job.JobID)
+		if err := a.sendDoneAck(sess, done.JobID, true, ""); err != nil {
+			return err
+		}
+		if a.bus != nil {
+			a.bus.Publish(eventbus.TopicTransferDone, eventbus.TransferDone{
+				JobID: rj.job.JobID, PeerID: rj.job.PeerID.String(), Path: rj.job.LocalPath,
+			})
+		}
 		return nil
 	}
 

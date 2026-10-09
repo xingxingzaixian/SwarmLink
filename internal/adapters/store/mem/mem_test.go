@@ -367,10 +367,10 @@ func TestTransferRepoResumable(t *testing.T) {
 	if err := m.UpsertJob(job); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := m.FindResumable(peerID, "hash1"); !ok {
+	if _, ok := m.FindResumable(peerID, "hash1", ""); !ok {
 		t.Fatal("should find resumable job")
 	}
-	if _, ok := m.FindResumable(peerID, "other"); ok {
+	if _, ok := m.FindResumable(peerID, "other", ""); ok {
 		t.Fatal("must not match different hash")
 	}
 
@@ -391,11 +391,41 @@ func TestTransferRepoResumable(t *testing.T) {
 	// 完成后不再可续传
 	job.Status = transfer.StateDone
 	_ = m.UpsertJob(job)
-	if _, ok := m.FindResumable(peerID, "hash1"); ok {
+	if _, ok := m.FindResumable(peerID, "hash1", ""); ok {
 		t.Fatal("completed job must not be resumable")
 	}
 	if list, _ := m.ListActive(); len(list) != 0 {
 		t.Fatalf("no active jobs expected, got %d", len(list))
+	}
+}
+
+// 批次内同 hash 的两个文件必须互不命中（镜像 sqlite 侧的 TestFindResumableSeparatesByRelPath）。
+//
+// 独立一个用例而不是塞进上面那个：上面的用例结尾断言 ListActive 为空，
+// 塞进去的批次任务会让那条断言变成噪声。
+func TestFindResumableSeparatesByRelPath(t *testing.T) {
+	m := NewMessages(clock.New())
+	peerID := mkID(12)
+	for _, spec := range []struct{ id, rel string }{
+		{"j2", "照片/备份/a.txt"}, {"j3", "照片/a.txt"},
+	} {
+		j := newJob(spec.id, peerID, "same-hash")
+		j.BatchID, j.RelPath, j.TempPath = "b1", spec.rel, "/tmp/"+spec.id+".part"
+		if err := m.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, ok := m.FindResumable(peerID, "same-hash", "照片/备份/a.txt")
+	if !ok || got.JobID != "j2" {
+		t.Fatalf("续传命中 = %s ok=%v，期望 j2（必须按 rel_path 区分）", got.JobID, ok)
+	}
+	if _, ok := m.FindResumable(peerID, "same-hash", "照片/没有这个.txt"); ok {
+		t.Error("不同的 rel_path 不该命中")
+	}
+	// relPath 为空（单文件）保持 (peer, hash) 的旧语义
+	if _, ok := m.FindResumable(peerID, "same-hash", ""); !ok {
+		t.Error("relPath 为空时应保持旧语义")
 	}
 }
 

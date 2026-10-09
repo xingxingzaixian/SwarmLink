@@ -78,12 +78,21 @@ func (t *Transfers) GetJob(jobID string) (transfer.Job, error) {
 	return out, nil
 }
 
-// FindResumable 按 (peer, file_hash) 查找可续传任务。
-func (t *Transfers) FindResumable(peerID identity.NodeID, fileHash string) (transfer.Job, bool) {
-	row := t.db.QueryRow(`
-SELECT `+transferColumns+` FROM transfer_jobs
-WHERE peer_id = ? AND file_hash = ? AND status NOT IN ('done','cancelled')
-ORDER BY updated_at DESC LIMIT 1`, peerID.String(), fileHash)
+// FindResumable 按 (peer, file_hash[, rel_path]) 查找可续传任务（语义见端口）。
+func (t *Transfers) FindResumable(peerID identity.NodeID, fileHash, relPath string) (transfer.Job, bool) {
+	q := `
+SELECT ` + transferColumns + ` FROM transfer_jobs
+WHERE peer_id = ? AND file_hash = ? AND status NOT IN ('done','cancelled')`
+	args := []any{peerID.String(), fileHash}
+	if relPath != "" {
+		// 批次内必须按相对路径区分：同 hash 的两个文件混在一起会互相覆盖。
+		q += ` AND rel_path = ?`
+		args = append(args, relPath)
+	}
+	q += `
+ORDER BY updated_at DESC LIMIT 1`
+
+	row := t.db.QueryRow(q, args...)
 	out, err := scanTransfer(row)
 	if err != nil {
 		return transfer.Job{}, false

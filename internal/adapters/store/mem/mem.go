@@ -273,16 +273,22 @@ func (s *Messages) GetJob(jobID string) (transfer.Job, error) {
 	return j, nil
 }
 
-// FindResumable 按 (peer, file_hash) 查找可续传任务。
-func (s *Messages) FindResumable(peerID identity.NodeID, fileHash string) (transfer.Job, bool) {
+// FindResumable 按 (peer, file_hash[, rel_path]) 查找可续传任务（语义见端口）。
+func (s *Messages) FindResumable(peerID identity.NodeID, fileHash, relPath string) (transfer.Job, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, j := range s.jobs {
-		if j.PeerID == peerID && j.FileHash == fileHash &&
-			j.Status != transfer.StateDone && j.Status != transfer.StateCancelled {
-			j.Bitmap = j.Bitmap.Copy()
-			return j, true
+		if j.PeerID != peerID || j.FileHash != fileHash ||
+			j.Status == transfer.StateDone || j.Status == transfer.StateCancelled {
+			continue
 		}
+		// 批次内按相对路径区分（与 sqlite 实现同一条规则）：
+		// 同 hash 的两个文件混在一起会互相继承临时文件与最终路径。
+		if relPath != "" && j.RelPath != relPath {
+			continue
+		}
+		j.Bitmap = j.Bitmap.Copy()
+		return j, true
 	}
 	return transfer.Job{}, false
 }

@@ -265,8 +265,8 @@ func TestTransferBitmapPersistsAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 续传查找：同 peer + 同 file_hash 必须命中
-	found, ok := tr.FindResumable(peerID, "h1")
+	// 续传查找：同 peer + 同 file_hash 必须命中（单文件：relPath 传空）
+	found, ok := tr.FindResumable(peerID, "h1", "")
 	if !ok {
 		t.Fatal("resumable job not found")
 	}
@@ -294,7 +294,7 @@ func TestTransferBitmapPersistsAndResumes(t *testing.T) {
 	if err := tr.UpsertJob(job); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := tr.FindResumable(peerID, "h1"); ok {
+	if _, ok := tr.FindResumable(peerID, "h1", ""); ok {
 		t.Fatal("done job must not be resumable")
 	}
 	if active, _ := tr.ListActive(); len(active) != 0 {
@@ -739,6 +739,49 @@ func TestMigrateFromV3AppliesV4(t *testing.T) {
 	got, err := NewTransfers(reopened).ListByBatch("b-new")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("升级后批次查询失败：len=%d err=%v", len(got), err)
+	}
+}
+
+// 批次内同 hash 的两个文件必须互不命中（续传键的 rel_path 维度）。
+//
+// 一张文件夹里两份内容相同的文件 file_hash 也相同；只按 (peer, hash) 匹配
+// 会让第二条继承第一条的临时文件与最终路径 —— 结果是目录里少一个文件、
+// 另一个内容错位。
+func TestFindResumableSeparatesByRelPath(t *testing.T) {
+	db, _ := openTest(t)
+	tr := NewTransfers(db)
+	peerID := mkID(16)
+
+	mk := func(jobID, rel string) transfer.Job {
+		return transfer.Job{
+			JobID: jobID, PeerID: peerID, FileName: "a.txt", FileSize: 1024,
+			FileHash: "same-hash", ChunkSize: 1024, TotalChunks: 1,
+			Direction: transfer.DirectionRecv, Status: transfer.StateTransferring,
+			TempPath: "/tmp/" + jobID + ".part", BatchID: "b1", RelPath: rel,
+			CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+		}
+	}
+	if err := tr.UpsertJob(mk("dup-1", "照片/a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.UpsertJob(mk("dup-2", "照片/备份/a.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := tr.FindResumable(peerID, "same-hash", "照片/备份/a.txt")
+	if !ok {
+		t.Fatal("同 rel_path 的任务必须能被续传命中")
+	}
+	if got.JobID != "dup-2" {
+		t.Fatalf("命中了 %s，期望 dup-2（必须按 rel_path 区分）", got.JobID)
+	}
+
+	// 单文件语义（relPath 为空）保持旧行为
+	if _, ok := tr.FindResumable(peerID, "same-hash", ""); !ok {
+		t.Error("relPath 为空时应保持 (peer, hash) 的旧语义")
+	}
+	if _, ok := tr.FindResumable(peerID, "same-hash", "照片/没有这个.txt"); ok {
+		t.Error("不同的 rel_path 不该命中")
 	}
 }
 

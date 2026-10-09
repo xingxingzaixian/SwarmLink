@@ -77,7 +77,7 @@ func (r *memTransferRepo) get(jobID string) (transfer.Job, bool) {
 	return j, err == nil
 }
 
-func (r *memTransferRepo) FindResumable(identity.NodeID, string) (transfer.Job, bool) {
+func (r *memTransferRepo) FindResumable(identity.NodeID, string, string) (transfer.Job, bool) {
 	return transfer.Job{}, false
 }
 
