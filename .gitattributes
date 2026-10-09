@@ -1,0 +1,12 @@
+# 行尾统一。
+#
+# 为什么需要这一行：仓库里曾有 49 个文件以 CRLF 提交进仓库（其中 7 个是 .go），
+# 而本仓既没有 .gitattributes、core.autocrlf 也是 false —— 也就是在 Windows 上
+# 编辑后直接提交就会把 CRLF 写进历史。对 Go 源文件来说这不只是噪声：gofmt 一律
+# 要把 CRLF 重写成 LF，于是 `gofmt -l` 永远非空，既没法当 CI 闸门，也让每次
+# diff 都混着整文件的行尾变化。
+#
+# 只固定 *.go：它们是 gofmt 闸门（internal/archtest 的 TestSourcesAreGofmtClean）
+# 的判定对象，必须与平台无关。其余文件的 CRLF（42 个，多为文档）另行单独清理，
+# 不在这里顺手扩大改动范围。
+*.go text eol=lf

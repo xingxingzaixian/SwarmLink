@@ -47,6 +47,16 @@ test-fuzz:
 lint-arch:
 	go test ./internal/archtest/ -count=1 -v
 
+# 格式闸门：仓库必须保持 gofmt 干净。
+#
+# 实现同样在 internal/archtest（TestSourcesAreGofmtClean），因此 `make lint-arch`
+# 与 CI 都已经会跑到它 —— 这个目标只是给它一个直接的入口。
+#
+# 它曾经不干净且无人发现：7 个 .go 文件以 CRLF 提交（gofmt 一律要求重写成 LF），
+# 另有 2 处对齐漂移。行尾现由 .gitattributes 的 `*.go text eol=lf` 固定。
+fmt-check:
+	go test ./internal/archtest/ -run 'TestSourcesAreGofmtClean|TestGofmtGateCatches' -count=1 -v
+
 frontend-install:
 	cd frontend && npm install
 

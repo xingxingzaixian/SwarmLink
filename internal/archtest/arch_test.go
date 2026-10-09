@@ -17,6 +17,7 @@
 package archtest
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"go/format"
 	"go/parser"
 	"go/token"
 )
@@ -350,5 +352,107 @@ func TestRuleHelpersCatchWhatTheyClaim(t *testing.T) {
 		if got := belongsToBusinessCode(c.rel); got != c.want {
 			t.Errorf("belongsToBusinessCode(%q) = %v，期望 %v", c.rel, got, c.want)
 		}
+	}
+}
+
+// TestSourcesAreGofmtClean：仓库必须保持 gofmt 干净。
+//
+// 用标准库 go/format 而不是外部 gofmt 进程：与本包其他检查一致 —— 不依赖 PATH、
+// 不依赖 make，任何能跑 go test 的地方都能跑（本仓开发机没有 make）。
+//
+// 为什么值得设成闸门：这个仓库此前并不干净，而且**没有任何人发现**：
+//   - 7 个 .go 文件是以 CRLF 提交进仓库的（在 Windows 上编辑后直接提交，而仓库
+//     既无 .gitattributes、core.autocrlf 也是 false）。gofmt 会把 CRLF 视为需要
+//     重写的格式，于是 `gofmt -l` 永远非空 —— 既没法当闸门，也让每次 diff 都
+//     混着行尾噪声。
+//   - 另有 2 处 struct / const 声明的对齐漂移（新增一个更长的常量名之后没有
+//     重新对齐）。
+//
+// 行尾由 .gitattributes 的 `*.go text eol=lf` 固定，因此这条闸门在任何平台、任何
+// 人的检出上结论一致。
+func TestSourcesAreGofmtClean(t *testing.T) {
+	root := moduleRoot(t)
+
+	// 这些目录不属于本仓源码：.git 巨大且无 .go；node_modules 是第三方；
+	// dist/bin 是构建产物（bin/ 里可能有打进去的源码副本）。
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "dist": true, "bin": true, ".task": true,
+	}
+
+	var checked int
+	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		formatted, ferr := format.Source(src)
+		if ferr != nil {
+			return fmt.Errorf("解析/格式化 %s: %w", p, ferr)
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return relErr
+		}
+		if !bytes.Equal(src, formatted) {
+			t.Errorf("gofmt 需要重写 %s：请运行 `gofmt -w`（行尾必须是 LF，.gitattributes 已固定 *.go）",
+				filepath.ToSlash(rel))
+		}
+		checked++
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("遍历 Go 源文件失败: %v", walkErr)
+	}
+	if checked == 0 {
+		t.Fatal("没有检查到任何 .go 文件，格式闸门形同虚设")
+	}
+}
+
+// TestGofmtGateCatchesCrlfAndMisalignment 钉住上面那条闸门的判定能力。
+//
+// 与 TestRuleHelpersCatchWhatTheyClaim 同样的理由：一个永远返回「干净」的闸门
+// 比没有闸门更糟 —— 它会让「仓库保持 gofmt 干净」变成一句空话。这里直接对
+// format.Source 的行为下断言，正是当年真正出问题的那两种形态。
+func TestGofmtGateCatchesCrlfAndMisalignment(t *testing.T) {
+	// 注意 A 后面是两个空格：gofmt 会把同一个 const 块里各行的 `=` 对齐，
+	// 所以真正"干净"的样本本身就必须是对齐过的 —— 这一条我第一次就写错了，
+	// 正是下面那句前置条件断言把它抓出来的。
+	clean := []byte("package p\n\nconst (\n\tA  = 1\n\tBB = 2\n)\n")
+	if formatted, err := format.Source(clean); err != nil {
+		t.Fatalf("干净源码不该报错: %v", err)
+	} else if !bytes.Equal(clean, formatted) {
+		t.Fatal("前置条件不成立：样本本身应当已经是 gofmt 干净的")
+	}
+
+	// 形态一：CRLF 行尾（当年 7 个 .go 文件就是这样提交进仓库的）。
+	crlf := bytes.ReplaceAll(clean, []byte("\n"), []byte("\r\n"))
+	formatted, err := format.Source(crlf)
+	if err != nil {
+		t.Fatalf("CRLF 源码不该报错: %v", err)
+	}
+	if bytes.Equal(crlf, formatted) {
+		t.Fatal("闸门抓不到 CRLF：正是它让 gofmt -l 常年非空")
+	}
+
+	// 形态二：对齐漂移（当年 message.go / eventbus.go 的形态）。
+	misaligned := []byte("package p\n\nconst (\n\tA = 1\n\tBB  = 2\n)\n")
+	formatted, err = format.Source(misaligned)
+	if err != nil {
+		t.Fatalf("对齐漂移的源码不该报错: %v", err)
+	}
+	if bytes.Equal(misaligned, formatted) {
+		t.Fatal("闸门抓不到对齐漂移")
 	}
 }

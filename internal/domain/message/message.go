@@ -33,7 +33,7 @@ const (
 type MsgType string
 
 const (
-	MsgTypeText  MsgType = "text"
+	MsgTypeText MsgType = "text"
 	// MsgTypeImage 的 content 是 InlineImage 的 JSON 信封（见 inline_image.go）。
 	MsgTypeImage MsgType = "image"
 	// MsgTypeFile 的 content 是 FileMessageContent 的 JSON 信封（job_id + file_name），
@@ -69,9 +69,9 @@ type Message struct {
 // 由前端解析成「文件发送失败」卡片。曾经没有 tag，于是序列化出
 // JobID/FileName/Reason —— 前端一个字段都读不到，只能显示成一段裸 JSON。
 type FileFailedContent struct {
-	JobID    string `json:"job_id"`   // 失败的任务ID
+	JobID    string `json:"job_id"`    // 失败的任务ID
 	FileName string `json:"file_name"` // 文件名
-	Reason   string `json:"reason"`   // 失败原因
+	Reason   string `json:"reason"`    // 失败原因
 }
 
 // FileMessageContent 文件消息内容。

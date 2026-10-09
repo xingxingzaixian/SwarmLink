@@ -91,9 +91,13 @@ jobs:
       - name: domain 覆盖率（仅报告）
         run: go test ./internal/domain/... -cover
 
-      # 三条红线（R1 domain 零 I/O / R2 适配器互不引用 / R3 业务代码不依赖适配器）。
-      # 它等价于 `make lint-arch`，但不需要 make —— 这正是本工作流存在的理由之一。
-      - name: 架构红线
+      # 三条红线（R1 domain 零 I/O / R2 适配器互不引用 / R3 业务代码不依赖适配器）
+      # 与 gofmt 格式闸门。它等价于 `make lint-arch`，但不需要 make —— 这正是
+      # 本工作流存在的理由之一。
+      #
+      # 格式闸门也放在这里：仓库此前有 7 个 .go 文件以 CRLF 提交，gofmt 一律要求
+      # 重写，而没有任何流水线会发现它。
+      - name: 架构红线与格式闸门
         run: go test ./internal/archtest/ -count=1 -v
 
   frontend:
