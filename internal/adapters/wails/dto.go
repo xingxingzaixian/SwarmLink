@@ -109,7 +109,8 @@ type TransferDTO struct {
 	TotalChunks int     `json:"totalChunks"`
 	Percent     float64 `json:"percent"`
 	Status      string  `json:"status"`
-	// WaitReason 非空表示这条任务在等（目前只有 "peer_offline"）。
+	// WaitReason 非空表示这条任务在等：`peer_offline`（等对端上线）或
+	// `batch_queued`（文件夹批次里排队等前一个传完）。
 	// 界面靠它区分「等待对方上线」与「排队中」—— 两者在 status 上都是 idle/queued。
 	WaitReason string `json:"waitReason,omitempty"`
 	Error      string `json:"error,omitempty"`

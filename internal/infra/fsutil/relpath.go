@@ -20,6 +20,10 @@ const MaxRelPathDepth = 32
 //
 // 返回值一定是「可以逐段 SecureJoin 的安全段列表」，调用方不需要再判断。
 // 这是接收端的唯一防线（rel_path 完全由对端决定），因此拒绝集只多不少。
+//
+// 保真度取舍：`\` 也被当分隔符，因此 POSIX 上名字里真含反斜杠的文件
+// （`a\b.txt`）会被解释成子目录 `a/b.txt`。跨平台一致优先；发送端生成
+// rel_path 时必须用 filepath.ToSlash，否则两端名字对不上。
 func SanitizeRelPath(rel string) ([]string, error) {
 	if rel == "" {
 		return nil, fmt.Errorf("%w: empty relative path", ErrBadName)
@@ -49,8 +53,9 @@ func SanitizeRelPath(rel string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		// 清洗后变空的兜底（例如整段都是空格/点）：空段落到 SecureJoin
-		// 就等于往父目录上落，绝不允许。
+		// 防御性检查：按 SanitizeFileName 当前的契约这里不可达（它保证非空），
+		// 保留是为了不把「段非空」这条不变量寄托在另一个函数的未来实现上 ——
+		// 空段若真落到 SecureJoin，就是往父目录上落。
 		if clean == "" {
 			return nil, fmt.Errorf("%w: segment %q becomes empty after sanitize", ErrBadName, seg)
 		}

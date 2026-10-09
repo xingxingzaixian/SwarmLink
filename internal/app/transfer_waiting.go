@@ -469,7 +469,10 @@ func (a *TransferApp) RetryNow(ctx context.Context, jobID string) error {
 	if err != nil {
 		return fmt.Errorf("transfer: 任务不存在: %w", err)
 	}
-	if j.Status != transfer.StateIdle || j.WaitReason != transfer.WaitPeerOffline {
+	// 判据与 startJobs 一致：凡是「可自动拉起」的任务都允许手动提前启动
+	// （等对端的，以及批次里排队等前一个传完的）。手写成员比较会在这里生出
+	// 第四份「哪些原因能被启动」的真相，而分叉的方向是「界面上的按钮点了没反应」。
+	if j.Status != transfer.StateIdle || !j.WaitReason.AutoStartable() {
 		return fmt.Errorf("transfer: 该任务不在等待中")
 	}
 	j.NextTryAt = a.clk.Now()

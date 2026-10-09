@@ -1,6 +1,7 @@
 package filesink
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -252,8 +253,98 @@ func TestCreateInRejectsEscape(t *testing.T) {
 func TestCreateInRejectsEmptyBatchID(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := New(dir)
-	if _, err := s.CreateIn(ports.SinkRequest{JobID: "j", RelPath: "照片/a.txt"}); err == nil {
+	_, err := s.CreateIn(ports.SinkRequest{JobID: "j", RelPath: "照片/a.txt"})
+	if err == nil {
 		t.Fatal("空 batch_id 必须被拒绝")
+	}
+	// 必须可判别：调用方要把「传了空 id」与「磁盘写不了」分开处理
+	if !errors.Is(err, ports.ErrEmptyBatchID) {
+		t.Errorf("错误应可用 errors.Is(ports.ErrEmptyBatchID) 判别，得到 %v", err)
+	}
+}
+
+// 单段 rel_path = 「文件夹本身」这一条，且【绝不能 panic】。
+//
+// 这条输入不是畸形数据，而是我们自己的发送端在「空文件夹」时必然发出的
+// （设计 3.3：整个文件夹为空时，为根目录本身发一条）。第一版实现里
+// segs[1:len(segs)-1] 会越界 panic，而且 panic 跳过了手写的 Unlock ——
+// 整个 Sink 的锁就此永久占用，之后每条接收任务都卡死。
+func TestCreateInSingleSegmentIsRootDirOnly(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := New(dir)
+
+	h, err := s.CreateIn(ports.SinkRequest{JobID: "j1", BatchID: "b1", RelPath: "空的", IsDir: true})
+	if err != nil {
+		t.Fatalf("空文件夹的根目录条目必须被接受: %v", err)
+	}
+	if want := filepath.Join(dir, "空的"); h.FinalPath != want {
+		t.Errorf("final = %q，期望 %q", h.FinalPath, want)
+	}
+	if h.TempPath != "" {
+		t.Errorf("目录条目不该有临时文件，得到 %q", h.TempPath)
+	}
+
+	// 幂等：重复到达不能改名，也不能 panic（panic 会让锁死掉）
+	h2, err := s.CreateIn(ports.SinkRequest{JobID: "j2", BatchID: "b1", RelPath: "空的", IsDir: true})
+	if err != nil {
+		t.Fatalf("重复的根目录条目必须幂等: %v", err)
+	}
+	if h2.FinalPath != h.FinalPath {
+		t.Errorf("重复的根目录条目被改名了：%q ≠ %q", h2.FinalPath, h.FinalPath)
+	}
+
+	// 同批文件仍然落在【同一个根】下（不是「空的/空的」）
+	h3, err := s.CreateIn(ports.SinkRequest{JobID: "j3", BatchID: "b1", RelPath: "空的/a.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Dir(h3.FinalPath); got != filepath.Join(dir, "空的") {
+		t.Errorf("同批文件落在 %q，期望 %q", got, filepath.Join(dir, "空的"))
+	}
+
+	// 单段但声称是文件：必须明确报错，不能悄悄落成根目录
+	if _, err := s.CreateIn(ports.SinkRequest{JobID: "j4", BatchID: "b1", RelPath: "a.txt"}); err == nil {
+		t.Error("单段文件路径必须被拒绝")
+	}
+}
+
+// 同一批次里 rel_path 的首段名必须一致。
+//
+// 不一致就是发送端有 bug 或者被伪造；按已分配的根静默落盘会把两个文件夹
+// 合并成一个 —— 用户看到的是「传了两次，结果只有一个」。
+func TestCreateInRejectsInconsistentRootName(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := New(dir)
+
+	if _, err := s.CreateIn(ports.SinkRequest{JobID: "j1", BatchID: "b1", RelPath: "甲/a.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateIn(ports.SinkRequest{JobID: "j2", BatchID: "b1", RelPath: "乙/b.txt"}); err == nil {
+		t.Fatal("同批首段名不一致必须被拒绝")
+	}
+}
+
+// 认领一个接收目录之外的根目录必须被忽略。
+//
+// 认领等于「把整批文件的落点交给调用方」，而调用方（重启恢复）手里同时有
+// 发送侧与接收侧的任务 —— 少一行方向过滤就会把接收数据写进用户自己的
+// 源文件夹。这里把安全性收在 Sink 内部，而不是指望调用方不犯这个错。
+func TestAdoptRootIgnoresPathOutsideDownloadDir(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	s, _ := New(dir)
+
+	s.AdoptRoot("b1", outside)
+
+	h, err := s.CreateIn(ports.SinkRequest{JobID: "j1", BatchID: "b1", RelPath: "照片/a.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(h.FinalPath) != filepath.Join(dir, "照片") {
+		t.Fatalf("越界认领被采纳了：final = %q（应重新分配到接收目录内）", h.FinalPath)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "照片", "a.txt")); !os.IsNotExist(err) {
+		t.Error("不该在接收目录之外创建任何路径")
 	}
 }
 
