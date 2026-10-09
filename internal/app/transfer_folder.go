@@ -13,6 +13,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
+	"github.com/swarmlink/swarmlink/internal/infra/fsutil"
 )
 
 // defaultMaxFolderEntries 是一次文件夹传输允许的最大条目数（文件 + 目录）。
@@ -47,6 +48,34 @@ type FolderSummary struct {
 
 // batchRootNameOf 返回文件夹名（卡片标题与 rel_path 的首段都用它）。
 func batchRootNameOf(dir string) string { return filepath.Base(dir) }
+
+// batchRootOf 从一条落库任务反推它所属批次的根目录。
+//
+// 为什么用 local_path 反推而不是为根目录单开一列：接收端的 local_path 就是
+// <批次根目录>/<rel_path 去掉首段>，段数之差即根目录 —— 单开一列只会多一份
+// 需要同步维护的真相（而它恰好是最容易被忘记更新的那种）。
+//
+// 关键点：rel_path 的【首段就是批次根目录名】，所以只退 len(segs)-1 层。
+// 多退一层会得到下载目录本身，认领它就是「整批文件散落到下载目录里」；
+// 单段 rel_path（空文件夹的根目录条目）则一层都不用退 —— 那条任务的
+// local_path 本身就是批次根目录。
+//
+// rel_path 非法（穿越等）时返回 ok=false：那种行宁可让它重新分配一个根，
+// 也不能拿它当落盘基准。
+func batchRootOf(j transfer.Job) (string, bool) {
+	if j.RelPath == "" || j.LocalPath == "" {
+		return "", false
+	}
+	segs, err := fsutil.SanitizeRelPath(j.RelPath)
+	if err != nil {
+		return "", false
+	}
+	root := j.LocalPath
+	for i := 1; i < len(segs); i++ {
+		root = filepath.Dir(root)
+	}
+	return root, true
+}
 
 // SendFolderAs 枚举目录、建好一批排队任务后立即返回。
 //

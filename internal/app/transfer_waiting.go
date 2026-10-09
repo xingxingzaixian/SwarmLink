@@ -464,6 +464,29 @@ func (a *TransferApp) Recover(ctx context.Context) {
 		}
 	}
 
+	// 批次根目录必须在重启后【认领】回来：否则续传会重新分配出「照片 (1)」，
+	// 把一个文件夹拆成两份，用户看到的是「文件少了一半」。
+	//
+	// 刻意【另起一轮】ListActive 而不是折进上面那个循环：上面按状态过滤，
+	// 只看「上次运行被打断」的三种状态；而批次里还没轮到的任务状态是 idle，
+	// 它们的根目录同样要认领 —— 折进去会让这批任务重新分配根。
+	//
+	// 只用接收侧的任务：发送侧任务的 local_path 是用户自己的源文件路径，
+	// 拿它当接收根就等于把接收数据写进用户源文件夹（filesink.AdoptRoot
+	// 另有一道接收目录包含性校验兜底，这里是第一道）。
+	if a.sink != nil {
+		if active, err := a.store.ListActive(); err == nil {
+			for _, j := range active {
+				if j.BatchID == "" || j.Direction != transfer.DirectionRecv || j.LocalPath == "" {
+					continue
+				}
+				if root, ok := batchRootOf(j); ok {
+					a.sink.AdoptRoot(j.BatchID, root)
+				}
+			}
+		}
+	}
+
 	// 等待中的任务：无视退避立刻试一轮（退出期间对端可能已经上线了）。
 	if jobs, err := a.store.ListWaiting(); err == nil {
 		a.startJobs(ctx, jobs)
