@@ -11,8 +11,16 @@ import (
 func TestSanitizeFileNameRejectsUnsafeNames(t *testing.T) {
 	// 这些必须【直接拒绝】：无法通过丢弃目录成分变成安全名字
 	rejected := []string{
-		`..\..\Startup\evil.exe`, // Windows 风格路径：Unix 上 Base 不会拆 "\"，由分隔符检查拦下
-		"a\x00b",                 // 空字节截断
+		// Windows 风格路径：一律在入口按「含反斜杠」拒绝，与宿主平台无关。
+		// 这条用例是平台无关性的钉子 —— 它曾经在 Windows 上红，因为当时反斜杠
+		// 交给 filepath.Base 之后才检查，而 Windows 的 Base 已经把它中和掉了。
+		`..\..\Startup\evil.exe`,
+		// 「看着正常」的带反斜杠输入同样拒绝：它无法被中和成安全名字，而合法的
+		// 发送端本就不会发出反斜杠（发送侧 fileBase / filepath.Base 都会先剥掉
+		// 目录成分，rel_path 另走 SanitizeRelPath）。
+		`docs\report.pdf`,
+		`C:\Windows\System32\drivers\etc\hosts`,
+		"a\x00b", // 空字节截断
 		"..",
 		".",
 		"",

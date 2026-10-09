@@ -36,10 +36,10 @@ func init() {
 
 // SanitizeFileName 清洗对端提供的文件名。
 //
-// 规则（架构书 1.3）：
-//  1. 取 filepath.Base，丢弃所有目录成分
-//  2. 拒绝空、"."、".."、含 "/" "\" 或 NUL 的输入
-//  3. 拒绝 Windows 保留设备名与尾随点/空格
+// 规则（架构书 1.3，其中「拒绝」与「中和」的分工见下方第 2 步的顺序注释）：
+//  1. 拒绝空、含 NUL、含 `\` 的输入
+//  2. 取 filepath.Base 丢弃目录成分：`/` 与绝对路径被【中和】而不是拒绝
+//  3. 拒绝 "."、".."、Windows 保留设备名与尾随点/空格
 //  4. 按 UTF-8 边界截断到 255 字节
 func SanitizeFileName(raw string) (string, error) {
 	if raw == "" {
@@ -49,10 +49,30 @@ func SanitizeFileName(raw string) (string, error) {
 		return "", fmt.Errorf("%w: contains NUL byte", ErrBadName)
 	}
 
-	// 第 1 步：丢弃目录成分。
-	// 注意：Unix 上 filepath.Base 只把 "/" 当分隔符，因此 Windows 风格路径
-	// "..\\..\\evil.exe" 会原样返回，由第 2 步的 "\" 检查拦下。
+	// 第 2 步必须在第 1 步【之前】：反斜杠一律按路径分隔符拒绝。
+	//
+	// 顺序不能颠倒的原因：filepath.Base 的语义随平台变 —— Windows 把 `\` 也当
+	// 分隔符，于是 `..\..\Startup\evil.exe` 会被中和成 `evil.exe` 而通过；Unix 只认
+	// `/`，同一份输入会保留反斜杠并在后面被拒。也就是【同一个对端报文，在 Windows
+	// 接收端与 Unix 接收端得到不同裁决】，而路径清洗是接收侧唯一的安全边界、
+	// 输入完全由对端控制（架构书 1.3）。因此这里统一按拒绝处理，与宿主平台无关。
+	//
+	// 这条顺序在 Windows 上曾经红过（TestSanitizeFileNameRejectsUnsafeNames）：
+	// 当时的实现把它交给 Base 之后的分隔符检查，而那一步在 Windows 上已经看不见
+	// 反斜杠了。本仓其他地方（fileBase、SanitizeRelPath）本来就是「两种分隔符都
+	// 当分隔符」，这里只是与之一致。
+	//
+	// 不会误伤正常发送端：发送侧的 fileBase 与 filepath.Base 都会剥掉目录成分，
+	// 因此线上 FileName 本就不含 `\`；rel_path 走 SanitizeRelPath，它在逐段调用
+	// 本函数之前已经把 `\` 拆掉了。
+	if strings.ContainsRune(raw, '\\') {
+		return "", fmt.Errorf("%w: contains backslash", ErrBadName)
+	}
+
+	// 第 1 步：丢弃目录成分（"/" 被 Base 中和，绝对路径同理）。
 	name := filepath.Base(raw)
+	// 不变量：Base 之后不应再含任何分隔符 —— `\` 已在入口拒绝，`/` 已被 Base 拆掉。
+	// 保留这一条作为断言，防止将来调整清洗顺序时静默失效。
 	if strings.ContainsAny(name, `/\`) {
 		return "", fmt.Errorf("%w: contains path separator", ErrBadName)
 	}
