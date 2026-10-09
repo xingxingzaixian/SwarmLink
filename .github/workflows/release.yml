@@ -71,7 +71,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          # 版本来源统一为 frontend/.nvmrc，避免与 ci.yml 各写一份后悄悄漂移。
+          # （打包本身只需要 Vite，不依赖 Node 的类型擦除；但"两处各写一个版本号"
+          #  正是本项目反复吃过亏的那类分叉。）
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

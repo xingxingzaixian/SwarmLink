@@ -36,13 +36,16 @@ test-fuzz:
 
 # 架构红线检查（架构书 7.1）：让架构约束可执行，而非靠自觉。
 #
-# R1 只匹配【真实的 import 行】（行首可选空白 + 引号包裹的路径 + 行尾），
-# 以免把注释里出现的 "net" / "os" 等词语误判为导入。
+# 实现在 internal/archtest，不在本 Makefile 里 —— 三条理由：
+#   1. grep 分不清「注释里的 net」与「真的 import net」，原规则为此写了一串
+#      行首/行尾锚定正则，只能靠注释反复警告后人别改坏；
+#   2. 原 R2 只检查 adapters/net → adapters/store 一条路径，而 R2 的语义是
+#      「适配器之间禁止互引」—— 盲区里其实已经躺着一条真实互引；
+#   3. 最要紧的是红线不该只活在 Makefile 里：Windows 开发机通常没有 make
+#      （本仓开发机实测就没有），「CI 强制」在本地根本无从执行。
+# 搬进 go test 后，任何能跑 go test 的地方都能跑红线，且随 `go test ./...` 自动执行。
 lint-arch:
-	@! grep -rnE '^[[:space:]]*("net"|"database/sql"|"os"|"[^"]*wails[^"]*")[[:space:]]*$$' internal/domain/ --include=*.go | grep -v '_test.go' | grep -v 'domain/ports' || (echo "R1 VIOLATION: domain must not import net/database-sql/os/wails" && exit 1)
-	@! grep -rn 'internal/adapters/store' internal/adapters/net/ --include=*.go || (echo "R2 VIOLATION: adapters must not cross-import" && exit 1)
-	@! grep -rnE '\b(sqlite\.New|tcp\.NewManager)\b' internal/app/ internal/domain/ --include=*.go | grep -v '_test.go' || (echo "R3 VIOLATION: business code must not construct adapters" && exit 1)
-	@echo "arch OK"
+	go test ./internal/archtest/ -count=1 -v
 
 frontend-install:
 	cd frontend && npm install

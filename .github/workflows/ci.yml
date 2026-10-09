@@ -1,0 +1,136 @@
+name: CI
+
+# 测试与红线工作流。
+#
+# 为什么必须有它：README、ADR-001、ADR-007 与实现规格都写着「三条红线由 CI 强制」，
+# 但在本工作流之前，.github/workflows/ 里只有 release.yml —— 没有任何测试流水线，
+# 而红线检查当时只活在 Makefile 的一个 grep 里。这句话因此一直不成立：
+# 本仓的 Windows 开发机上没有 make，连本地都跑不了红线。
+# 现在红线在 internal/archtest 里，随 `go test ./...` 自动执行。
+
+on:
+  # 省略 branches 即「所有分支」—— 写 ['**'] 只会多一个可能写错的地方。
+  push:
+    # 版本 tag 交给 release.yml（它负责打包三平台产物并创建 Release），
+    # 这里排除掉，避免同一个 tag 触发两条流水线。
+    tags-ignore: ['v*']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # 与 release.yml 相反：CI 是可以随时作废的，新推一次就取消上一次。
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台失败不连坐另一个：否则永远只能看到第一个错误。
+      fail-fast: false
+      matrix:
+        include:
+          # 双平台不是"多多益善"，而是必需的：本仓有 4 个测试曾经【只在 Windows 上】
+          # 失败（filepath.Base 的平台语义、Windows 不落实 POSIX 权限位）。
+          # 只跑 Linux 的 CI 会让这类问题再潜伏半年。
+          - os: windows-latest
+            label: windows
+          - os: ubuntu-latest
+            label: linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # 直接读 go.mod，避免版本在两处各写一遍后悄悄漂移。
+          go-version-file: go.mod
+          cache: true
+
+      # Wails v3 的 Linux 后端在 beta.24 已从 GTK3 迁到 GTK4：带 `wails` tag 的
+      # 构建会经 internal/operatingsystem 里的 cgo 指令要求 pkg-config 解析
+      # `gtk4` 与 `webkitgtk-6.0`（GTK4 版 WebKit，名字里没有 "2"）。
+      # 装 libgtk-3-dev + libwebkit2gtk-4.1-dev 一个都顶不上。
+      # 版本与依赖清单与 release.yml 保持一致 —— 两处不一致会让"本地能打包、
+      # CI 不能测"这种最难查的偏差出现。
+      - name: 安装 Linux 构建依赖
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-4-dev libwebkitgtk-6.0-dev
+
+      # 为什么要跑两条：根目录的 main_wails.go 带 `//go:build wails`。
+      #   不带 tag：根目录没有可编译文件 —— 这验证了「没有 Wails 工具链也能构建与测试」，
+      #             是本仓对开发者的承诺（README 明说 go build/go test 不需要 Wails）；
+      #   带 tag：验证真实桌面入口也能编译，那才是发布走的那条路。
+      - name: build（不带 wails tag）
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./internal/...
+
+      - name: test（不带 wails tag）
+        run: go test ./... -count=1
+
+      - name: test（带 wails tag）
+        run: go test -tags wails ./... -count=1
+
+      # e2e / scale 在 `go test ./...` 里也会跑到（它们在 test/ 下且不是 tag 包），
+      # 这里显式再跑一遍是为了让失败在 CI 日志里一眼可见，而不是埋在 29 行 ok 之间。
+      - name: e2e（发现 / 握手 / 单聊 / 传输 / 续传 / 跨网段收敛）
+        run: go test ./test/e2e/... -count=1
+
+      - name: scale（20 节点目录同步 + 常驻连接数为 0）
+        run: go test ./test/scale/... -count=1
+
+      # 架构书 §2.1 定的领域层覆盖率下限是 80%。这一步先【只报告不阻塞】：
+      # 在还没有基线的时候设硬门槛，只会让人把门槛调低。等 S1 收尾拿到真实数字
+      # 再决定是设门槛还是先补测试。
+      - name: domain 覆盖率（仅报告）
+        run: go test ./internal/domain/... -cover
+
+      # 三条红线（R1 domain 零 I/O / R2 适配器互不引用 / R3 业务代码不依赖适配器）。
+      # 它等价于 `make lint-arch`，但不需要 make —— 这正是本工作流存在的理由之一。
+      - name: 架构红线
+        run: go test ./internal/archtest/ -count=1 -v
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 用 frontend/.nvmrc 作为唯一来源，不要在 workflow 里再写一个版本号。
+          #
+          # ⚠ 这里曾经写死 22（照抄 release.yml），那是错的：`npm run test` 是
+          # `node --test "tests/**/*.test.ts"`，直接执行 .ts 依赖 Node 的类型擦除，
+          # 而类型擦除要到 Node 23.6 才【默认开启】。在 22 上这一步会以
+          # "Unknown file extension .ts" 失败 —— 也就是说 test 脚本隐含要求
+          # Node ≥ 24，而 README 当时写的是「Node ≥ 20」。
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci 而不是 npm install：CI 需要可复现的依赖树，且它会校验
+      # package.json 与 package-lock.json 是否同步 —— 不同步就直接失败，
+      # 而不是悄悄装出一棵与别人不同的树。
+      - name: 安装依赖
+        run: npm ci
+        working-directory: frontend
+
+      - name: typecheck
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: 单元测试
+        run: npm run test
+        working-directory: frontend
+
+      - name: build
+        run: npm run build
+        working-directory: frontend

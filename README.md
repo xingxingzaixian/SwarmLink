@@ -20,7 +20,9 @@ L1 出站适配器   adapters/{net/{tcp,udp},store/{sqlite,mem},config,filesink,
 组合根          internal/bootstrap（唯一允许 new 具体适配器的地方）
 ```
 
-**三条红线由 CI 强制**（`make lint-arch`），而不是靠自觉：
+**三条红线由测试强制**（`internal/archtest`，等价于 `make lint-arch`），而不是靠自觉。
+它随 `go test ./...` 自动执行，并由 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+在 Windows 与 Linux 上各跑一遍：
 
 | 红线 | 内容                                                          |
 | ---- | ------------------------------------------------------------- |
@@ -52,7 +54,12 @@ make ci                 # 等价于 CI 的一条命令
 
 ### 2.3 桌面 GUI
 
-前置：**Go ≥ 1.25**、Node ≥ 20、`wails3` CLI **v3.0.0-beta.24**。
+前置：**Go ≥ 1.25**、**Node ≥ 24**（见 [`frontend/.nvmrc`](frontend/.nvmrc)，
+CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.24**。
+
+> Node 的下限是 24 而不是 20：`npm run test` 直接执行 `.ts`
+> （`node --test "tests/**/*.test.ts"`），依赖 Node 的类型擦除，而类型擦除要到
+> Node 23.6 才默认开启。
 
 ```bash
 make gui            # = 生成绑定 + wails3 build → bin/SwarmLink
