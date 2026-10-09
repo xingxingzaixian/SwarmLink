@@ -34,6 +34,11 @@ type TransferApp struct {
 	ChunkSize     int64
 	WindowSize    int
 
+	// MaxFolderEntries 是一次文件夹传输允许的最大条目数（文件 + 目录），
+	// 0 表示用默认值。上限不是洁癖：一次误操作（选了 C:\Users）会产生
+	// 几十万条任务，而枚举与落库都在同步路径上，界面会先卡死。
+	MaxFolderEntries int
+
 	// BitmapFlushInterval / FlushEveryChunks 控制位图批量落盘（P1-9）。
 	BitmapFlushInterval time.Duration
 	FlushEveryChunks    int
@@ -114,6 +119,7 @@ func NewTransferApp(
 		MaxConcurrent:       maxConc,
 		ChunkSize:           transfer.DefaultChunkSize,
 		WindowSize:          transfer.DefaultWindow,
+		MaxFolderEntries:    defaultMaxFolderEntries,
 		BitmapFlushInterval: 2 * time.Second,
 		FlushEveryChunks:    256,
 		AckInterval:         500 * time.Millisecond,
@@ -183,7 +189,10 @@ func (a *TransferApp) sendFile(
 	// 而"取消之后对方上线仍然自动传输"正是这个功能明令禁止的事。
 	//
 	// 反向窗口由 CancelJob 的 isStarting 检查兜住（我们已抢占 → 它拒绝）。
-	if prev, gerr := a.store.GetJob(jobID); gerr == nil && prev.Status != transfer.StateIdle {
+	// prev 一直在手：状态校验、退避档位、批次字段三处都要用它，
+	// 读一次比读三次更不容易漏（漏掉的代价见 carryOverBatch 的注释）。
+	prev, prevErr := a.store.GetJob(jobID)
+	if prevErr == nil && prev.Status != transfer.StateIdle {
 		return transfer.Job{}, fmt.Errorf("transfer: 任务已不在等待中（当前 %s）", prev.Status)
 	}
 
@@ -219,7 +228,7 @@ func (a *TransferApp) sendFile(
 			if job.Direction == "" {
 				// 失败发生在任务建成之前（例如拿不到会话）：从本地文件补一份
 				// 完整任务，等待期照样能显示文件名与大小。
-				job = a.newWaitingJob(jobID, peerID, path, sizeOf(path))
+				job = carryOverBatch(prev, a.newWaitingJob(jobID, peerID, path, sizeOf(path)))
 			}
 			job = a.markWaiting(job, jobID, peerID, path, err)
 			err = nil // 「等一会儿」不是错误
@@ -261,7 +270,7 @@ func (a *TransferApp) sendFile(
 	//    这是本次改动的核心：过去会先算完整文件 SHA-256 再拨号失败，
 	//    一个 10GB 文件为了"发不出去"要先读一整遍磁盘。
 	if !force && !a.peerReachable(peerID) {
-		fresh := a.newWaitingJob(jobID, peerID, path, statSize)
+		fresh := carryOverBatch(prev, a.newWaitingJob(jobID, peerID, path, statSize))
 		if a.lg != nil {
 			a.lg.Info("transfer: 对端离线，任务进入等待",
 				"job_id", jobID, "peer_id", peerID.String(), "file", fresh.FileName)
@@ -296,7 +305,7 @@ func (a *TransferApp) sendFile(
 	// 重试都把计数归零 —— 退避会永远停在第一档，变成"每秒重试一次"。
 	// 首次发送查不到行，拿到 0，行为与过去一致。
 	retryCount := 0
-	if prev, gerr := a.store.GetJob(jobID); gerr == nil {
+	if prevErr == nil {
 		retryCount = prev.RetryCount
 	}
 
@@ -318,6 +327,9 @@ func (a *TransferApp) sendFile(
 		CreatedAt:   a.clk.Now(),
 		UpdatedAt:   a.clk.Now(),
 	}
+	// 批次字段从旧行承接：这个字面量是从零构造的，漏掉就会在文件真正
+	// 开始传的那一刻把批次信息抹成零值（同 RetryCount 的道理）。
+	job = carryOverBatch(prev, job)
 	if err := a.store.UpsertJob(job); err != nil {
 		return job, err
 	}
