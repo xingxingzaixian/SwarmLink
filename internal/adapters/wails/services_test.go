@@ -156,6 +156,99 @@ func selfID(t *testing.T) identity.NodeID {
 }
 
 // ---------------------------------------------------------------------------
+// SendFolder / CancelBatch / ListBatch
+// ---------------------------------------------------------------------------
+
+// capDir 报告指定对端支持目录传输 —— SendFolder 的能力位前提。
+type capDir struct {
+	peerID identity.NodeID
+	caps   peer.Caps
+}
+
+func (d capDir) Upsert(peer.Peer) error { return nil }
+func (d capDir) Get(id identity.NodeID) (peer.Peer, bool) {
+	if id == d.peerID {
+		return peer.Peer{NodeID: id, Caps: d.caps}, true
+	}
+	return peer.Peer{}, false
+}
+func (d capDir) List(ports.PeerFilter) []peer.Peer                { return nil }
+func (d capDir) MarkOffline(identity.NodeID, time.Time) error     { return nil }
+func (d capDir) SeenRecently(identity.NodeID, time.Duration) bool { return false }
+
+// 与 SendFile 同一条约定：最廉价的校验在返回前同步做。
+//
+// 路径打错、或把「文件」当成文件夹选中，是最常见的两种失误；让它们当场
+// 报错，用户就不必对着一个永远不会出现的批次猜发生了什么。
+func TestSendFolderValidatesSynchronously(t *testing.T) {
+	repo := newMemTransferRepo()
+	peerID, err := identity.ParseNodeID(testPeerHex)
+	if err != nil {
+		t.Fatalf("解析对端 NodeID: %v", err)
+	}
+	dir := capDir{peerID: peerID, caps: peer.CapsFolderTransfer}
+	tapp := app.NewTransferApp(selfID(t), repo, nil, stubConns{}, dir, nil, clock.New(), nil)
+	svc := &TransferService{d: Deps{Transfer: tapp, TransferRepo: repo}}
+
+	root := t.TempDir()
+	folder := filepath.Join(root, "照片")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.jpg", "b.jpg"} {
+		if err := os.WriteFile(filepath.Join(folder, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := svc.SendFolder(testPeerHex, filepath.Join(root, "不存在")); err == nil {
+		t.Error("路径不存在必须当场报错")
+	}
+	if _, err := svc.SendFolder(testPeerHex, filepath.Join(folder, "a.jpg")); err == nil {
+		t.Error("选中的是文件而不是文件夹时必须当场报错")
+	}
+
+	sum, err := svc.SendFolder(testPeerHex, folder)
+	if err != nil {
+		t.Fatalf("SendFolder: %v", err)
+	}
+	if sum.BatchID == "" {
+		t.Error("batchID 必须由服务层生成（随机且全局唯一），不能由调用方给")
+	}
+	if sum.FolderName != "照片" || sum.FileCount != 2 {
+		t.Errorf("summary = %+v，期望 照片/2 条", sum)
+	}
+
+	// 落库的任务必须带上刚才那个 batchID，界面才能靠它聚合
+	jobs, err := svc.ListBatch(sum.BatchID)
+	if err != nil {
+		t.Fatalf("ListBatch: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("ListBatch 返回 %d 条，期望 2", len(jobs))
+	}
+	for _, j := range jobs {
+		if j.BatchID != sum.BatchID || j.RelPath == "" {
+			t.Errorf("任务缺少批次信息：%+v", j)
+		}
+	}
+}
+
+// 空 batchID 必须被拒：它会退化成「对本机全部单文件任务下手」。
+func TestBatchMethodsRejectEmptyID(t *testing.T) {
+	repo := newMemTransferRepo()
+	tapp := app.NewTransferApp(selfID(t), repo, nil, stubConns{}, emptyDir{}, nil, clock.New(), nil)
+	svc := &TransferService{d: Deps{Transfer: tapp, TransferRepo: repo}}
+
+	if _, err := svc.CancelBatch(""); err == nil {
+		t.Error("空 batchID 的取消必须被拒绝")
+	}
+	if _, err := svc.ListBatch(""); err == nil {
+		t.Error("空 batchID 的查询必须被拒绝")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // SendFile 的返回值契约
 // ---------------------------------------------------------------------------
 

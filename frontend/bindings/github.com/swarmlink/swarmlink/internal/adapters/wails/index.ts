@@ -19,6 +19,7 @@ export {
 export type {
     ConversationDTO,
     DiagnosticsDTO,
+    FolderDTO,
     GroupDTO,
     GroupMemberDTO,
     MessageDTO,

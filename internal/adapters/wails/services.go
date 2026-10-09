@@ -440,6 +440,36 @@ func (s *ChatService) SendFileMessage(peerID, jobID, fileName string) (MessageDT
 	return ToMessageDTO(msg), nil
 }
 
+// SendFolderMessage 发送文件夹消息（通知对端「我正在发送一个文件夹」）。
+//
+// 与 SendFileMessage 同构：这条消息不携带文件本身、也不携带发送方的本地路径，
+// 只让两端聊天框出现【一张】聚合卡片（几百个文件不能塞几百张卡片）。
+// fileCount / totalSize / skipped 由发送端枚举后给出，接收端直接显示同一组数字。
+func (s *ChatService) SendFolderMessage(
+	peerID, batchID, folderName string,
+	fileCount int,
+	totalSize int64,
+	skipped int,
+) (MessageDTO, error) {
+	id, err := identity.ParseNodeID(peerID)
+	if err != nil {
+		return MessageDTO{}, fmt.Errorf("无效的 NodeID: %w", err)
+	}
+	if batchID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少批次 id")
+	}
+	if folderName == "" {
+		return MessageDTO{}, fmt.Errorf("缺少文件夹名")
+	}
+	msg, err := s.d.Chat.SendFolder(
+		context.Background(), id, batchID, folderName, fileCount, totalSize, skipped,
+	)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return ToMessageDTO(msg), nil
+}
+
 // decodeImageBytes 把前端传来的 base64 图片数据解码成字节。
 func decodeImageBytes(dataB64 string) ([]byte, error) {
 	if dataB64 == "" {
@@ -623,6 +653,70 @@ func (s *TransferService) SendFile(peerID, path string) (string, error) {
 		_, _ = s.d.Transfer.SendFileAs(context.Background(), id, path, jobID)
 	}()
 	return jobID, nil
+}
+
+// SendFolder 发送一个文件夹：枚举与落库在返回前完成（只 stat、不哈希），
+// 传输由 app 层的排队机制驱动，因此返回后界面上会立刻出现一条文件夹卡片
+// 与一批「排队中」的任务。
+//
+// batchID 在这里生成（随机、全局唯一）：它不是文件夹名 —— 两个对端各发一个
+// 「照片」时，同名 batch 会让卡片把两个文件夹合并、整体取消也连带停掉另一批。
+func (s *TransferService) SendFolder(peerID, path string) (FolderDTO, error) {
+	id, err := identity.ParseNodeID(peerID)
+	if err != nil {
+		return FolderDTO{}, fmt.Errorf("无效的 NodeID: %w", err)
+	}
+	if path == "" {
+		return FolderDTO{}, fmt.Errorf("请选择文件夹")
+	}
+	// 最廉价的检查同步做：路径打错、或把文件当文件夹选中，是这里最常见的
+	// 失误 —— 当场报错比让用户对着一个不会出现的批次猜要好。
+	st, err := os.Stat(path)
+	if err != nil {
+		return FolderDTO{}, fmt.Errorf("无法访问: %w", err)
+	}
+	if !st.IsDir() {
+		return FolderDTO{}, fmt.Errorf("请选择文件夹（%s 是一个文件）", path)
+	}
+
+	sum, err := s.d.Transfer.SendFolderAs(context.Background(), id, path, message.NewID())
+	if err != nil {
+		return FolderDTO{}, err
+	}
+	return FolderDTO{
+		BatchID:    sum.BatchID,
+		FolderName: sum.FolderName,
+		FileCount:  sum.FileCount,
+		TotalSize:  sum.TotalSize,
+		Skipped:    sum.Skipped,
+	}, nil
+}
+
+// CancelBatch 取消整个文件夹批次里未结束的任务（含正在传输的那个），返回取消条数。
+func (s *TransferService) CancelBatch(batchID string) (int, error) {
+	if batchID == "" {
+		return 0, fmt.Errorf("请选择批次")
+	}
+	return s.d.Transfer.CancelBatch(batchID)
+}
+
+// ListBatch 返回一个批次的全部任务（文件夹卡片上的聚合进度用）。
+//
+// 不复用 List()：那个走 ListRecent 的窗口（默认 50 条），一个几百个文件的
+// 文件夹会算出缺斤少两的进度。
+func (s *TransferService) ListBatch(batchID string) ([]TransferDTO, error) {
+	if batchID == "" {
+		return nil, fmt.Errorf("请选择批次")
+	}
+	jobs, err := s.d.TransferRepo.ListByBatch(batchID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TransferDTO, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, ToTransferDTO(j))
+	}
+	return out, nil
 }
 
 // CancelTransfer 取消一条尚未开始的传输任务（等待中的那种）。

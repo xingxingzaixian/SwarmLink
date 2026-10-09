@@ -113,8 +113,13 @@ type TransferDTO struct {
 	// `batch_queued`（文件夹批次里排队等前一个传完）。
 	// 界面靠它区分「等待对方上线」与「排队中」—— 两者在 status 上都是 idle/queued。
 	WaitReason string `json:"waitReason,omitempty"`
-	Error      string `json:"error,omitempty"`
-	UpdatedAt  int64  `json:"updatedAt"`
+	// 文件夹批次：BatchID 非空时 RelPath 是它在目录树里的位置（含根名）。
+	// 传输列表靠 RelPath 区分同名的文件（a/dup.txt 与 b/dup.txt）。
+	BatchID   string `json:"batchId,omitempty"`
+	RelPath   string `json:"relPath,omitempty"`
+	IsDir     bool   `json:"isDir,omitempty"`
+	Error     string `json:"error,omitempty"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 // ToTransferDTO 转换领域任务。
@@ -131,9 +136,24 @@ func ToTransferDTO(j transfer.Job) TransferDTO {
 		Percent:     j.Percent(),
 		Status:      string(j.Status),
 		WaitReason:  string(j.WaitReason),
+		BatchID:     j.BatchID,
+		RelPath:     j.RelPath,
+		IsDir:       j.IsDir,
 		Error:       j.Error,
 		UpdatedAt:   j.UpdatedAt.UnixMilli(),
 	}
+}
+
+// FolderDTO 是一次文件夹发送的摘要（聊天框那条卡片的数据）。
+//
+// 数字由【发送端枚举后】给出并随消息投递给对端：接收端自己数会出现
+// 「一端写 32 个、另一端写 30 个」这种对不上的情况。
+type FolderDTO struct {
+	BatchID    string `json:"batchId"`
+	FolderName string `json:"folderName"`
+	FileCount  int    `json:"fileCount"`
+	TotalSize  int64  `json:"totalSize"`
+	Skipped    int    `json:"skipped"`
 }
 
 // GroupMemberDTO 是群成员项。

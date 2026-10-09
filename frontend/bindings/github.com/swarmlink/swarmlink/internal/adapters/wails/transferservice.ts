@@ -15,10 +15,19 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * CancelBatch 取消整个文件夹批次里未结束的任务（含正在传输的那个），返回取消条数。
+ */
+export function CancelBatch(batchID: string): $CancellablePromise<number> {
+    return $Call.ByID(1782102293, batchID);
+}
+
+/**
  * CancelTransfer 取消一条尚未开始的传输任务（等待中的那种）。
  * 
- * 已在传输的任务会被 app 层拒绝：当前 sender 没有中断点，
- * 假取消（点了没反应，或传了一半留下半截临时文件）比拒绝更糟。
+ * 正在传输的任务也能取消：sender 有中断点，状态由发送路径落成 cancelled，
+ * 半截临时文件【保留】以便下次按位图续传。
+ * 仍会被拒绝的只有一种：仓储说「在传」、实际没有在跑的 goroutine（崩溃陈行）
+ * —— 接受它只会给出一个假动作。
  */
 export function CancelTransfer(jobID: string): $CancellablePromise<void> {
     return $Call.ByID(2371186184, jobID);
@@ -49,6 +58,16 @@ export function Get(jobID: string): $CancellablePromise<$models.TransferDTO> {
  */
 export function List(): $CancellablePromise<$models.TransferDTO[] | null> {
     return $Call.ByID(3831912297);
+}
+
+/**
+ * ListBatch 返回一个批次的全部任务（文件夹卡片上的聚合进度用）。
+ * 
+ * 不复用 List()：那个走 ListRecent 的窗口（默认 50 条），一个几百个文件的
+ * 文件夹会算出缺斤少两的进度。
+ */
+export function ListBatch(batchID: string): $CancellablePromise<$models.TransferDTO[] | null> {
+    return $Call.ByID(1894633615, batchID);
 }
 
 /**
@@ -87,4 +106,16 @@ export function Reveal(path: string): $CancellablePromise<void> {
  */
 export function SendFile(peerID: string, path: string): $CancellablePromise<string> {
     return $Call.ByID(3239939129, peerID, path);
+}
+
+/**
+ * SendFolder 发送一个文件夹：枚举与落库在返回前完成（只 stat、不哈希），
+ * 传输由 app 层的排队机制驱动，因此返回后界面上会立刻出现一条文件夹卡片
+ * 与一批「排队中」的任务。
+ * 
+ * batchID 在这里生成（随机、全局唯一）：它不是文件夹名 —— 两个对端各发一个
+ * 「照片」时，同名 batch 会让卡片把两个文件夹合并、整体取消也连带停掉另一批。
+ */
+export function SendFolder(peerID: string, path: string): $CancellablePromise<$models.FolderDTO> {
+    return $Call.ByID(2773910899, peerID, path);
 }

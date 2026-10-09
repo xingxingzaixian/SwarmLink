@@ -28,6 +28,20 @@ export interface DiagnosticsDTO {
 }
 
 /**
+ * FolderDTO 是一次文件夹发送的摘要（聊天框那条卡片的数据）。
+ * 
+ * 数字由【发送端枚举后】给出并随消息投递给对端：接收端自己数会出现
+ * 「一端写 32 个、另一端写 30 个」这种对不上的情况。
+ */
+export interface FolderDTO {
+    "batchId": string;
+    "folderName": string;
+    "fileCount": number;
+    "totalSize": number;
+    "skipped": number;
+}
+
+/**
  * GroupDTO 是群项。
  */
 export interface GroupDTO {
@@ -172,10 +186,19 @@ export interface TransferDTO {
     "status": string;
 
     /**
-     * WaitReason 非空表示这条任务在等（目前只有 "peer_offline"）。
+     * WaitReason 非空表示这条任务在等：`peer_offline`（等对端上线）或
+     * `batch_queued`（文件夹批次里排队等前一个传完）。
      * 界面靠它区分「等待对方上线」与「排队中」—— 两者在 status 上都是 idle/queued。
      */
     "waitReason"?: string;
+
+    /**
+     * 文件夹批次：BatchID 非空时 RelPath 是它在目录树里的位置（含根名）。
+     * 传输列表靠 RelPath 区分同名的文件（a/dup.txt 与 b/dup.txt）。
+     */
+    "batchId"?: string;
+    "relPath"?: string;
+    "isDir"?: boolean;
     "error"?: string;
     "updatedAt": number;
 }

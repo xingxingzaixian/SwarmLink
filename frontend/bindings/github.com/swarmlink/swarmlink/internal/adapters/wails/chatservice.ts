@@ -74,6 +74,17 @@ export function SendFileMessage(peerID: string, jobID: string, fileName: string)
 }
 
 /**
+ * SendFolderMessage 发送文件夹消息（通知对端「我正在发送一个文件夹」）。
+ * 
+ * 与 SendFileMessage 同构：这条消息不携带文件本身、也不携带发送方的本地路径，
+ * 只让两端聊天框出现【一张】聚合卡片（几百个文件不能塞几百张卡片）。
+ * fileCount / totalSize / skipped 由发送端枚举后给出，接收端直接显示同一组数字。
+ */
+export function SendFolderMessage(peerID: string, batchID: string, folderName: string, fileCount: number, totalSize: number, skipped: number): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(901221585, peerID, batchID, folderName, fileCount, totalSize, skipped);
+}
+
+/**
  * SendImage 发送一张本地图片：读文件 → 压缩 → 内联进消息。
  * 
  * 为什么压缩放在这里（而不是前端）：前端拿到的是路径或 Blob，压缩需要解码 + 缩放 + 体积控制，
