@@ -114,6 +114,10 @@ const (
 	// 直接透出去，托盘气泡里就是一段「{"job_id":"01a0ed92-…」。
 	hoverFilePreview    = "[文件]"
 	hoverFileFailSuffix = "（发送失败）"
+
+	// 文件夹消息的 content 与文件那个同构（{batch_id, folder_name, …}），
+	// 因此同样不能原样透出去 —— 那会把托盘提示变成一段裸 JSON。
+	hoverFolderPreview = "[文件夹]"
 )
 
 // NotifyDeps 是决策器的依赖集合。
@@ -424,12 +428,17 @@ func (n *NotifyApp) hoverTextLocked() string {
 // 文件那个带着 job_id）：直接透出去既没用，又会把提示框变成一段裸 JSON，
 // 因此按类型给一句人话。规则与前端 utils/message.ts 的 previewText 互为镜像 ——
 // 只改一边，就会出现「左栏有文件名、托盘只有一段 JSON」这种不一致。
+//
+// 文件夹消息（MsgTypeFolder）是同一类信封，因此同样必须在这里分派：
+// 漏掉它不会报错，只会让托盘悬停显示成「{"batch_id":"01a0ed92-…」。
 func previewOf(m message.Message) string {
 	switch m.MsgType {
 	case message.MsgTypeImage:
 		return hoverImagePreview
 	case message.MsgTypeFile, message.MsgTypeFileFailed:
 		return filePreviewOf(m)
+	case message.MsgTypeFolder:
+		return folderPreviewOf(m)
 	}
 	first, _, _ := strings.Cut(m.Content, "\n") // 只取首行
 	first = strings.TrimSpace(first)
@@ -454,20 +463,39 @@ func filePreviewOf(m message.Message) string {
 	return hoverFilePreview + " " + name + suffix
 }
 
+// folderPreviewOf 把文件夹消息的 JSON 信封压成「[文件夹] 名字」。
+//
+// 取不到名字时只给「[文件夹]」：宁可少一个名字，也不能把 batch_id 漏到提示框里。
+func folderPreviewOf(m message.Message) string {
+	name := pickString(m.Content, "folder_name", "folderName", "FolderName")
+	if name == "" {
+		return hoverFolderPreview
+	}
+	return hoverFolderPreview + " " + name
+}
+
 // fileNameOf 取文件消息 content 里的文件名。
 //
 // 三种历史写法都要认（file_name / fileName / FileName）：与前端
 // utils/message.ts 的容错保持一致，否则老消息会出现「气泡有名字、托盘没名字」。
 func fileNameOf(content string) string {
-	var v struct {
-		Snake string `json:"file_name"`
-		Camel string `json:"fileName"`
-		Go    string `json:"FileName"`
-	}
-	if err := json.Unmarshal([]byte(content), &v); err != nil {
+	return pickString(content, "file_name", "fileName", "FileName")
+}
+
+// pickString 按给定的候选键顺序取第一个非空字符串。
+//
+// 抽出来是因为「认三种历史写法」这条容错同时被文件与文件夹消息需要：
+// 各写一遍的话，下次再有第三种信封时只补一处，另一处就会悄悄退回裸 JSON。
+func pickString(content string, keys ...string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err != nil {
 		return ""
 	}
-	for _, s := range []string{v.Snake, v.Camel, v.Go} {
+	for _, k := range keys {
+		s, ok := m[k].(string)
+		if !ok {
+			continue
+		}
 		if s = strings.TrimSpace(s); s != "" {
 			return s
 		}

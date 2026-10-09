@@ -135,6 +135,18 @@ func TestMediaMessagePreviewIsNotRawJSON(t *testing.T) {
 			`{"v":1,"mime":"image/png","b64":"iVBORw0KGgo="}`,
 			"张三：[图片]",
 		},
+		{
+			"文件夹（整批共一条卡片）",
+			message.MsgTypeFolder,
+			`{"batch_id":"b1","folder_name":"照片","file_count":32,"total_size":1048576,"skipped":2}`,
+			"张三：[文件夹] 照片",
+		},
+		{
+			"文件夹：坏 JSON 宁可少个名字，也不能漏出原文",
+			message.MsgTypeFolder,
+			`{"batch_id":`,
+			"张三：[文件夹]",
+		},
 	}
 
 	for _, tc := range cases {
