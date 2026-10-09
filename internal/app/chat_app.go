@@ -84,6 +84,34 @@ func (a *ChatApp) SendFile(ctx context.Context, peerID identity.NodeID, jobID st
 	return a.send(ctx, peerID, string(payload), message.MsgTypeFile)
 }
 
+// SendFolder 发送单聊文件夹消息。
+//
+// 与 SendFile 同一套路：content 只是让两端聊天框出现一张聚合卡片，
+// 真正的传输由 TransferApp 按 batch_id 自己跑。
+//
+// 一次文件夹只发【一条】消息：几百个文件发几百条消息会把聊天记录刷屏，
+// 也会让 outbox 里排上几百条待确认记录。
+func (a *ChatApp) SendFolder(
+	ctx context.Context,
+	peerID identity.NodeID,
+	batchID, folderName string,
+	fileCount int,
+	totalSize int64,
+	skipped int,
+) (message.Message, error) {
+	payload, err := protocol.EncodeJSON(message.FolderMessageContent{
+		BatchID:    batchID,
+		FolderName: folderName,
+		FileCount:  fileCount,
+		TotalSize:  totalSize,
+		Skipped:    skipped,
+	})
+	if err != nil {
+		return message.Message{}, fmt.Errorf("chat: encode folder content: %w", err)
+	}
+	return a.send(ctx, peerID, string(payload), message.MsgTypeFolder)
+}
+
 // send 是文本与图片共用的发送实现。
 //
 // 「入库成功就算发送完成」：网络连接建立与实际发送在后台异步进行，

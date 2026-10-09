@@ -41,6 +41,12 @@ const (
 	MsgTypeFile MsgType = "file"
 	// MsgTypeFileFailed 表示文件传输失败
 	MsgTypeFileFailed MsgType = "file_failed"
+	// MsgTypeFolder 的 content 是 FolderMessageContent 的 JSON 信封。
+	//
+	// 与 MsgTypeFile 同构：这条消息只让两端聊天框出现【一张】文件夹卡片，
+	// 传输本身由 TransferApp 的独立通道完成 —— 一个几百个文件的文件夹
+	// 不能往聊天框里塞几百张卡片。
+	MsgTypeFolder MsgType = "folder"
 )
 
 // Message 是单聊/群聊共用的消息实体。
@@ -77,6 +83,21 @@ type FileFailedContent struct {
 type FileMessageContent struct {
 	JobID    string `json:"job_id"`    // 传输任务ID
 	FileName string `json:"file_name"` // 文件名
+}
+
+// FolderMessageContent 是文件夹消息的内容。
+//
+// 与 FileMessageContent 一样【不】含发送方本地路径：这条消息会投递给对端。
+//
+// file_count / total_size 由发送端枚举后给出，接收端直接用：让接收端自己数，
+// 两端就会出现两个不同的「共 N 个文件」（接收端可能还没收全）。
+// skipped 是发送端跳过的符号链接数 —— 用户需要知道「少了几项」。
+type FolderMessageContent struct {
+	BatchID    string `json:"batch_id"`    // 批次ID（点击/取消都用它）
+	FolderName string `json:"folder_name"` // 文件夹名
+	FileCount  int    `json:"file_count"`  // 条目数（含空目录）
+	TotalSize  int64  `json:"total_size"`  // 总字节数
+	Skipped    int    `json:"skipped"`     // 被跳过的项（符号链接）
 }
 
 // NewID 生成 UUIDv7 —— 时间有序，便于 UI 排序与游标分页（ADR-004）。
