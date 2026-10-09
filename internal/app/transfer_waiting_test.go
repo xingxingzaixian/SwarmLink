@@ -66,6 +66,82 @@ func TestShouldWaitForPeer(t *testing.T) {
 	}
 }
 
+// 只有「可自动拉起」的等待原因会被 startJobs 交给发送路径。
+//
+// 这条守卫是「用户点了取消，对方一上线文件又自己跑起来」的最后一道防线，
+// 因此两侧都要钉住：批次排队（WaitQueued）必须被拉起，取消过的（WaitNone）
+// 必须纹丝不动。
+//
+// 可观测性靠「本地文件不存在」：被拉起的任务会立刻走一次发送，本地检查
+// （sendFile 的第一步）当场失败并发 transfer:error；没被拉起的则毫无动静。
+// 三个任务刻意用【不同对端】：同一对端同一时刻只启动一个是既有规则
+// （防哈希风暴），同对端会让用例只能观察到一条。
+func TestStartJobsOnlyPicksAutoStartable(t *testing.T) {
+	repo := &stubTransferRepo{}
+	bus := eventbus.New()
+	failed := make(chan eventbus.TransferError, 8)
+	bus.Subscribe(eventbus.TopicTransferError, func(p any) {
+		if ev, ok := p.(eventbus.TransferError); ok {
+			failed <- ev
+		}
+	})
+
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, bus, clock.New(), nil)
+	missing := filepath.Join(t.TempDir(), "gone.bin") // 一定不存在
+	mkPeer := func(b byte) identity.NodeID {
+		var id identity.NodeID
+		id[len(id)-1] = b // 末字节不同即不同节点（NodeID 是定长 8 字节）
+		return id
+	}
+
+	jobs := []transfer.Job{
+		a.newWaitingJob("j-offline", mkPeer(1), missing, 0),
+		a.newWaitingJob("j-queued", mkPeer(2), missing, 0),
+		a.newWaitingJob("j-cancelled", mkPeer(3), missing, 0),
+	}
+	jobs[0].WaitReason = transfer.WaitPeerOffline
+	jobs[1].WaitReason = transfer.WaitQueued
+	jobs[2].WaitReason = transfer.WaitNone // 用户取消过
+	for _, j := range jobs {
+		if err := repo.UpsertJob(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a.startJobs(context.Background(), jobs)
+
+	started := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-failed:
+			started[ev.JobID] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("只等到 %d 个被拉起的任务 %v：期望 j-offline 与 j-queued 各一次",
+				i, started)
+		}
+	}
+	if !started["j-offline"] || !started["j-queued"] {
+		t.Errorf("被拉起的任务 = %v，期望 j-offline 与 j-queued", started)
+	}
+
+	// 取消过的那条必须原封不动
+	select {
+	case ev := <-failed:
+		t.Fatalf("WaitNone（用户取消过）的任务被自动拉起了：%v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+	stored, err := repo.GetJob("j-cancelled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != transfer.StateIdle || stored.WaitReason != transfer.WaitNone {
+		t.Errorf("取消过的任务被改动了：status=%s waitReason=%q", stored.Status, stored.WaitReason)
+	}
+	if stored.RetryCount != 0 {
+		t.Errorf("取消过的任务重试次数被改了：%d（被拉起过才会递增）", stored.RetryCount)
+	}
+}
+
 // 对方离线时点发送：立刻落一条「等待对方上线」的任务，不报错。
 //
 // 这里用 noConns + 空目录，对端一律不可达；「不哈希」由这份用例间接锁定：

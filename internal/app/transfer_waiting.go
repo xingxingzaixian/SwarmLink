@@ -340,12 +340,18 @@ func (a *TransferApp) startDue(ctx context.Context, jobs []transfer.Job) {
 func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
 	busy := a.busyPeers()
 	for _, j := range jobs {
-		// 只自动拉起「等对方上线」的任务。
+		// 只自动拉起「可自动拉起」的任务：等对方上线的，以及文件夹批次里
+		// 排队等轮到的（WaitQueued）。
 		//
-		// 仓储层（ListWaiting）已经过滤过一遍，这里再守一道：取消过的任务
-		// 只是状态变了，若某个实现漏了过滤，它就会被自动重试 —— 用户点了
-		// 「取消」之后文件自己又传起来，是最难解释的那类 bug。
-		if j.WaitReason != transfer.WaitPeerOffline {
+		// 仓储层（ListWaiting）已经按同一份取值清单过滤过一遍，这里再守一道：
+		// 取消过的任务只是状态变了（WaitReason 被清成 WaitNone），若某个实现
+		// 漏了过滤，它就会被自动重试 —— 用户点了「取消」之后文件自己又传起来，
+		// 是最难解释的那类 bug。
+		//
+		// 判据用 AutoStartable() 而不是在这里手写成员比较：手写就会出现
+		// 第三份「哪些原因能被拉起」的真相（仓储 SQL、领域方法、这里），
+		// 而三处迟早会分叉。
+		if !j.WaitReason.AutoStartable() {
 			continue
 		}
 		if busy[j.PeerID] {
