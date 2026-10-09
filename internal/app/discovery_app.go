@@ -40,8 +40,7 @@ type DiscoveryApp struct {
 	// SeedTCPPortFallback 是种子的兜底 TCP 端口（探测未学到 tcp_port 时使用）。
 	SeedTCPPortFallback uint16
 
-	mu        sync.Mutex
-	lastEpoch map[identity.NodeID]uint64
+	mu sync.Mutex
 }
 
 // NewDiscoveryApp 构造发现应用。
@@ -69,7 +68,6 @@ func NewDiscoveryApp(
 		RefreshInterval: 300 * time.Second,
 		SeedsPerRefresh: 2,
 		MaxEntries:      256,
-		lastEpoch:       make(map[identity.NodeID]uint64),
 	}
 }
 
@@ -142,15 +140,31 @@ func (d *DiscoveryApp) pullFromSeed(ctx context.Context, addr peer.SeedAddr, an 
 		return
 	}
 
-	epoch := d.epochOf(an.NodeID)
-	payload, err := protocol.EncodeJSON(protocol.PeerListReqWire{ListEpoch: epoch})
+	// 请求体刻意不带 list_epoch：服务端无条件返回全量目录（见 HandlePeerListReq）。
+	// 早先这里会回填「上一轮学到的 epoch」，但那个值不再影响任何判定 —— 留着一个
+	// 看起来在跟踪、实际决定不了任何事的字段，正是本仓反复吃亏的形态。
+	payload, err := protocol.EncodeJSON(protocol.PeerListReqWire{})
 	if err != nil {
 		return
 	}
 	_ = sess.Send(protocol.New(protocol.TypePeerListReq, payload))
 }
 
-// HandlePeerListReq 响应目录请求：epoch 相同则回空响应（省流）。
+// HandlePeerListReq 响应目录请求：无条件返回全量目录。
+//
+// 为什么不再做「epoch 相同就回空响应」的省流优化（原实现如此，已确认是缺陷）：
+// 本地 epoch 恒为 1 —— Broadcaster.BumpEpoch 在全仓没有任何调用点 —— 而客户端会把
+// 上一轮响应里的 epoch 原样记下来、下次请求时带回来，于是 req.ListEpoch == local
+// 从第二轮起永远成立。结果是同一对 (本机, 种子) 只会同步一次，种子后来学到的
+// 节点再也传不过来，直到本机重启；而同网段广播不受影响，所以现象是「跨网段的新
+// 节点一直看不见」而不是报错。详见《发现协议设计书》§10.3 / §15.2。
+//
+// 取简法的成本（§15.2 的核算）：200 节点下一次全量响应约 12.8 KB、每节点 5 分钟
+// 一次 ⇒ 单种子出站 < 2 KB/s，可以忽略。换来的是「恒正确」，而不是一条依赖调用者
+// 自觉去 bump epoch 的优化 —— 后者正是本仓反复吃过亏的「多处真相」形态。
+//
+// req.ListEpoch 仍然解析（线上格式保持不变，不破坏兼容），但当前不参与判定。
+// 将来若真的要做增量，必须同时定下「谁负责 bump」的单一真相，否则就会退回今天这个状态。
 func (d *DiscoveryApp) HandlePeerListReq(sess ports.Session, f protocol.Frame) error {
 	var req protocol.PeerListReqWire
 	_ = protocol.DecodeJSON(f.Payload, &req)
@@ -158,9 +172,6 @@ func (d *DiscoveryApp) HandlePeerListReq(sess ports.Session, f protocol.Frame) e
 	local := uint64(0)
 	if d.LocalEpoch != nil {
 		local = d.LocalEpoch()
-	}
-	if req.ListEpoch != 0 && req.ListEpoch == local {
-		return d.sendListResp(sess, protocol.PeerListRespWire{Epoch: local})
 	}
 	return d.sendListResp(sess, protocol.PeerListRespWire{Epoch: local, Entries: d.entries()})
 }
@@ -174,7 +185,6 @@ func (d *DiscoveryApp) HandlePeerListResp(sess ports.Session, f protocol.Frame) 
 	if err := protocol.DecodeJSON(f.Payload, &resp); err != nil {
 		return err
 	}
-	d.setEpoch(sess.PeerID(), resp.Epoch)
 
 	now := d.clk.Now()
 	for _, e := range resp.Entries {
@@ -242,18 +252,6 @@ func (d *DiscoveryApp) entries() []protocol.PeerListEntry {
 		out = append(out, entry)
 	}
 	return out
-}
-
-func (d *DiscoveryApp) epochOf(id identity.NodeID) uint64 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.lastEpoch[id]
-}
-
-func (d *DiscoveryApp) setEpoch(id identity.NodeID, epoch uint64) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.lastEpoch[id] = epoch
 }
 
 // SeedSnapshot 暴露种子状态（诊断面板用）。

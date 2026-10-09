@@ -107,7 +107,13 @@ type HeartbeatAck struct {
 	SentAt int64  `json:"sent_at"`
 }
 
-// PeerListReq 请求节点目录；携带本地 list_epoch 以省流。
+// PeerListReq 请求节点目录。
+//
+// ListEpoch 是历史遗留的省流字段：服务端当前【忽略】它，无条件返回全量目录。
+// 原因见 DiscoveryApp.HandlePeerListReq —— 本地 epoch 无人递增（BumpEpoch 没有
+// 调用点），一旦按它比对就会让同一对 (本机, 种子) 从第二轮起永远拿到空目录。
+// 字段保留在线上格式里只是为了不改协议版本；新代码不要依赖它，也不要在没有
+// 定下「谁负责 bump」之前恢复这个判定。
 type PeerListReq struct {
 	ListEpoch uint64 `json:"list_epoch"`
 }
