@@ -1715,9 +1715,16 @@ git commit -m "docs: 文件夹传输从不做清单移入已实现能力"
 - 计划断言 `C:\Windows\evil.dll` 会被 `SanitizeFileName` 拒 —— **它不检查冒号**，照计划写会在 Linux 上真建出名为 `C:` 的目录。实现补了显式冒号检查。
 - 计划把"单段超长"列进拒绝集，而 `SanitizeFileName` 的既有契约是**截断**；实现继承截断（两处规则只能有一份），并单独出用例。
 
+### Task 7 实施记录（含两处与计划的偏差）
+
+17. **续传键已按 `rel_path` 收紧**：`FindResumable(peer, hash, relPath)`，端口 + sqlite + mem + 两个测试替身同步；`relPath == ""` 时保持单文件旧语义。补了 sqlite/mem 两侧的「同 hash 不同 rel_path 互不命中」仓储用例。**变异验证**：把 `HandleFileMeta` 里的调用改回传空串，`TestHandleFileMetaSameHashInBatchKeepsSeparateTargets` 立刻红（报"同 hash 的两个文件拿到了同一个落点"）—— 用法例证明了修复有效。
+18. **`stubTransferRepo.FindResumable` 从「恒返回 false」改成实现真实语义**（这是计划没写的必要修正）：恒 false 意味着"永远不可能命中"，上面那条用例就变成了空测 —— 断言当然通过。替身必须镜像语义，测试才在验证被测代码。
+19. **目录条目走独立分支**：META 阶段就建目录并落库，DONE 阶段直接收尾（不校验、也不去 Close 一个 nil 句柄）—— 计划只说了"不放行 total==0 校验"，没说 DONE 阶段会踩 nil 句柄。
+20. **接收侧测试夹具要在 `t.TempDir` 清理前关掉接收端的临时文件句柄**：接收端在传输期间【刻意】持有它（直到 FILE_DONE），而 Windows 上删不掉被打开的文件 —— 表现为「用例本身全绿，但 TempDir 清理报 FAIL：file is being used by another process」。`t.Cleanup` 后进先出，夹具里注册的会先跑。
+
 ### 尚未执行、但已挂上验收条件
 
-- **Task 7 必须同时收紧续传键**：`FindResumable(peer, file_hash)` → 批次内按 `rel_path`。否则一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。这是代码质量审查发现的既有语义在批次下被放大，必须在批次上线前解决。
+- **Task 7 已落地**（见下方同名小节）。原要求：`FindResumable(peer, file_hash)`：`FindResumable(peer, file_hash)` → 批次内按 `rel_path`。否则一张文件夹里两份内容相同的文件会共享临时文件与最终路径（目录里少一个文件、另一个内容错位）。这是代码质量审查发现的既有语义在批次下被放大，必须在批次上线前解决。
 - **`ListRecent(50)` 与 `PurgeFinished(keep)` 的保留窗口以 job 计数**：一个 20000 文件的文件夹会把单文件历史挤出窗口。本次不动，Task 6 之后需要重新考虑保留策略。（复审 M-9）
 - **明知未修且不改**（复审 M-7 / M-8，记在这里以免下次又被重新提出）：
   - 迁移能给 `is_dir` 加 `CHECK(is_dir IN (0,1))`，但 SQLite 无法 `ALTER` 加 CHECK（要重建整表），为它单独开一次迁移不值；驱动只写 0/1，读到别的值也是"非 0 即真"，方向安全。
