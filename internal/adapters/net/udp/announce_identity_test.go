@@ -36,7 +36,7 @@ func announcementFrom(kp *identity.KeyPair) peer.Announcement {
 // 要拦下它，必须额外校验 node_id == Fingerprint(public_key)。
 func announcementFor(claimed identity.NodeID, attacker *identity.KeyPair) peer.Announcement {
 	a := peer.Announcement{
-		NodeID:      claimed,              // ← 声称的身份
+		NodeID:      claimed, // ← 声称的身份
 		DisplayName: "冒充者",
 		PublicKey:   attacker.PublicKey(), // ← 真正持有私钥的人
 		TCPPort:     2425,
