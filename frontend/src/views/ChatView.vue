@@ -28,7 +28,7 @@ const peers = usePeersStore()
 const groups = useGroupStore()
 const ui = useUiStore()
 
-const { sending, sendPaths, attach, attachImage } = useFileSend()
+const { sending, sendPaths, attach, attachFolder, attachImage } = useFileSend()
 
 const draft = ref('')
 const pathInput = ref('')
@@ -393,6 +393,16 @@ async function restoreView(): Promise<void> {
           @click="attach"
         >
           <Icon name="paperclip" :size="17" />
+        </button>
+
+        <button
+          class="icon-btn"
+          :disabled="!conv || isGroup || sending"
+          :title="isGroup ? '群聊暂不支持文件夹传输' : '发送文件夹'"
+          aria-label="发送文件夹"
+          @click="attachFolder"
+        >
+          <Icon name="folder" :size="17" />
         </button>
 
         <button

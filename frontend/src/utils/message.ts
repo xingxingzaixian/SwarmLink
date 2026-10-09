@@ -23,6 +23,24 @@ export interface FileFailedContent extends FileContent {
   reason: string
 }
 
+/**
+ * 文件夹消息的内容（Go 侧 message.FolderMessageContent）。
+ *
+ * 这条消息不带任何文件本身，也不含发送方的本地路径 —— 它只让两端聊天框
+ * 出现同一张卡片，文件传输由 TransferApp 的独立通道完成。
+ */
+export interface FolderContent {
+  /** 批次 id：卡片上的进度聚合与「取消全部」都靠它。 */
+  batchId: string
+  folderName: string
+  /** 条目数（含空目录），由发送端枚举后给出。 */
+  fileCount: number
+  /** 总字节数（空目录算 0）。 */
+  totalSize: number
+  /** 被跳过的项（符号链接）。 */
+  skipped: number
+}
+
 /** 从若干候选键里取第一个非空字符串。 */
 function pick(obj: Record<string, unknown>, ...keys: string[]): string {
   for (const key of keys) {
@@ -30,6 +48,15 @@ function pick(obj: Record<string, unknown>, ...keys: string[]): string {
     if (typeof v === 'string' && v !== '') return v
   }
   return ''
+}
+
+/** 从若干候选键里取第一个有限数；取不到算 0（缺一个数字只是难看，不能崩）。 */
+function pickNum(obj: Record<string, unknown>, ...keys: string[]): number {
+  for (const key of keys) {
+    const v = obj[key]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  return 0
 }
 
 function parseObject(content: string): Record<string, unknown> | null {
@@ -66,6 +93,25 @@ export function parseFileFailedContent(content: string): FileFailedContent {
 }
 
 /**
+ * 解析文件夹消息的 content（{batch_id, folder_name, file_count, total_size, skipped}）。
+ *
+ * 与文件消息的区别：这个类型是本次新增的，没有三种历史写法要兼容；
+ * 但仍然逐字段兜底 —— 卡片少一个数字只是难看，成败在于【绝不能】
+ * 让那段 JSON 直接糊进聊天框（那正是 file_failed 曾经的事故形态）。
+ */
+export function parseFolderContent(content: string): FolderContent {
+  const obj = parseObject(content)
+  if (!obj) return { batchId: '', folderName: '文件夹', fileCount: 0, totalSize: 0, skipped: 0 }
+  return {
+    batchId: pick(obj, 'batch_id', 'batchId', 'BatchID'),
+    folderName: pick(obj, 'folder_name', 'folderName', 'FolderName') || '文件夹',
+    fileCount: pickNum(obj, 'file_count', 'fileCount', 'FileCount'),
+    totalSize: pickNum(obj, 'total_size', 'totalSize', 'TotalSize'),
+    skipped: pickNum(obj, 'skipped', 'Skipped')
+  }
+}
+
+/**
  * 会话列表的「最后一条消息」预览文案。
  *
  * 为什么必须按类型分派：图片与文件（含失败）消息的 content 是 JSON 信封，
@@ -85,6 +131,8 @@ export function previewText(m: { msgType: string; content: string }): string {
       return `[文件] ${parseFileContent(m.content).fileName}`
     case 'file_failed':
       return `[文件] ${parseFileFailedContent(m.content).fileName}（发送失败）`
+    case 'folder':
+      return `[文件夹] ${parseFolderContent(m.content).folderName}`
     default:
       return m.content
   }

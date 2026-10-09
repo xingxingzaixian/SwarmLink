@@ -166,11 +166,17 @@ export function transferStatus(status: string, waitReason?: string): Tone {
     case 'paused':
       return { text: '已暂停', cls: 'warn', final: false }
     // 等待对方上线与「还没轮到」共用 idle/queued，靠 waitReason 区分。
-    // 等待是【非终态】：它会在对方上线后自己继续，不能标成结束。
+    // 两者都是【非终态】：它们都会自己继续，不能标成结束。
     case 'idle':
     case 'queued':
       if (waitReason === 'peer_offline') {
         return { text: '等待对方上线', cls: 'warn', final: false }
+      }
+      // 文件夹批次里「排在队列里，轮到就传」：出口是【前一个文件传完】，
+      // 不是「对方上线」。文案必须与上面那条分开 —— 混成一句会让用户
+      // 去检查网络，而实际上它只是在等前一个文件。
+      if (waitReason === 'batch_queued') {
+        return { text: '排队中', cls: '', final: false }
       }
       return status === 'queued'
         ? { text: '排队中', cls: '', final: false }

@@ -42,6 +42,29 @@ export async function pickFiles(multiple = false): Promise<PickOutcome> {
 }
 
 /**
+ * 选择一个文件夹发送。
+ *
+ * 与 pickFiles 完全同源：CanChooseDirectories 由 Wails 内置的 dialog 服务支持，
+ * Go 侧零改动（不需要新服务、也不需要重新生成绑定）。
+ * 只能单选 —— 一次一个批次，多选会让「整体取消」的语义变得含混。
+ */
+export async function pickFolder(): Promise<PickOutcome> {
+  try {
+    const res = await Dialogs.OpenFile({
+      Title: '选择要发送的文件夹',
+      CanChooseFiles: false,
+      CanChooseDirectories: true,
+      AllowsMultipleSelection: false,
+      ButtonText: '发送'
+    })
+    const paths = (Array.isArray(res) ? res : [res]).filter((p): p is string => !!p)
+    return { picked: paths.length > 0, paths, available: true }
+  } catch {
+    return { picked: false, paths: [], available: false }
+  }
+}
+
+/**
  * 只选图片文件。
  *
  * 对话框层面过滤只是为了让用户少选错一次；真实格式判定仍在 Go 侧按魔数做，

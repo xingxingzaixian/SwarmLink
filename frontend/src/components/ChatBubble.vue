@@ -9,16 +9,18 @@
  * 送达状态只对【自己发的】显示，且只显示异常/未完成态：
  * 每条都挂一个「已送达」标签是纯噪音（QQ 也不显示）。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 
 import Avatar from './Avatar.vue'
 import Icon from './Icon.vue'
 import { getApi } from '../api'
-import type { Message } from '../api/types'
-import { bubbleTime } from '../utils/format'
+import type { Message, TransferJob } from '../api/types'
+import { bubbleTime, fileSize } from '../utils/format'
+import { folderProgress } from '../utils/batch'
 import { imageBox, imageSrc, parseImageContent } from '../utils/image'
-import { parseFileContent, parseFileFailedContent } from '../utils/message'
+import { parseFileContent, parseFileFailedContent, parseFolderContent } from '../utils/message'
 import { useTransferStore } from '../stores/transfer'
+import { useUiStore } from '../stores/ui'
 
 const props = withDefaults(
   defineProps<{
@@ -44,6 +46,7 @@ const time = computed(() => bubbleTime(props.message.sentAt))
 const isImage = computed(() => props.message.msgType === 'image')
 const isFile = computed(() => props.message.msgType === 'file')
 const isFileFailed = computed(() => props.message.msgType === 'file_failed')
+const isFolder = computed(() => props.message.msgType === 'folder')
 
 /**
  * 图片消息的内容解析。
@@ -67,6 +70,13 @@ const fileInfo = computed(() => (isFile.value ? parseFileContent(props.message.c
 const fileFailed = computed(() =>
   isFileFailed.value ? parseFileFailedContent(props.message.content) : null
 )
+
+/**
+ * 文件夹消息的内容解析。
+ *
+ * 与文件消息同理：解析失败（旧数据/损坏）要给占位卡片，而不是让整块聊天区崩掉。
+ */
+const folder = computed(() => (isFolder.value ? parseFolderContent(props.message.content) : null))
 
 // 获取传输任务状态
 //
@@ -103,6 +113,80 @@ const filePath = computed(() => {
   if (!job) return ''
   return job.localPath || ''
 })
+
+// --- 文件夹卡片的聚合进度 ---------------------------------------------------
+//
+// 数据来源有两条，缺一不可：
+//   1. store 里的任务 —— 实时（进度事件都落在它上面）；
+//   2. 向 ListBatch 补拉一次 —— 重启后 store 是空的，而 List() 又只有 50 条窗口，
+//      一个 500 个文件的文件夹会因此算出缺斤少两的进度。
+
+/** 本批次在 store 里的任务。 */
+const storeBatchJobs = computed(() => {
+  const id = folder.value?.batchId
+  if (!id) return []
+  return transfers.jobs.filter((j) => j.batchId === id)
+})
+
+/** 补拉来的快照（只用来补齐 store 看不见的那些任务）。 */
+const fetchedBatchJobs = ref<TransferJob[]>([])
+
+// 只在【看得到的条数少于消息里声明的条目数】时补拉一次：
+// 卡片可能同时存在很多张，每张都无条件发一次 ListBatch 会打出几十个 RPC。
+let folderFetched = false
+watchEffect(() => {
+  const f = folder.value
+  if (!f || folderFetched) return
+  if (f.fileCount === 0 || storeBatchJobs.value.length >= f.fileCount) return
+  folderFetched = true
+  void (async () => {
+    try {
+      fetchedBatchJobs.value = await (await getApi()).batchJobs(f.batchId)
+    } catch {
+      /* 补拉失败就只显示 store 里那部分，不为它弹错误 */
+    }
+  })()
+})
+
+/** 合并后的任务表：store 优先（它比补拉快照新），快照只负责补缺。 */
+const batchJobList = computed<TransferJob[]>(() => {
+  const byId = new Map<string, TransferJob>()
+  for (const j of fetchedBatchJobs.value) byId.set(j.jobId, j)
+  for (const j of storeBatchJobs.value) byId.set(j.jobId, j)
+  return [...byId.values()]
+})
+
+const progress = computed(() => folderProgress(batchJobList.value, folder.value?.batchId ?? ''))
+
+/**
+ * 卡片上的进度文案。
+ *
+ * 三种结局必须分开说。把「N-1/N 完成，1 个失败」压成「已完成」，
+ * 会让用户以为整个文件夹都到手了 —— 那正是这个功能最不能出的错。
+ */
+const folderStatus = computed(() => {
+  const p = progress.value
+  if (p.total === 0) return '' // 任务还没拿到（刚发起 / 后端还没回）
+  if (!p.allFinished) return `已完成 ${p.done}/${p.total}`
+  if (p.hasFailure) return `${p.done}/${p.total} 完成，${p.failed} 个失败`
+  if (p.cancelled > 0) return `${p.done}/${p.total} 完成，${p.cancelled} 个已取消`
+  return `已完成 ${p.done}/${p.total}`
+})
+
+/** 还有没结束的任务才给「取消全部」。 */
+const canCancelFolder = computed(() => progress.value.total > 0 && !progress.value.allFinished)
+
+const ui = useUiStore()
+
+async function cancelFolder(): Promise<void> {
+  const id = folder.value?.batchId
+  if (!id) return
+  try {
+    await transfers.cancelBatch(id)
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || '取消失败')
+  }
+}
 
 /**
  * 解码失败（b64 合法但不是图片、或数据被截断）也要落到占位块。
@@ -171,7 +255,10 @@ async function openFileLocation() {
 
       <div
         class="bubble"
-        :class="{ 'bubble-image': isImage, 'bubble-file': isFile || isFileFailed }"
+        :class="{
+          'bubble-image': isImage,
+          'bubble-file': isFile || isFileFailed || isFolder
+        }"
       >
         <!-- 时间显示在内容上面 -->
         <div class="bubble-time">{{ time }}</div>
@@ -218,6 +305,42 @@ async function openFileLocation() {
               <div class="file-name">{{ fileFailed?.fileName || '文件' }}</div>
               <div class="file-meta">{{ fileFailed?.reason || '发送失败' }}</div>
             </div>
+          </div>
+        </template>
+        <!--
+          文件夹批次：整批只出现【一条】卡片（几百个文件不能塞几百条消息）。
+          进度按 batch_id 聚合传输任务，「取消全部」也是整批的动作。
+        -->
+        <template v-else-if="isFolder">
+          <div class="file-message">
+            <Icon name="folder" :size="32" />
+            <div class="file-info">
+              <div class="file-name">{{ folder?.folderName }}/</div>
+              <div class="file-meta">
+                {{ folder?.fileCount }} 个文件<template v-if="folder?.totalSize"
+                  > · {{ fileSize(folder.totalSize) }}</template
+                >
+              </div>
+              <!-- 有失败时用警示色：这正是用户需要停下来看一眼的那种结局 -->
+              <div
+                v-if="folderStatus"
+                class="file-meta"
+                :class="{ 'folder-failed': progress.hasFailure }"
+              >
+                {{ folderStatus }}
+              </div>
+              <div v-if="folder?.skipped" class="file-meta">
+                已跳过 {{ folder.skipped }} 项
+              </div>
+            </div>
+            <button
+              v-if="canCancelFolder"
+              class="folder-cancel"
+              title="停下这一批里还没传完的文件"
+              @click="cancelFolder"
+            >
+              取消全部
+            </button>
           </div>
         </template>
         <div v-else class="text">{{ message.content }}</div>
@@ -409,6 +532,31 @@ async function openFileLocation() {
 .file-message.failed .file-meta,
 .row.out .file-message.failed .file-meta {
   color: var(--err-ink);
+}
+
+/* 批次里有失败：只把这一行染红，文件名仍是正常墨色 ——
+   整张卡片变红会让「文件夹本身没问题、只是少了一个文件」看起来像整批崩了。 */
+.file-meta.folder-failed {
+  color: var(--err-ink);
+}
+
+/* 「取消全部」：整批只有这一个出口，因此是卡片上的实体按钮，
+   而不是传输列表里那种行内图标（那里一条任务只有一个图标位）。 */
+.folder-cancel {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--err-soft);
+  color: var(--err-ink);
+  font-size: var(--fs-xs);
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+
+.folder-cancel:hover {
+  color: var(--t1);
 }
 
 .shot {

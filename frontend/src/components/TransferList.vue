@@ -81,6 +81,18 @@ function percentOf(j: TransferJob): number {
 }
 
 /**
+ * 行上显示的名字。
+ *
+ * 文件夹批次里【必须】显示相对路径：同一张文件夹里的 a/dup.txt 与 b/dup.txt
+ * 只显示文件名就变成两行一模一样的东西，用户没法判断是哪一行。
+ * 目录条目补一个尾斜杠 —— 它与同名的空文件在列表里长得完全一样。
+ */
+function nameOf(j: TransferJob): string {
+  if (j.relPath) return `${j.relPath}${j.isDir ? "/" : ""}`;
+  return j.fileName || "";
+}
+
+/**
  * 已传字节数。
  *
  * 必须由字节口径算（transferredBytes），不能像以前那样把 DTO 的 completed
@@ -120,8 +132,8 @@ function doneBytes(j: TransferJob): number {
               />
             </span>
 
-            <div class="name nowrap" :title="j.error || j.fileName">
-              {{ j.fileName || "正在获取文件名…" }}
+            <div class="name nowrap" :title="j.error || nameOf(j)">
+              {{ nameOf(j) || "正在获取文件名…" }}
             </div>
           </div>
 

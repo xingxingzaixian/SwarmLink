@@ -36,6 +36,13 @@ test('未知文件大小时返回 0（DTO 尚未补齐时列表不该显示乱�
   assert.equal(transferredBytes(0, 100, true), 0)
 })
 
+test('批次排队与「等待对方上线」是两回事，文案不能混', () => {
+  // 两者的出口完全不同：一个等对端上线，一个等前一个文件传完。
+  // 混成一句会让用户去检查网络，而实际上它只是在排队。
+  assert.equal(transferStatus('idle', 'batch_queued').text, '排队中')
+  assert.equal(transferStatus('idle', 'batch_queued').final, false)
+})
+
 test('等待对方上线要显示出来，而且不能算终态', () => {
   // 等待态与「还没轮到」共用 idle/queued，判据只能是 waitReason。
   // 标成终态会让它从「进行中」列表里掉出去，用户以为这条任务已经结束了。
