@@ -12,6 +12,12 @@
     "allowJs": true,
     "maxNodeModuleJsDepth": 2,
     "isolatedModules": true,
+    // 测试用 Node 内置运行器直接加载 .ts（见 package.json 的 test 脚本），
+    // 而 Node 的 ESM 解析【不补扩展名】—— 于是被测试直接引入的 src 模块
+    // （例如 utils/batch.ts 引入 utils/format）必须写成 './format.ts'。
+    // 打开这一项让 vue-tsc 接受这种写法（noEmit 已开，不会产出文件）；
+    // Vite 对带扩展名的相对导入同样能解析。
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,

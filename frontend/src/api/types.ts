@@ -58,12 +58,25 @@ export interface TransferJob {
   direction: 'send' | 'recv' | string
   localPath: string
   /**
-   * 非空表示这条任务在等（目前只有 'peer_offline'）。
+   * 非空表示这条任务的等待原因：
+   *   - `peer_offline`：在等对方上线；
+   *   - `batch_queued`：文件夹批次里「排在队列里，轮到就传」。
    *
    * 判据必须看它而不是 status：等待中的任务 status 是 idle（DB 里是 queued），
    * 与「还没轮到」共用同一个状态，光看状态分不出来。
+   * 两者【语义不同】，文案也不能混：一个是等对端，一个是等前一个文件传完。
    */
   waitReason?: string
+  /**
+   * 文件夹批次：batchId 非空时 relPath 是它在目录树里的位置（含根名，
+   * 如 `照片/2024/a.jpg`）。三者都是零值 = 单文件传输（既有语义不变）。
+   *
+   * 传输列表靠 relPath 区分同名文件（a/dup.txt 与 b/dup.txt 只显示文件名
+   * 就变成两行一模一样）；isDir 的条目是【空目录】占位，没有内容也没有分块。
+   */
+  batchId?: string
+  relPath?: string
+  isDir?: boolean
   /**
    * 已确认的【分块数】，不是字节数（后端 Job.Completed ← Bitmap.CompletedCount）。
    * 展示已传字节请用 utils/format 的 transferredBytes：直接 fileSize(completed)
@@ -83,6 +96,23 @@ export interface TransferJob {
   speed?: number
   /** 预计剩余毫秒数。来源同上，仅事件携带。 */
   etaMs?: number
+}
+
+/**
+ * 一次文件夹发送的摘要（与绑定里的 FolderDTO 一一对应）。
+ *
+ * 数字由【发送端枚举后】给出并随消息投递给对端：让接收端自己数，两端
+ * 就会显示两个不同的「共 N 个文件」（接收端可能还没收全）。
+ */
+export interface FolderSummary {
+  batchId: string
+  folderName: string
+  /** 条目数（含空目录）。 */
+  fileCount: number
+  /** 总字节数（空目录算 0）。 */
+  totalSize: number
+  /** 被跳过的项（符号链接）。必须是发送端给的数字，否则用户不知道「少了几项」。 */
+  skipped: number
 }
 
 export interface GroupMember {
@@ -210,6 +240,20 @@ export interface SwarmApi {
   saveImage(msgId: string, destPath: string): Promise<void>
   /** 发送文件消息（通知聊天窗口有文件传输）。 */
   sendFileMessage(peerId: string, jobId: string, fileName: string): Promise<Message>
+  /**
+   * 发送文件夹消息（让两端聊天框出现同一张聚合卡片）。
+   *
+   * 条目数与总大小由发送端给出（见 FolderSummary）：一个几百个文件的文件夹
+   * 不能往聊天框里塞几百条消息，这条消息本身也不携带文件、不含本地路径。
+   */
+  sendFolderMessage(
+    peerId: string,
+    batchId: string,
+    folderName: string,
+    fileCount: number,
+    totalSize: number,
+    skipped: number
+  ): Promise<Message>
 
   /**
    * 清空一个会话的聊天区。
@@ -229,7 +273,24 @@ export interface SwarmApi {
 
   // 传输
   sendFile(peerId: string, path: string): Promise<string>
+  /**
+   * 发送一个文件夹。
+   *
+   * 枚举与落库在返回前完成（后端只 stat、不哈希 —— 一个 10GB 的文件夹不该
+   * 为了「开始发送」先读一整遍磁盘），随后由后端的排队机制驱动，因此返回后
+   * 传输列表里会立刻出现一批「排队中」的任务。
+   */
+  sendFolder(peerId: string, path: string): Promise<FolderSummary>
   transfers(): Promise<TransferJob[]>
+  /**
+   * 一个批次的全部任务（文件夹卡片的聚合进度用）。
+   *
+   * 不能拿 transfers() 代替：它走后端 ListRecent(50) 的窗口，几百个文件的
+   * 文件夹重启后会算出缺斤少两的进度。
+   */
+  batchJobs(batchId: string): Promise<TransferJob[]>
+  /** 取消整个批次里未结束的任务（含正在传的），返回取消条数。 */
+  cancelBatch(batchId: string): Promise<number>
   /**
    * 在系统文件管理器中定位已传输的文件（Windows/macOS 会选中文件本身）。
    * 失败时 reject，由调用方提示 —— 例如文件已被用户手动删除。
@@ -237,7 +298,10 @@ export interface SwarmApi {
   revealFile(path: string): Promise<void>
   /** 清空已结束的传输记录，返回删除条数。 */
   clearTransfers(): Promise<number>
-  /** 取消一条尚未开始的传输（等待中的那种）。已在传的任务会被后端拒绝。 */
+  /**
+   * 取消一条传输：排队/等待中的直接置取消，正在传的由发送路径干净退出。
+   * 半截临时文件会保留，下次重发仍可按位图续传。
+   */
   cancelTransfer(jobId: string): Promise<void>
   /** 立刻重试一条等待中的传输（不等退避，也不要求对端在目录里在线）。 */
   retryTransfer(jobId: string): Promise<void>

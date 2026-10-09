@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { getApi, type Conversation, type Group, type Message } from '../api'
+import { getApi, type Conversation, type FolderSummary, type Group, type Message } from '../api'
 import { directConvId, isGroupId } from '../api/ids'
 import { createDeliveryLedger } from './delivery'
 import { usePeersStore } from './peers'
@@ -281,6 +281,32 @@ export const useChatStore = defineStore('chat', () => {
     bump(conv.convId, m.sentAt)
   }
 
+  /**
+   * 发送文件夹消息：一条聚合卡片，只让两端聊天框知道「有一个文件夹在路上」。
+   *
+   * 只支持单聊：群聊的文件传输入口本就禁用（设计文档 4.1），
+   * 若这里静默按「群聊」发出去，卡片会出现、文件却永远不会来。
+   *
+   * 与文本/文件发送共用 upsert/bump，因此同样会等到 chat:delivered 回来。
+   */
+  async function sendFolder(conv: Conversation, summary: FolderSummary): Promise<void> {
+    if (conv.kind === 'group') {
+      throw new Error('群聊暂不支持文件夹传输')
+    }
+    const api = await getApi()
+    const m = await api.sendFolderMessage(
+      conv.peerId ?? '',
+      summary.batchId,
+      summary.folderName,
+      summary.fileCount,
+      summary.totalSize,
+      summary.skipped
+    )
+    upsert(conv.convId, m)
+    previews.value = { ...previews.value, [conv.convId]: m }
+    bump(conv.convId, m.sentAt)
+  }
+
   /** 送达确认（由 chat:delivered 事件驱动）。 */
   function markDelivered(msgId: string): void {
     // 先记账：这条消息可能还没进列表（事件早于发送返回值），
@@ -374,6 +400,7 @@ export const useChatStore = defineStore('chat', () => {
     sendImage,
     sendImageBytes,
     sendFile,
+    sendFolder,
     markDelivered
   }
 })

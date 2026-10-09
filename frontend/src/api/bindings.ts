@@ -92,6 +92,8 @@ export const realApi: SwarmApi = {
   },
   sendFileMessage: async (peerId, jobId, fileName) =>
     ChatService.SendFileMessage(peerId, jobId, fileName),
+  sendFolderMessage: async (peerId, batchId, folderName, fileCount, totalSize, skipped) =>
+    ChatService.SendFolderMessage(peerId, batchId, folderName, fileCount, totalSize, skipped),
 
   clearConversation: async (convId) => {
     await ChatService.ClearConversation(convId)
@@ -102,7 +104,10 @@ export const realApi: SwarmApi = {
   clearedAt: async (convId) => ChatService.ClearedAt(convId),
 
   sendFile: async (peerId, path) => TransferService.SendFile(peerId, path),
+  sendFolder: async (peerId, path) => TransferService.SendFolder(peerId, path),
   transfers: async () => list(await TransferService.List()),
+  batchJobs: async (batchId) => list(await TransferService.ListBatch(batchId)),
+  cancelBatch: async (batchId) => TransferService.CancelBatch(batchId),
   revealFile: async (path) => {
     await TransferService.Reveal(path)
   },

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { getApi, type TransferJob } from '../api'
+import { getApi, type FolderSummary, type TransferJob } from '../api'
 import { baseName } from '../utils/format'
 
 /** 事件载荷：只带「易变」的进度，落地元数据（文件名/大小）靠 List() 补齐。 */
@@ -26,6 +26,10 @@ export function isActive(status: string): boolean {
  *
  * 判据是 waitReason 而【不是】status：等待态与「还没轮到」在状态上
  * 都是 idle/queued（后端 DB 里都是 queued），只有 waitReason 分得开。
+ *
+ * `batch_queued`（文件夹批次里排在队列里）【不算】等待：它的出口是「前一个
+ * 文件传完」，不是「对方上线」，因此既不显示等待文案、也不给「立即重试」按钮
+ * —— 重试对一个本来就排着队的任务毫无作用。
  */
 export function isWaiting(j: TransferJob): boolean {
   return j.waitReason === 'peer_offline'
@@ -277,6 +281,36 @@ export const useTransferStore = defineStore('transfer', () => {
   }
 
   /**
+   * 发起文件夹发送，返回批次摘要（聊天框的卡片用它渲染）。
+   *
+   * 与 sendFile 不同，这里【可以】立刻 refresh：后端的枚举与落库都在
+   * SendFolder 返回前完成（只 stat、不哈希），因此 List() 此刻一定能看到
+   * 这批任务 —— 传输列表会立刻出现一批「排队中」，而不是等下一个事件。
+   * sendFile 之所以不能这么做，是因为它的哈希在后台跑、任务还没落库。
+   */
+  async function sendFolder(peerId: string, path: string): Promise<FolderSummary> {
+    const sum = await (await getApi()).sendFolder(peerId, path)
+    await refresh()
+    return sum
+  }
+
+  /**
+   * 取消整个批次里未结束的任务，返回取消条数。
+   *
+   * 乐观更新只碰【未结束】的那几条：后端也会为每条推 transfer:state，
+   * 但事件丢了界面就会一直挂着「排队中」；反过来，若把已完成的也一并改成
+   * cancelled，卡片上的「已完成 x/N」会凭空空掉。
+   */
+  async function cancelBatch(batchId: string): Promise<number> {
+    const n = await (await getApi()).cancelBatch(batchId)
+    for (const j of jobs.value) {
+      if (j.batchId !== batchId || !isActive(j.status)) continue
+      applyState({ jobId: j.jobId, status: 'cancelled' })
+    }
+    return n
+  }
+
+  /**
    * 发起发送，返回后端分配的真实 job_id。
    *
    * 后端已经在【建任务之前】生成 job_id 并随返回值给出（见
@@ -322,9 +356,11 @@ export const useTransferStore = defineStore('transfer', () => {
     applyError,
     applyState,
     cancelJob,
+    cancelBatch,
     retryJob,
     registerPending,
     sendFile,
-    sendFiles
+    sendFiles,
+    sendFolder
   }
 })

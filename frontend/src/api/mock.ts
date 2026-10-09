@@ -1,8 +1,10 @@
 import { directConvId } from './ids'
 import { EV } from './types'
+import { baseName } from '../utils/format'
 import type {
   Conversation,
   Diagnostics,
+  FolderSummary,
   Group,
   Message,
   Peer,
@@ -276,6 +278,96 @@ export function createMockApi(): SwarmApi {
     return jobId
   }
 
+  const sleep = (ms: number) => new Promise<void>((resolve) => void window.setTimeout(resolve, ms))
+
+  /**
+   * 模拟一次文件夹发送：先整批「排队中」落进列表，再逐个文件跑完。
+   *
+   * 两条与真实后端对齐的行为，预览模式必须照做（否则走查看到的界面与真机不是一回事）：
+   *   1. 同一对端【同时只传一个】文件 —— 所以是串行的，不是一起跑；
+   *   2. 「取消全部」必须真的能停下后面还没轮到的文件。
+   */
+  function simulateFolder(
+    peerId: string,
+    folderName: string,
+    entries: { name: string; size: number; isDir?: boolean }[]
+  ): FolderSummary {
+    const batchId = `mock-batch-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+    const startedAt = Date.now()
+
+    const specs = entries.map((e, i) => ({
+      jobId: `${batchId}-${i}`,
+      relPath: `${folderName}/${e.name}`,
+      size: e.size,
+      isDir: !!e.isDir
+    }))
+
+    for (const s of specs) {
+      jobs.unshift({
+        jobId: s.jobId,
+        peerId,
+        fileName: baseName(s.relPath),
+        fileSize: s.size,
+        direction: 'send',
+        localPath: '',
+        // 真实后端在返回前就落库为 idle + batch_queued，界面因此立刻有「排队中」
+        status: 'queued',
+        waitReason: 'batch_queued',
+        batchId,
+        relPath: s.relPath,
+        isDir: s.isDir,
+        completed: 0,
+        totalChunks: s.isDir ? 0 : Math.ceil(s.size / (512 * 1024)),
+        percent: 0,
+        updatedAt: startedAt
+      })
+    }
+
+    void (async () => {
+      for (const s of specs) {
+        const job = jobs.find((j) => j.jobId === s.jobId)
+        if (!job) continue
+        // 被「取消全部」停掉的批次：后面的文件不再开始
+        if (job.status === 'cancelled') return
+
+        // 空目录条目没有内容可传，与后端一致：直接完成
+        if (!s.isDir && s.size > 0) {
+          job.status = 'transferring'
+          job.waitReason = undefined
+          for (let percent = 20; percent <= 100; percent += 20) {
+            await sleep(200)
+            if (job.status === 'cancelled') return
+            job.percent = percent
+            job.updatedAt = Date.now()
+            emit(EV.transferProgress, {
+              jobId: s.jobId,
+              peerId,
+              percent,
+              speed: 4 * 1024 * 1024 + Math.random() * 3 * 1024 * 1024,
+              status: percent >= 100 ? 'verifying' : 'transferring'
+            })
+          }
+        }
+
+        job.percent = 100
+        job.status = 'done'
+        job.waitReason = undefined
+        job.completed = job.totalChunks
+        job.localPath = `/remote/${s.relPath}`
+        job.updatedAt = Date.now()
+        emit(EV.transferDone, { jobId: s.jobId, peerId, path: job.localPath })
+      }
+    })()
+
+    return {
+      batchId,
+      folderName,
+      fileCount: specs.length,
+      totalSize: specs.reduce((sum, s) => sum + s.size, 0),
+      skipped: 0
+    }
+  }
+
   const groups: Group[] = [
     {
       groupId: GROUP,
@@ -404,6 +496,29 @@ export function createMockApi(): SwarmApi {
       window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
       return m
     },
+    async sendFolderMessage(peerId, batchId, folderName, fileCount, totalSize, skipped) {
+      const convId = directConvId(self.nodeId, peerId)
+      const m: Message = {
+        msgId: `mock-folder-${Date.now()}`,
+        convId,
+        senderId: self.nodeId,
+        direction: 'out',
+        // 字段名与 Go 侧 message.FolderMessageContent 的 tag 严格一致
+        content: JSON.stringify({
+          batch_id: batchId,
+          folder_name: folderName,
+          file_count: fileCount,
+          total_size: totalSize,
+          skipped
+        }),
+        msgType: 'folder',
+        state: 'pending',
+        sentAt: Date.now()
+      }
+      push(convId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
+    },
     async conversations(): Promise<Conversation[]> {
       const peerOf = (convId: string): Peer | undefined =>
         peers.find((p) => directConvId(self.nodeId, p.nodeId) === convId)
@@ -426,8 +541,35 @@ export function createMockApi(): SwarmApi {
     async sendFile(peerId, path) {
       return simulateSend(peerId, path)
     },
+    async sendFolder(peerId, path): Promise<FolderSummary> {
+      const name = baseName(path)
+      if (!name) throw new Error('请选择文件夹')
+      // 造一棵有层次的假目录树：多层子目录、一个空目录、外加两个同名文件 ——
+      // 恰好覆盖卡片与传输列表上最容易出错的三处渲染（相对路径、空目录、同名）。
+      return simulateFolder(peerId, name, [
+        { name: '2024/01/a.jpg', size: 3 * 1024 * 1024 },
+        { name: '2024/02/a.jpg', size: 3 * 1024 * 1024 },
+        { name: '空目录', size: 0, isDir: true },
+        { name: '报告.pdf', size: 12 * 1024 * 1024 },
+        { name: 'readme.txt', size: 4 * 1024 }
+      ])
+    },
     async transfers() {
       return [...jobs]
+    },
+    async batchJobs(batchId) {
+      return jobs.filter((j) => j.batchId === batchId)
+    },
+    async cancelBatch(batchId) {
+      let n = 0
+      for (const j of jobs) {
+        if (j.batchId !== batchId) continue
+        if (j.status === 'done' || j.status === 'failed' || j.status === 'cancelled') continue
+        j.status = 'cancelled'
+        j.waitReason = undefined
+        n++
+      }
+      return n
     },
     // 降级预览里没有本机文件系统上下文，定位与清理都做成「记账」而非真实动作，
     // 保证点击后界面流程仍然完整可走通。
