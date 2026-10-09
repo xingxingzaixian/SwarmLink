@@ -134,6 +134,12 @@ type PeerListResp struct {
 // ---------------------------------------------------------------------------
 
 // FileMeta 是文件元数据。chunk_hashes 始终发送全量（简化 > 省流，ADR-005）。
+//
+// 后三个字段是文件夹批次专用的（单文件传输时为零值，且因 omitempty
+// 【不会出现在报文里】—— 不能让单文件传输的线上体积因为功能扩充而变大）。
+// JSON 是加法：老对端读到这三个 key 会忽略，我们读老对端的报文则得到零值。
+// 但"能忽略"不等于"能正确处理"——老接收端会把整批文件平铺到下载目录，
+// 因此发送前必须查能力位（peer.CapsFolderTransfer），不支持就拒绝发送。
 type FileMeta struct {
 	JobID       string   `json:"job_id"`
 	FileID      string   `json:"file_id"`
@@ -142,6 +148,14 @@ type FileMeta struct {
 	ChunkSize   int64    `json:"chunk_size"`
 	TotalChunks int      `json:"total_chunks"`
 	ChunkHashes []string `json:"chunk_hashes"`
+
+	// BatchID 是批次标识（全局唯一，见 ports.TransferRepo.ListByBatch 的契约）。
+	BatchID string `json:"batch_id,omitempty"`
+	// RelPath 是相对文件夹根的路径，含根名（如 `照片/2024/a.jpg`）。
+	// 接收端靠它逐段清洗后还原目录树。
+	RelPath string `json:"rel_path,omitempty"`
+	// IsDir 标记空目录条目：零字节、无分块，只为在接收端建出目录。
+	IsDir bool `json:"is_dir,omitempty"`
 }
 
 // FileMetaAck 返回接收方已完成的块位图（base64）。

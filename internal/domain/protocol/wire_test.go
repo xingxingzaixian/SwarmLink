@@ -116,6 +116,51 @@ func TestNonceHexRoundTrip(t *testing.T) {
 	}
 }
 
+// 文件夹字段必须向后兼容，且单文件传输时【不】在线上多出字段。
+//
+// 兼容的方向有两个，缺一不可：老对端的报文我们要能读（零值），
+// 我们的报文也不能因为多了三个字段就让单文件传输的线上体积变大。
+func TestFileMetaFolderFields(t *testing.T) {
+	// 老报文：没有这三个 key
+	old := []byte(`{"job_id":"j1","file_id":"h","file_name":"a.txt","file_size":10,"chunk_size":512,"total_chunks":1}`)
+	var m FileMeta
+	if err := DecodeJSON(old, &m); err != nil {
+		t.Fatalf("老报文必须还能解码: %v", err)
+	}
+	if m.BatchID != "" || m.RelPath != "" || m.IsDir {
+		t.Errorf("老报文解出批次字段 = %q/%q/%v，期望零值", m.BatchID, m.RelPath, m.IsDir)
+	}
+
+	// 单文件传输：三个字段不该出现在报文里（omitempty）
+	single, err := EncodeJSON(FileMeta{
+		JobID: "j2", FileID: "h", FileName: "a.txt", FileSize: 10, ChunkSize: 512, TotalChunks: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"batch_id", "rel_path", "is_dir"} {
+		if bytes.Contains(single, []byte(`"`+key+`"`)) {
+			t.Errorf("单文件报文中不该出现 %s：%s", key, single)
+		}
+	}
+
+	// 文件夹条目：三个字段原样往返
+	raw, err := EncodeJSON(FileMeta{
+		JobID: "j3", FileID: "h2", FileName: "a.txt", FileSize: 10, ChunkSize: 512, TotalChunks: 1,
+		BatchID: "b1", RelPath: "照片/2024/a.txt", IsDir: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back FileMeta
+	if err := DecodeJSON(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.BatchID != "b1" || back.RelPath != "照片/2024/a.txt" || !back.IsDir {
+		t.Errorf("往返失败：%q/%q/%v", back.BatchID, back.RelPath, back.IsDir)
+	}
+}
+
 func TestErrorPayloadAndGroupWireRoundTrip(t *testing.T) {
 	raw, err := EncodeJSON(ErrorPayload{Code: 42, Message: "协议违规"})
 	if err != nil {

@@ -46,7 +46,8 @@ type HandshakeConfig struct {
 // DefaultHandshakeConfig 返回安全默认值。
 func DefaultHandshakeConfig() HandshakeConfig {
 	return HandshakeConfig{
-		Caps:         peer.CapsChatReliable | peer.CapsGroupChat | peer.CapsResumeBitmap | peer.CapsSlidingWindow,
+		Caps: peer.CapsChatReliable | peer.CapsGroupChat | peer.CapsResumeBitmap |
+			peer.CapsSlidingWindow | peer.CapsFolderTransfer,
 		ProtoMin:     ProtoVersionCurrent,
 		ProtoMax:     ProtoVersionCurrent,
 		MaxFrameSize: protocol.MaxFrameSize,

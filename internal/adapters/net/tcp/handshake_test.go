@@ -13,6 +13,17 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
 )
 
+// 我们自己必须声明支持目录传输。
+//
+// 能力位是【双方取交集】：自己不开这一位，任何对端都不会认为我们能收文件夹，
+// 发送端会据此直接拒绝发送 —— 表现为「文件夹功能做好了但谁也发不出去」。
+func TestDefaultCapsAdvertisesFolderTransfer(t *testing.T) {
+	c := DefaultHandshakeConfig()
+	if !c.Caps.Has(peer.CapsFolderTransfer) {
+		t.Fatal("DefaultHandshakeConfig 的能力位必须包含 CapsFolderTransfer")
+	}
+}
+
 func testCfg(name string, caps peer.Caps) HandshakeConfig {
 	c := DefaultHandshakeConfig()
 	c.DisplayName = name
