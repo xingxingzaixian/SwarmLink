@@ -285,10 +285,37 @@ type SinkHandle struct {
 	FinalPath string
 }
 
+// SinkRequest 是一次「落在目录树里」的写入请求（文件夹批次专用）。
+//
+// 单独一个结构体而不是给 Create 加参数：单文件路径的行为一个字都不能变
+// —— 那是已经上线并测过的路径，参数一改，所有实现与替身都要跟着动。
+type SinkRequest struct {
+	JobID string
+	// BatchID 是批次标识，同时决定落盘的根目录：同一个批次只分配一次根
+	// （「照片」已存在则整批退到「照片 (1)」），因此【必须全局唯一】，
+	// 不能是文件夹名。
+	BatchID string
+	// RelPath 是相对文件夹根的路径（含根名，如 `照片/2024/a.jpg`）。
+	RelPath string
+	// IsDir 表示这是一个空目录条目：只建目录、不建临时文件。
+	IsDir bool
+}
+
 // FileSink 把 G3 的路径清洗收敛到一个实现里。
 type FileSink interface {
 	// Create 返回临时文件句柄 + 最终路径；实现内做全部清洗。
 	Create(jobID, rawName string) (SinkHandle, error)
+	// CreateIn 按相对路径把文件写进批次目录树里。
+	//
+	// 与 Create 的差别不只是「多了几层」：它还要做逐段清洗，并且为整个批次
+	// 只分配一次根目录 —— 否则同名文件夹被抢到时，一批文件会散落在
+	// 「照片」与「照片 (1)」两个目录里。
+	CreateIn(req SinkRequest) (SinkHandle, error)
+	// AdoptRoot 认领一个已经分配过的批次根目录（重启恢复用）。
+	//
+	// 不认领的后果：进程重启后续传会重新分配出「照片 (1)」，把一个文件夹
+	// 拆成两份，用户看到的是「文件少了一半」。
+	AdoptRoot(batchID, absPath string)
 	// Commit 原子替换为最终文件。
 	Commit(h SinkHandle) (finalPath string, err error)
 	// Abort 清理临时文件。
