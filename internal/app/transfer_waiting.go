@@ -10,6 +10,7 @@ import (
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
+	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
@@ -368,6 +369,58 @@ func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
 	}
 }
 
+// errJobCancelled 表示用户主动取消了这条任务。
+//
+// 必须是独立的哨兵值：顶层失败出口要据此【先判取消】，否则取消会掉进
+// 「对端不可达 → 转等待」那条分支，变成一个「点了取消、对方一上线又自己
+// 跑起来」的任务。与 errAppInterrupted 分开也是同理：一个是用户意图，
+// 一个是上次没走完，两者的落库结果不同。
+var errJobCancelled = errors.New("transfer: 任务已取消")
+
+// markCancelling 记下「该任务已被要求取消」。
+//
+// 存在的理由是一条时间窗口：sendFile 在登记 sender 之前要读完整文件算哈希，
+// 大文件是分钟级，而用户恰恰最容易在「正在准备」时点取消 —— 那段窗口里
+// 没有 sendJob 可以发信号。
+func (a *TransferApp) markCancelling(jobID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancelling == nil {
+		a.cancelling = make(map[string]struct{})
+	}
+	a.cancelling[jobID] = struct{}{}
+}
+
+// isCancelling 报告该任务是否被要求取消（发送路径的每个检查点都问它）。
+func (a *TransferApp) isCancelling(jobID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.cancelling[jobID]
+	return ok
+}
+
+// clearCancelling 清掉取消标记（任务落终态时调用）。
+//
+// 【必须清】：不清的话同一个 job_id 的下一次尝试一进门就会被判为取消，
+// 表现为「这个文件从此再也发不出去」。
+func (a *TransferApp) clearCancelling(jobID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.cancelling, jobID)
+}
+
+// cancelSender 给正在跑的任务发取消信号；没有在跑的任务返回 false。
+func (a *TransferApp) cancelSender(jobID string) bool {
+	a.mu.Lock()
+	sj := a.senders[jobID]
+	a.mu.Unlock()
+	if sj == nil {
+		return false
+	}
+	sj.requestCancel()
+	return true
+}
+
 // errAppInterrupted 标记「上次运行没走完」。
 //
 // 它不是对端的问题：用同一个错误值是为了让界面与日志里的措辞一致，
@@ -428,11 +481,12 @@ func (a *TransferApp) busyPeers() map[identity.NodeID]bool {
 	return out
 }
 
-// CancelJob 取消一个【还没开始】的任务（等待中的那种）。返回错误表示不可取消。
+// CancelJob 取消一条任务：排队/等待中的直接落取消；正在传输的通过取消信号
+// 让它干净退出并落取消。返回错误表示不可取消。
 //
-// 只允许取消等待中的任务：真正在传的任务要取消，需要给每条任务一条取消信号，
-// 而当前 sender 是「一个任务一个 goroutine + 一条共享 ctx」，没有中断点。
-// 与其给一个点了不动的假取消（或者传了一半留下半截临时文件），不如明确拒绝。
+// 过去这里明确拒绝取消在传任务，理由是「sender 没有中断点，假取消比拒绝更糟」
+// —— 那个理由现在依然成立，所以这里只在【确实能把任务停下来】的前提下放行：
+// 有在跑的 sender 就发信号，没有就（且只能）对排队中的任务直接落状态。
 func (a *TransferApp) CancelJob(jobID string) error {
 	j, err := a.store.GetJob(jobID)
 	if err != nil {
@@ -441,13 +495,26 @@ func (a *TransferApp) CancelJob(jobID string) error {
 	if j.Direction != transfer.DirectionSend {
 		return fmt.Errorf("transfer: 只能取消本机发出的任务")
 	}
-	if j.Status != transfer.StateIdle {
-		return fmt.Errorf("transfer: 传输已开始，无法取消")
+	if j.Status == transfer.StateDone || j.Status == transfer.StateCancelled {
+		return fmt.Errorf("transfer: 任务已结束，无需取消")
+	}
+
+	// 先留标记：它同时覆盖「已经登记 sender」（下面顺手发信号）与
+	// 「还在算哈希、没有 sender 可发」（发送路径进门时自己会看）。
+	a.markCancelling(jobID)
+	if a.cancelSender(jobID) {
+		// 有在跑的 goroutine：由它写最终状态 —— 它手里有最新的 job 变量，
+		// 这里再写一次会与它竞争，还可能把它的位图覆盖掉。
+		return nil
 	}
 	if a.isStarting(jobID) {
-		// 已被交给 goroutine、但状态还没写成 active：此刻放行的话，
-		// 那个 goroutine 随后会把状态写回「传输中」，取消就成了假的。
-		return fmt.Errorf("transfer: 传输已开始，无法取消")
+		// 已被交给 goroutine、但还没登记 sender（正在算哈希）：标记已经留了，
+		// 它下一个检查点就会退出。
+		return nil
+	}
+	if j.Status != transfer.StateIdle {
+		a.clearCancelling(jobID)
+		return fmt.Errorf("transfer: 任务既不在等待中、也没有在传输（当前 %s）", j.Status)
 	}
 
 	from := string(j.Status)
@@ -458,8 +525,40 @@ func (a *TransferApp) CancelJob(jobID string) error {
 	if err := a.store.UpsertJob(j); err != nil {
 		return err
 	}
+	a.clearCancelling(jobID)
 	a.publishState(j, from, string(transfer.StateCancelled), "")
 	return nil
+}
+
+// CancelBatch 取消整个批次里所有未结束的任务，返回取消条数。
+//
+// 与逐条取消的区别只有两点：只动这一批（靠 ListByBatch 按 batch_id 过滤），
+// 以及单条失败不中断整批 —— 用户点的是「全停」，尽力而为比半途而废好。
+func (a *TransferApp) CancelBatch(batchID string) (int, error) {
+	if batchID == "" {
+		// 空 batch_id 会让 ListByBatch 退化成「返回所有单文件任务」，
+		// 也就是把本机全部单文件传输一起停掉。
+		return 0, fmt.Errorf("%w: app", ports.ErrEmptyBatchID)
+	}
+	jobs, err := a.store.ListByBatch(batchID)
+	if err != nil {
+		return 0, err
+	}
+
+	n := 0
+	for _, j := range jobs {
+		if j.Status == transfer.StateDone || j.Status == transfer.StateCancelled {
+			continue // 已结束的不动（卡片上的按钮可能被连点）
+		}
+		if err := a.CancelJob(j.JobID); err != nil {
+			if a.lg != nil {
+				a.lg.Warn("transfer: 取消批次中的任务失败", "job_id", j.JobID, "err", err)
+			}
+			continue
+		}
+		n++
+	}
+	return n, nil
 }
 
 // RetryNow 立刻重试一条等待中的任务：不等退避，也不要求目录里显示在线

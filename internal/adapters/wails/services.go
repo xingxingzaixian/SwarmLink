@@ -627,8 +627,10 @@ func (s *TransferService) SendFile(peerID, path string) (string, error) {
 
 // CancelTransfer 取消一条尚未开始的传输任务（等待中的那种）。
 //
-// 已在传输的任务会被 app 层拒绝：当前 sender 没有中断点，
-// 假取消（点了没反应，或传了一半留下半截临时文件）比拒绝更糟。
+// 正在传输的任务也能取消：sender 有中断点，状态由发送路径落成 cancelled，
+// 半截临时文件【保留】以便下次按位图续传。
+// 仍会被拒绝的只有一种：仓储说「在传」、实际没有在跑的 goroutine（崩溃陈行）
+// —— 接受它只会给出一个假动作。
 func (s *TransferService) CancelTransfer(jobID string) error {
 	if jobID == "" {
 		return fmt.Errorf("请选择任务")

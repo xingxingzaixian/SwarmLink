@@ -635,8 +635,13 @@ func TestCancelJobStopsWaiting(t *testing.T) {
 	}
 }
 
-// 不能取消已经在传的任务：当前 sender 没有中断点，假取消比拒绝更糟。
-func TestCancelJobRejectsRunningTransfer(t *testing.T) {
+// 仍然【拒绝】的取消：仓储说「传输中」、实际却没有在跑的 goroutine
+// （例如上次崩溃留下的陈行）。
+//
+// 有中断点之后，在传任务是可以取消的（见 transfer_cancel_test.go 与
+// CancelJob 的注释）；但这一种没有任何中断点可发，接受取消只会给出一个
+// 假动作 —— 状态写成 cancelled，而真正在跑的那条（如果存在）照旧。
+func TestCancelJobRejectsStaleRunningRow(t *testing.T) {
 	peerID := mustNodeID(t, testPeerHex)
 	repo := &stubTransferRepo{}
 	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, eventbus.New(), clock.New(), nil)
@@ -649,11 +654,23 @@ func TestCancelJobRejectsRunningTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := a.CancelJob("job-running"); err == nil {
-		t.Fatal("已在传输的任务必须拒绝取消")
+		t.Fatal("仓储说在传、实际没有在跑的任务必须拒绝取消")
 	}
+	// 拒绝时不能留下取消标记：留着会让它下一次真的开始传时一进门就被判取消
+	if a.isCancelling("job-running") {
+		t.Error("拒绝取消时不该留下取消标记")
+	}
+}
 
-	// 「已经交给 goroutine、但状态还没写成 active」这个窗口同样必须拦住 ——
-	// 放行的后果是那个 goroutine 随后把状态写回"传输中"，取消变成假的。
+// 「已经交给 goroutine、但还没登记 sender」这个窗口：取消必须被【接受】。
+//
+// 这个窗口就是「正在算哈希」——大文件是分钟级，而用户最容易在这时候点取消。
+// 那一刻没有 sendJob 可以发信号，因此只能留标记，由发送路径的下一个检查点退出。
+func TestCancelJobAcceptsClaimedNotYetRunning(t *testing.T) {
+	peerID := mustNodeID(t, testPeerHex)
+	repo := &stubTransferRepo{}
+	a := NewTransferApp(identity.NodeID{}, repo, nil, noConns{}, nil, eventbus.New(), clock.New(), nil)
+
 	waiting := a.newWaitingJob("job-claimed", peerID, "/tmp/claimed.bin", 4096)
 	if err := repo.UpsertJob(waiting); err != nil {
 		t.Fatal(err)
@@ -662,9 +679,14 @@ func TestCancelJobRejectsRunningTransfer(t *testing.T) {
 		t.Fatal("抢占失败，测试前提不成立")
 	}
 	defer a.releaseStarting("job-claimed")
-	if err := a.CancelJob("job-claimed"); err == nil {
-		t.Fatal("已被交给 goroutine 的任务必须拒绝取消")
+
+	if err := a.CancelJob("job-claimed"); err != nil {
+		t.Fatalf("这个窗口必须接受取消（交给发送路径自己退出）: %v", err)
 	}
+	if !a.isCancelling("job-claimed") {
+		t.Fatal("接受取消后必须留下标记，否则发送路径看不到它")
+	}
+	a.clearCancelling("job-claimed")
 }
 
 // 立即重试：把退避推到当下，并真的发起一次尝试（force 绕过"目录说离线"）。

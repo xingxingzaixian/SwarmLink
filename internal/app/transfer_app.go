@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -64,6 +65,13 @@ type TransferApp struct {
 	// 等待任务 —— 那样会同时跑两个 goroutine、两次全文件哈希。
 	starting map[string]struct{}
 
+	// cancelling 记录「用户已要求取消、但那个 goroutine 还没看到信号」的任务。
+	//
+	// 为什么不能只靠 sendJob.cancel：sendFile 在【登记 sender 之前】要读完整
+	// 文件算哈希（大文件是分钟级），那段窗口里还没有 sendJob 可以发信号。
+	// 用户恰恰最容易在「正在准备」的时候点取消。
+	cancelling map[string]struct{}
+
 	sendSem chan struct{}
 }
 
@@ -85,7 +93,28 @@ type sendJob struct {
 	ackCh    chan chunkAck
 	doneCh   chan doneAck
 	lastSent map[int]time.Time
+
+	// cancel 被关闭即表示用户要求本次传输尽快干净退出。
+	//
+	// 为什么需要中断点：sender 是「一个任务一个 goroutine + 一条共享 ctx」，
+	// 没有它就只能拒绝取消，而「点了没反应的假取消」比拒绝更糟。
+	// 取消【不删】半截临时文件：下次重发还能按位图续传。
+	cancel    chan struct{}
+	cancelOne sync.Once
 }
+
+// isCancelled 报告是否已收到取消信号（非阻塞）。
+func (sj *sendJob) isCancelled() bool {
+	select {
+	case <-sj.cancel:
+		return true
+	default:
+		return false
+	}
+}
+
+// requestCancel 发一次取消信号；重复调用安全（连点取消不该 panic）。
+func (sj *sendJob) requestCancel() { sj.cancelOne.Do(func() { close(sj.cancel) }) }
 
 type recvJob struct {
 	job          transfer.Job
@@ -130,6 +159,7 @@ func NewTransferApp(
 		senders:             make(map[string]*sendJob),
 		receivers:           make(map[string]*recvJob),
 		starting:            make(map[string]struct{}),
+		cancelling:          make(map[string]struct{}),
 		sendSem:             make(chan struct{}, maxConc),
 	}
 }
@@ -219,6 +249,20 @@ func (a *TransferApp) sendFile(
 		}
 		if job.JobID == "" {
 			job.JobID = jobID
+		}
+		// 取消【必须最先判】：掉进下面「对端不可达 → 转等待」那条分支，
+		// 就变成了「用户点了取消、对方一上线文件又自己跑起来」。
+		if errors.Is(err, errJobCancelled) {
+			from := string(job.Status)
+			job.Status = transfer.StateCancelled
+			job.WaitReason = transfer.WaitNone
+			job.NextTryAt = time.Time{}
+			job.UpdatedAt = a.clk.Now()
+			_ = a.store.UpsertJob(job)
+			a.clearCancelling(job.JobID)
+			a.publishState(job, from, string(transfer.StateCancelled), "")
+			err = nil // 取消不是错误
+			return
 		}
 		if networkAttempted && shouldWaitForPeer(failureEvidence{
 			PeerReachable: a.peerReachable(peerID),
@@ -355,6 +399,7 @@ func (a *TransferApp) sendFile(
 		ackCh:    make(chan chunkAck, 32),
 		doneCh:   make(chan doneAck, 1),
 		lastSent: make(map[int]time.Time),
+		cancel:   make(chan struct{}),
 	}
 	a.putSender(sj)
 	defer a.dropSender(job.JobID)
@@ -380,6 +425,8 @@ func (a *TransferApp) sendFile(
 	select {
 	case ck := <-sj.ackCh:
 		sj.acked.OrBits(ck.bitmap)
+	case <-sj.cancel:
+		return job, errJobCancelled
 	case <-a.clk.After(10 * time.Second):
 		return job, fmt.Errorf("transfer: timeout waiting for FILE_META_ACK")
 	case <-ctx.Done():
@@ -416,6 +463,9 @@ func (a *TransferApp) sendFile(
 	job.Status = transfer.StateDone
 	job.UpdatedAt = a.clk.Now()
 	_ = a.store.UpsertJob(job)
+	// 防御性清理：正常不会带着取消标记跑完，但留着它会让同一个 job_id
+	// 的下一次尝试一进门就被判为取消。
+	a.clearCancelling(job.JobID)
 	if a.bus != nil {
 		a.bus.Publish(eventbus.TopicTransferDone, eventbus.TransferDone{
 			JobID: job.JobID, PeerID: peerID.String(), Path: path,
@@ -435,6 +485,11 @@ func (a *TransferApp) runSender(ctx context.Context, sess ports.Session, sj *sen
 	lastProgress := time.Time{}
 
 	for {
+		// 每个检查点都问一次取消：这里同时看两条路径 —— sendJob 上的信号
+		// （已经登记 sender 之后）与 app 上的标记（登记之前的窗口）。
+		if sj.isCancelled() || a.isCancelling(sj.job.JobID) {
+			return errJobCancelled
+		}
 		// 先排空已到达的 ACK（非阻塞）
 		drained := false
 		for !drained {
@@ -471,6 +526,9 @@ func (a *TransferApp) runSender(ctx context.Context, sess ports.Session, sj *sen
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-sj.cancel:
+			// 不在这里返回会让取消等到下一个 50ms 节拍才生效 —— 能更快就不拖。
+			return errJobCancelled
 		case ck := <-sj.ackCh:
 			a.applyChunkAck(sj, ck)
 		case <-a.clk.After(50 * time.Millisecond):
