@@ -877,7 +877,8 @@ func (s *PeerService) List() []PeerDTO {
 func (s *PeerService) Remove(nodeID string) error {
 	id, err := identity.ParseNodeID(nodeID)
 	if err != nil {
-		return fmt.Errorf("peer: invalid node id %q: %w", nodeID, err)
+		// 中文错误：这条会 reject 到前端并可能被直接展示（与本文件其它用户可见错误一致）
+		return fmt.Errorf("无效的节点 NodeID %q: %w", nodeID, err)
 	}
 	if _, ok := s.d.PeerDir.Get(id); !ok {
 		return nil

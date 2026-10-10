@@ -313,6 +313,11 @@ func (d *recordingDir) List(f ports.PeerFilter) []peer.Peer {
 
 func (d *recordingDir) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error {
 	d.calls = append(d.calls, suppressCall{id: id, suppressed: suppressed, at: at})
+	// 镜像真实实现：对不存在的行是空操作、绝不插入（见 ports.PeerDirectory 的契约）。
+	// 桩不镜像实现，复用它的后续用例就会得到与生产相反的结论。
+	if !d.all[id] {
+		return nil
+	}
 	if suppressed {
 		d.blocked[id] = true
 	} else {
@@ -339,6 +344,9 @@ func TestPeerServiceRemove(t *testing.T) {
 	}
 	if c := dir.calls[0]; c.id != peerID || !c.suppressed {
 		t.Fatalf("调用参数不对：%+v", c)
+	} else if c.at.IsZero() {
+		// at 必须是调用时刻：零值会把 last_seen 写成 0，破坏 SeenRecently 与列表排序
+		t.Fatal("at 不该是零值")
 	}
 	// 移除后默认列表里就没有它了
 	if got := dir.List(ports.PeerFilter{}); len(got) != 0 {
