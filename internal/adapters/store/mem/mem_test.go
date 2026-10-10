@@ -184,11 +184,25 @@ func TestSetSuppressedRoundTrip(t *testing.T) {
 	if got.DisplayName != "ghost" {
 		t.Fatalf("标记不该丢名字：%+v", got)
 	}
+	if !got.LastSeen.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("last_seen 应记下标记时刻，得到 %v", got.LastSeen)
+	}
 	if err := p.SetSuppressed(id, false, time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := p.Get(id); got.State == peer.StateBlocked {
 		t.Fatal("解除后不该还是 blocked")
+	}
+
+	// 与 sqlite 实现一致：解除只对「确实被移除」的行生效，不降级在线节点
+	if err := p.Upsert(peer.Peer{NodeID: id, DisplayName: "ghost", State: peer.StateOnline, LastSeen: time.Unix(3000, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSuppressed(id, false, time.Unix(3100, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := p.Get(id); got.State != peer.StateOnline {
+		t.Fatalf("解除不该动一个本来就不是 blocked 的行：%+v", got)
 	}
 
 	if err := p.SetSuppressed(mkID(9), true, time.Unix(1, 0)); err != nil {

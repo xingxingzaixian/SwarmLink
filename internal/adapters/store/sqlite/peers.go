@@ -125,14 +125,20 @@ func (p *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 // 只更新已存在的行：删除的前提是「它出现在我的列表里」，没有行时什么都不做（幂等）。
 // at 记进 last_seen，让「什么时候删的」在诊断里可见。
 func (p *Peers) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error {
-	state := peer.StateDiscovered
-	if suppressed {
-		state = peer.StateBlocked
-	}
 	return p.db.Write(func(tx *sql.Tx) error {
+		if suppressed {
+			_, err := tx.Exec(
+				`UPDATE peers SET state = 'blocked', last_seen = ? WHERE node_id = ?`,
+				msOf(at), id.String(),
+			)
+			return err
+		}
+		// 解除只对「当前确实被移除」的行生效：无条件写 discovered 会把一个在线节点降级，
+		// 与 mem 实现（同样只动 blocked）出现行为分歧，而两者是互为替身的关系。
 		_, err := tx.Exec(
-			`UPDATE peers SET state = ?, last_seen = ? WHERE node_id = ?`,
-			string(state), msOf(at), id.String(),
+			`UPDATE peers SET state = 'discovered', last_seen = ?
+			  WHERE node_id = ? AND state = 'blocked'`,
+			msOf(at), id.String(),
 		)
 		return err
 	})
