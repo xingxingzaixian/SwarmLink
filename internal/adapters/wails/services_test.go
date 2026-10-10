@@ -255,6 +255,160 @@ func TestBatchMethodsRejectEmptyID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// PeerService.Remove
+// ---------------------------------------------------------------------------
+
+// recordingDir 记录 SetSuppressed 调用，并按真实仓储的语义实现 Get / List
+// （默认排除 blocked，除非显式 IncludeBlocked）—— 替身不镜像实现，测试就会给出假绿灯。
+type recordingDir struct {
+	emptyDir
+	// blocked 里的 node_id 算「已本地移除」
+	blocked map[identity.NodeID]bool
+	all     map[identity.NodeID]bool
+	calls   []suppressCall
+}
+
+type suppressCall struct {
+	id         identity.NodeID
+	suppressed bool
+	at         time.Time
+}
+
+func newRecordingDir() *recordingDir {
+	return &recordingDir{
+		blocked: map[identity.NodeID]bool{},
+		all:     map[identity.NodeID]bool{},
+	}
+}
+
+func (d *recordingDir) Get(id identity.NodeID) (peer.Peer, bool) {
+	if !d.all[id] {
+		return peer.Peer{}, false
+	}
+	st := peer.StateDiscovered
+	if d.blocked[id] {
+		st = peer.StateBlocked
+	}
+	return peer.Peer{NodeID: id, State: st}, true
+}
+
+func (d *recordingDir) List(f ports.PeerFilter) []peer.Peer {
+	out := make([]peer.Peer, 0, len(d.all))
+	for id := range d.all {
+		st := peer.StateDiscovered
+		if d.blocked[id] {
+			st = peer.StateBlocked
+		}
+		if f.State != "" {
+			if st != f.State {
+				continue
+			}
+		} else if st == peer.StateBlocked && !f.IncludeBlocked {
+			continue
+		}
+		out = append(out, peer.Peer{NodeID: id, State: st})
+	}
+	return out
+}
+
+func (d *recordingDir) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error {
+	d.calls = append(d.calls, suppressCall{id: id, suppressed: suppressed, at: at})
+	if suppressed {
+		d.blocked[id] = true
+	} else {
+		delete(d.blocked, id)
+	}
+	return nil
+}
+
+// 移除必须真的落到目录上：一次 SetSuppressed(true)，且 node_id 正确。
+func TestPeerServiceRemove(t *testing.T) {
+	peerID, err := identity.ParseNodeID(testPeerHex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := newRecordingDir()
+	dir.all[peerID] = true
+	svc := &PeerService{d: Deps{PeerDir: dir}}
+
+	if err := svc.Remove(testPeerHex); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if len(dir.calls) != 1 {
+		t.Fatalf("SetSuppressed 调用 %d 次，期望 1", len(dir.calls))
+	}
+	if c := dir.calls[0]; c.id != peerID || !c.suppressed {
+		t.Fatalf("调用参数不对：%+v", c)
+	}
+	// 移除后默认列表里就没有它了
+	if got := dir.List(ports.PeerFilter{}); len(got) != 0 {
+		t.Fatalf("移除后默认列表应不含它，得到 %+v", got)
+	}
+}
+
+// 非法 nodeID 必须报错而不是静默成功：前端传错时要能看见，且不该产生任何写入。
+func TestPeerServiceRemoveRejectsInvalidID(t *testing.T) {
+	dir := newRecordingDir()
+	svc := &PeerService{d: Deps{PeerDir: dir}}
+
+	if err := svc.Remove("不是 hex"); err == nil {
+		t.Fatal("非法 nodeID 必须报错")
+	}
+	if len(dir.calls) != 0 {
+		t.Fatalf("非法输入不该产生目录写入：%+v", dir.calls)
+	}
+}
+
+// 列表里没有它时是幂等成功（用户的意图已经满足），且不留写入 ——
+// 报错只会让 UI 弹一个没有意义的失败。
+func TestPeerServiceRemoveIsIdempotentForUnknownPeer(t *testing.T) {
+	dir := newRecordingDir()
+	svc := &PeerService{d: Deps{PeerDir: dir}}
+
+	if err := svc.Remove(testPeerHex); err != nil {
+		t.Fatalf("未知节点应当幂等成功：%v", err)
+	}
+	if len(dir.calls) != 0 {
+		t.Fatalf("未知节点不该产生写入：%+v", dir.calls)
+	}
+}
+
+// 诊断面板要看到目录的真实规模（含已被移除的条目）：
+// 否则「列表 1 条、目录其实 2 条」这种幽灵堆积在诊断里完全看不出来。
+func TestDiagnosticsCountsSuppressedPeers(t *testing.T) {
+	visible, gone := mkNodeID(t, testSelfHex), mkNodeID(t, testPeerHex)
+	dir := newRecordingDir()
+	dir.all[visible], dir.all[gone] = true, true
+	dir.blocked[gone] = true
+	tapp := app.NewTransferApp(selfID(t), newMemTransferRepo(), nil, stubConns{}, emptyDir{}, nil, clock.New(), nil)
+	svc := &PeerService{d: Deps{PeerDir: dir, Conns: sessionCounter{}, Transfer: tapp}}
+
+	if got := svc.Diagnostics().PeersTotal; got != 2 {
+		t.Fatalf("PeersTotal = %d，期望 2（含被移除条目）", got)
+	}
+	if got := len(svc.List()); got != 1 {
+		t.Fatalf("可见列表 = %d，期望 1（被移除的不显示）", got)
+	}
+}
+
+func mkNodeID(t *testing.T, hex string) identity.NodeID {
+	t.Helper()
+	id, err := identity.ParseNodeID(hex)
+	if err != nil {
+		t.Fatalf("解析 %s: %v", hex, err)
+	}
+	return id
+}
+
+// sessionCounter 是 Diagnostics 需要的最小 ConnInspector 替身
+// （stubConns 只实现 ports.ConnManager，没有 SessionCount）。
+type sessionCounter struct{ n int }
+
+func (c sessionCounter) SessionCount() int { return c.n }
+
+func (sessionCounter) SessionOf(identity.NodeID) (ports.Session, bool) { return nil, false }
+
+// ---------------------------------------------------------------------------
 // SendFile 的返回值契约
 // ---------------------------------------------------------------------------
 

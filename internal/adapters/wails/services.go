@@ -864,6 +864,27 @@ func (s *PeerService) List() []PeerDTO {
 	return out
 }
 
+// Remove 从本机列表里移除一个节点（设计文档 §5）。
+//
+// 三条必须让用户知道的边界：
+//   - **只在本机生效**：不发任何网络通告，对方与别人的列表都不受影响；
+//   - **不是拉黑**：不拒绝握手，将来做真拉黑要另加一层语义（设计 §6.5）；
+//   - **并非永久**：该节点若再次被验证到（有效签名通告或握手成功）会自动回到列表，
+//     因为那证明它没死（app.PeerApp 的恢复触发点，见设计 D7）。
+//
+// 幂等：列表里没有这个 node_id 时返回 nil 而不是报错 —— 用户的意图（「列表里别再有它」）
+// 已经满足，报错只会让 UI 弹一个没有意义的失败。
+func (s *PeerService) Remove(nodeID string) error {
+	id, err := identity.ParseNodeID(nodeID)
+	if err != nil {
+		return fmt.Errorf("peer: invalid node id %q: %w", nodeID, err)
+	}
+	if _, ok := s.d.PeerDir.Get(id); !ok {
+		return nil
+	}
+	return s.d.PeerDir.SetSuppressed(id, true, time.Now())
+}
+
 // Diagnostics 返回诊断面板数据。
 //
 // 「常驻连接数」与「无保活流量」是 ADR-009 的两条可观测断言，
