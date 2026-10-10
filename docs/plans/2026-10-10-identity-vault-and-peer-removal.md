@@ -887,6 +887,12 @@ Expected: FAIL（当前换数据目录必然换身份）
 	vaultDir := config.VaultDir(dir)
 ```
 
+> **A1 评审补充（本任务必须一并落地）**：`vaultDir == ""` 有四种原因
+> （便携 / 与数据目录重合 / 平台无机器级目录 / `SWARMLINK_VAULT_DIR` 被显式设成数据目录），
+> 其中最后一种最容易踩、且排查时几乎没有任何线索。在 `lg` 建好之后补一条：
+> `if vaultDir == "" && strings.TrimSpace(os.Getenv(config.EnvVaultDir)) != "" { lg.Warn("身份托管已禁用：SWARMLINK_VAULT_DIR 与数据目录重合", "data_dir", dir) }`
+> —— 让「换了数据目录，身份为什么没恢复」这个问题有据可查。
+
 把身份加载改成：
 
 ```go
@@ -948,6 +954,10 @@ git commit -m "feat(bootstrap): 接入身份托管目录，并把身份恢复/�
    把这条挪到 §9「已知代价」：**同一台机器上长期并用两个数据目录，托管副本会在两者之间抖动**；
    若真要根治，需要给托管副本记「来源数据目录」并拒绝跨目录覆盖（当前不做）。
 3. **Linux 路径**：`/var/lib/swarmlink` → `/var/lib/SwarmLink`（实现是 `filepath.Join(base, AppName)`，与 Windows/macOS 一致）。
+4. **`VaultDir` 的签名与优先级顺序**（A1 评审发现）：
+   设计写的是 `VaultDir() (string, error)`，实际落地为 `VaultDir(dataDir string) string`
+   —— 路径解析没有可失败点，而守卫需要 `dataDir`；另外设计把便携模式列在平台路径**之后**，
+   按字面读永远不可达，实际顺序是 `env → 便携 → 平台`。两处都要在文档里改正。
 
 **Step 2: 改 README**
 

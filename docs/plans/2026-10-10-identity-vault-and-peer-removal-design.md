@@ -56,18 +56,31 @@
 
 ### 4.1 位置解析（新增，独立于 `config.Dir()`）
 
-新增 `config.EnvVaultDir = "SWARMLINK_VAULT_DIR"` 与 `config.VaultDir() (string, error)`，
-纯路径解析、不做 I/O，优先级：
+新增 `config.EnvVaultDir = "SWARMLINK_VAULT_DIR"` 与 `config.VaultDir(dataDir string) string`
+（A1 落地的实际签名：不需要 `error` —— 路径解析没有可失败点；`dataDir` 是守卫的输入），
+只做路径解析（不建目录、不读写 vault；与 `Dir` 一样会 stat 一下便携标记），优先级：
 
-1. `SWARMLINK_VAULT_DIR`（部署与测试隔离；与 `EnvDataDir` 对称，见 `config.go:23-27`）
-2. Windows：`%ProgramData%\SwarmLink`（`os.Getenv("ProgramData")`，缺失退 `%SystemDrive%\ProgramData`）
-3. Linux：`/var/lib/swarmlink`；macOS：`/Library/Application Support/SwarmLink`
-4. 便携模式（`config.PortableMarker` 存在，`config.go:29-31`）→ 返回 `""`（禁用）
-5. 兜底守卫：`vaultDir == dataDir` → 返回 `""` 并告警
+1. `SWARMLINK_VAULT_DIR`（部署与测试隔离；与 `EnvDataDir` 对称，见 `config.go:23-27`），
+   空白视为未设置；与 `dataDir` 重合时禁用
+2. 便携模式（`config.PortableMarker` 存在，`config.go:29-31`）→ 返回 `""`（禁用）
+   —— **必须排在平台路径之前**：否则平台分支总是先 return，便携永远不可达
+3. 平台机器级目录：Windows `%ProgramData%\SwarmLink`（`os.Getenv("ProgramData")`，
+   缺失退 `%SystemDrive%\ProgramData`）、macOS `/Library/Application Support/SwarmLink`、
+   Linux `/var/lib/SwarmLink`
+4. 兜底守卫：解析结果与 `dataDir` 重合 → 返回 `""`
    （macOS 上 `os.UserConfigDir()` 就是 `~/Library/Application Support`，降级路径很容易撞上数据目录；
-   一旦相同，"删数据目录"就等于"删身份"，必须拦住）
+   一旦相同，"删数据目录"就等于"删身份"，必须拦住；大小写不敏感、尾部分隔符都算同一目录）
 
 `""` 表示"本平台/本次运行禁用 vault"，后续全部走现状分支。
+
+> 已知边界（A1 评审记录，均为零 I/O 约束下的取舍）：`sameDir` 不解析符号链接
+> （`dataDir` 是 vault 的符号链接别名时不会被拦住）；macOS 默认卷同样大小写不敏感，
+> 但守卫只按 `GOOS` 判断。
+>
+> 可观测性缺口（A5 处理）：`""` 同时代表「便携 / 重合 / 平台无机器目录 /
+> env 被显式设成数据目录」四种原因，纯函数无法区分。bootstrap 侧对
+> 「env 已设置但结果为空」要单独记一条 warn —— 否则用户排查
+> 「为什么换了数据目录身份没恢复」时没有线索。
 
 ### 4.2 存储格式
 

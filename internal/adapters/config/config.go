@@ -239,7 +239,8 @@ func portableDir() (string, bool) {
 //     恢复原机器的身份，同时污染那台机器的托管目录；
 //   - 解析结果与数据目录重合：一旦相同，「删数据目录」就等于「删身份」，必须拦住。
 //
-// 本函数只做路径解析，不创建目录、不做任何 I/O（与 Dir 的约定一致）。
+// 本函数只做路径解析：不创建目录、不读写 vault 文件
+// （与 Dir 一样，仅 stat 一下可执行文件旁边有没有便携标记）。
 func VaultDir(dataDir string) string {
 	if d := strings.TrimSpace(os.Getenv(EnvVaultDir)); d != "" {
 		if sameDir(d, dataDir) {
@@ -283,6 +284,9 @@ func machineDataDir() string {
 }
 
 // sameDir 判断两个路径是否指向同一目录。Windows 上大小写不敏感。
+//
+// 刻意不解析符号链接（那需要 I/O）：因此「dataDir 是 vault 的符号链接别名」这种重合
+// 不会被拦住。macOS 默认卷同样大小写不敏感，但这里只按 GOOS 判断 —— 一并记作已知边界。
 func sameDir(a, b string) bool {
 	if a == "" || b == "" {
 		return false

@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +85,35 @@ func TestVaultDirRejectsDataDirOverlap(t *testing.T) {
 	// 尾部分隔符不该骗过守卫（Clean 之后是同一个目录）
 	if got := VaultDir(dir + string(filepath.Separator)); got != "" {
 		t.Fatalf("尾部分隔符应视为同一目录，得到 %q", got)
+	}
+}
+
+// 大小写不该骗过守卫。只在 Windows 上断言：其它平台的这两个路径本来就是不同目录，
+// 断言会变成语义相反的场景（见 sameDir 的 GOOS 分支）。
+func TestVaultDirRejectsDataDirOverlapCaseInsensitive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("只有 Windows 的路径比较是大小写不敏感的")
+	}
+	dir := t.TempDir()
+	t.Setenv(EnvVaultDir, strings.ToUpper(dir))
+
+	if got := VaultDir(dir); got != "" {
+		t.Fatalf("大小写不同的同一目录也必须禁用，得到 %q", got)
+	}
+}
+
+// 平台基座必须是真实的机器级目录，而不是「两边一起错」：
+// 把 ProgramData 指到临时目录，直接断言解析结果落在它下面。
+func TestVaultDirUsesProgramDataOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("ProgramData 是 Windows 的约定")
+	}
+	fake := t.TempDir()
+	t.Setenv("ProgramData", fake)
+	t.Setenv(EnvVaultDir, "")
+
+	if got, want := VaultDir(t.TempDir()), filepath.Join(fake, AppName); got != want {
+		t.Fatalf("VaultDir = %q，期望 %q", got, want)
 	}
 }
 
