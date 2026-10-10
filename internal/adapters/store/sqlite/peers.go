@@ -120,6 +120,24 @@ func (p *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 	})
 }
 
+// SetSuppressed 设置/清除「本地已移除」标记：复用 state='blocked'（设计文档 §5.2）。
+//
+// 只更新已存在的行：删除的前提是「它出现在我的列表里」，没有行时什么都不做（幂等）。
+// at 记进 last_seen，让「什么时候删的」在诊断里可见。
+func (p *Peers) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error {
+	state := peer.StateDiscovered
+	if suppressed {
+		state = peer.StateBlocked
+	}
+	return p.db.Write(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE peers SET state = ?, last_seen = ? WHERE node_id = ?`,
+			string(state), msOf(at), id.String(),
+		)
+		return err
+	})
+}
+
 // SeenRecently 判断该节点是否在 window 内被再次见到。
 func (p *Peers) SeenRecently(id identity.NodeID, window time.Duration) bool {
 	row := p.db.QueryRow(`SELECT last_seen FROM peers WHERE node_id = ?`, id.String())

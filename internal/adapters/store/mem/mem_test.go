@@ -164,6 +164,41 @@ func TestPeersDirectory(t *testing.T) {
 	}
 }
 
+// 与 sqlite 实现保持同一份语义：可打可解、不存在的行是空操作。
+// 两个实现的行为必须一致 —— 它们互作替身（R2 允许测试跨引适配器正是为此）。
+func TestSetSuppressedRoundTrip(t *testing.T) {
+	fc := clock.NewFake(time.Unix(4000, 0))
+	p := NewPeers(fc)
+
+	id := mkID(7)
+	if err := p.Upsert(peer.Peer{NodeID: id, DisplayName: "ghost", State: peer.StateOffline}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSuppressed(id, true, time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := p.Get(id)
+	if !ok || got.State != peer.StateBlocked {
+		t.Fatalf("期望 blocked，得到 %+v", got)
+	}
+	if got.DisplayName != "ghost" {
+		t.Fatalf("标记不该丢名字：%+v", got)
+	}
+	if err := p.SetSuppressed(id, false, time.Unix(2000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := p.Get(id); got.State == peer.StateBlocked {
+		t.Fatal("解除后不该还是 blocked")
+	}
+
+	if err := p.SetSuppressed(mkID(9), true, time.Unix(1, 0)); err != nil {
+		t.Fatalf("对不存在的行不该报错：%v", err)
+	}
+	if _, ok := p.Get(mkID(9)); ok {
+		t.Fatal("不该凭空造出一行")
+	}
+}
+
 func TestGroupsRepo(t *testing.T) {
 	g := NewGroups()
 	owner := mkID(1)

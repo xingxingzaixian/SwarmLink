@@ -237,6 +237,49 @@ func TestPeersUpsertMergeSemantics(t *testing.T) {
 	}
 }
 
+// 本地移除标记必须落库：它是「删得掉」的唯一依据（设计文档 §5.2）。
+func TestSetSuppressedRoundTrip(t *testing.T) {
+	db, _ := openTest(t)
+	p := NewPeers(db, clock.New())
+
+	id := mkID(7)
+	if err := p.Upsert(peer.Peer{
+		NodeID: id, DisplayName: "ghost", State: peer.StateOffline, LastSeen: time.Unix(900, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSuppressed(id, true, time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := p.Get(id)
+	if !ok || got.State != peer.StateBlocked {
+		t.Fatalf("期望 blocked，得到 %+v", got)
+	}
+	// 标记只改状态：名字要留住，否则诊断面板都看不出删掉的是谁
+	if got.DisplayName != "ghost" {
+		t.Fatalf("标记不该丢名字：%+v", got)
+	}
+	if err := p.SetSuppressed(id, false, time.Unix(2000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := p.Get(id); got.State == peer.StateBlocked {
+		t.Fatal("解除后不该还是 blocked")
+	}
+}
+
+// 对不存在的行做标记必须是无害的空操作（幂等）。
+func TestSetSuppressedOnMissingRowIsNoop(t *testing.T) {
+	db, _ := openTest(t)
+	p := NewPeers(db, clock.New())
+
+	if err := p.SetSuppressed(mkID(9), true, time.Unix(1, 0)); err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if _, ok := p.Get(mkID(9)); ok {
+		t.Fatal("不该凭空造出一行")
+	}
+}
+
 func TestTransferBitmapPersistsAndResumes(t *testing.T) {
 	db, _ := openTest(t)
 	tr := NewTransfers(db)

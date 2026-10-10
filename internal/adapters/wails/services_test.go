@@ -140,10 +140,13 @@ func (stubConns) Close(identity.NodeID) error                        { return ni
 
 type emptyDir struct{}
 
-func (emptyDir) Upsert(peer.Peer) error                           { return nil }
-func (emptyDir) Get(identity.NodeID) (peer.Peer, bool)            { return peer.Peer{}, false }
-func (emptyDir) List(ports.PeerFilter) []peer.Peer                { return nil }
-func (emptyDir) MarkOffline(identity.NodeID, time.Time) error     { return nil }
+func (emptyDir) Upsert(peer.Peer) error                       { return nil }
+func (emptyDir) Get(identity.NodeID) (peer.Peer, bool)        { return peer.Peer{}, false }
+func (emptyDir) List(ports.PeerFilter) []peer.Peer            { return nil }
+func (emptyDir) MarkOffline(identity.NodeID, time.Time) error { return nil }
+func (emptyDir) SetSuppressed(identity.NodeID, bool, time.Time) error {
+	return nil
+}
 func (emptyDir) SeenRecently(identity.NodeID, time.Duration) bool { return false }
 
 func selfID(t *testing.T) identity.NodeID {
@@ -172,8 +175,11 @@ func (d capDir) Get(id identity.NodeID) (peer.Peer, bool) {
 	}
 	return peer.Peer{}, false
 }
-func (d capDir) List(ports.PeerFilter) []peer.Peer                { return nil }
-func (d capDir) MarkOffline(identity.NodeID, time.Time) error     { return nil }
+func (d capDir) List(ports.PeerFilter) []peer.Peer            { return nil }
+func (d capDir) MarkOffline(identity.NodeID, time.Time) error { return nil }
+func (d capDir) SetSuppressed(identity.NodeID, bool, time.Time) error {
+	return nil
+}
 func (d capDir) SeenRecently(identity.NodeID, time.Duration) bool { return false }
 
 // 与 SendFile 同一条约定：最廉价的校验在返回前同步做。

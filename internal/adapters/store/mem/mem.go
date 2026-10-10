@@ -541,6 +541,24 @@ func (s *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 	return nil
 }
 
+// SetSuppressed 设置/清除「本地已移除」标记（语义见 ports.PeerDirectory）。
+func (s *Peers) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.items[id]
+	if !ok {
+		return nil
+	}
+	if suppressed {
+		p.State = peer.StateBlocked
+	} else if p.State == peer.StateBlocked {
+		p.State = peer.StateDiscovered
+	}
+	p.LastSeen = at
+	s.items[id] = p
+	return nil
+}
+
 // SeenRecently 判断该节点是否在 window 内被再次见到。
 func (s *Peers) SeenRecently(id identity.NodeID, window time.Duration) bool {
 	s.mu.RLock()
