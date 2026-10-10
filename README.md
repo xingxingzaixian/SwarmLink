@@ -218,7 +218,12 @@ New-Item -ItemType File .\bin\portable.mode
 >    Wails 内部收尾 —— 现象就是「双击没反应」。跟着数据目录走，「换个可写目录就能跑」才真正成立。
 
 **启动失败不再静默**：产物没有控制台（`-H windowsgui`），所以后端起不来时会弹一个原生
-对话框说明原因，日志落在 `<数据目录>/logs/swarmlink.log`。
+对话框说明原因，对话框内容可用 `Ctrl+C` 复制。
+
+日志落在 `<数据目录>/logs/swarmlink.log`；**该目录写不了时会退到
+`%TEMP%\SwarmLink\swarmlink.log`**（数据目录不可写恰恰是最需要日志的故障，
+所以必须有个兜底位置）。对话框里会写明日志实际落在哪一处。
+
 自动化场景可用 `SWARMLINK_NO_STARTUP_DIALOG=1` 关掉对话框。
 
 | 段                  | 关键项                                                                                                  |

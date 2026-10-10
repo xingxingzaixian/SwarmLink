@@ -103,22 +103,69 @@ var singleInstanceKey = [32]byte{
 // 用标准库 log.SetOutput 而不是只重定向 os.Stderr：Wails 与 WebView2 的报错
 // 和完整堆栈走的是标准库 log，改 os.Stderr 抓不到它们。同时保留原 stderr，
 // 所以开发构建（带控制台）依旧能在终端里看到同样的内容。
-func setupFileLog() (*os.File, error) {
+// setupFileLog 让日志同时落盘，返回文件句柄、真正落到的路径。
+//
+// 落点优先级：数据目录 → 临时目录。
+//
+// 为什么必须有第二级：数据目录不可写，恰恰是最需要日志的那一类故障（本项目已经
+// 遇到过），而那时若日志也写不进去，用户手上就一点可转交的证据都没有 —— 本次
+// 事故的对话框里那句「日志文件本身也写不了」就是这么来的。临时目录几乎总是可写，
+// 退到那里至少保住「有东西可查」。
+//
+// 返回值的语义（调用方据此决定对话框怎么写）：
+//   - 文件非 nil 且 primaryErr 为 nil：正常，logs 就在数据目录下；
+//   - 文件非 nil 且 primaryErr 非 nil：数据目录写不了，已退到临时目录，path 是那边；
+//   - 文件为 nil：两处都写不了，path 是尝试过的首选路径。
+func setupFileLog() (*os.File, string, error) {
+	paths, err := logTargets()
+	if err != nil {
+		return nil, "", err
+	}
+	f, path, degraded := openFirstWritable(paths)
+	if f != nil {
+		log.SetOutput(io.MultiWriter(os.Stderr, f))
+	}
+	return f, path, degraded
+}
+
+// logTargets 按优先级给出候选日志路径：数据目录优先（最好找），
+// 不可写时退到临时目录（几乎总是可写）。
+func logTargets() ([]string, error) {
 	dir, err := config.Dir()
 	if err != nil {
 		return nil, err
 	}
-	logDir := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
+	return []string{
+		filepath.Join(dir, "logs", "swarmlink.log"),
+		filepath.Join(os.TempDir(), "SwarmLink", "swarmlink.log"),
+	}, nil
+}
+
+// openFirstWritable 依次尝试候选路径，返回第一个打开成功的句柄与落点。
+//
+// 返回的 error 语义：落在首选位置时为 nil；退到备用位置时是「首选为什么写不了」
+// （调用方要据此解释「日志为什么不在数据目录里」）；全部失败时是每条候选的原因。
+func openFirstWritable(paths []string) (*os.File, string, error) {
+	var reasons []string
+	for i, p := range paths {
+		f, err := openLogFile(p)
+		if err == nil {
+			if i == 0 {
+				return f, p, nil
+			}
+			return f, p, fmt.Errorf("%s 不可写：%s", paths[0], reasons[0])
+		}
+		reasons = append(reasons, fmt.Sprintf("%s：%v", p, err))
+	}
+	return nil, paths[0], fmt.Errorf("所有候选位置都不可写（%s）", strings.Join(reasons, "；"))
+}
+
+// openLogFile 建父目录并以追加方式打开日志文件。
+func openLogFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(logDir, "swarmlink.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
-	return f, nil
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 }
 
 // reportFatalStartup 在窗口出现之前就把失败讲清楚：写日志 + 弹原生对话框。
@@ -126,21 +173,24 @@ func setupFileLog() (*os.File, error) {
 // 这里兑现的是 main 里那句注释的承诺（「GUI 必须明确报错而不是静默半死」）。
 // 原实现只有 slog.Error + os.Exit(1)：在 -H windowsgui 的产物上，slog 的 handler
 // 绑在 os.Stderr 上，等于把错误丢进黑洞 —— 注释承诺的事一件也没做。
-func reportFatalStartup(logFile *os.File, logErr error, cause error) {
+func reportFatalStartup(logFile *os.File, logPath string, logErr error, cause error) {
 	dir, _ := config.Dir()
-	logPath := filepath.Join(dir, "logs", "swarmlink.log")
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "SwarmLink 启动失败。\n\n原因：\n%v\n\n", cause)
 	fmt.Fprintf(&b, "日志文件：%s\n", logPath)
-	fmt.Fprintf(&b, "配置目录：%s\n", dir)
-	if logErr != nil {
-		fmt.Fprintf(&b, "\n（日志文件本身也写不了：%v）\n", logErr)
+	fmt.Fprintf(&b, "数据目录：%s\n", dir)
+	switch {
+	case logFile == nil:
+		fmt.Fprintf(&b, "\n（日志也写不进去：%v）\n", logErr)
+	case logErr != nil:
+		// 退到了临时目录：说清楚为什么，否则用户会去数据目录里找一个不存在的日志。
+		fmt.Fprintf(&b, "\n（注意：日志已退到临时目录 —— 数据目录写不了：%v）\n", logErr)
 	}
-	fmt.Fprintf(&b, "\n排查提示：日志里有完整的失败链路。若日志显示数据库无法写入，\n"+
-		"请检查安全软件（火绒 / 亚信等）是否拦住了本程序对配置目录的写入；\n"+
-		"若显示 WebView2 控制器创建失败，通常是上一次的残留进程占着\n"+
-		"%%APPDATA%%\\SwarmLink.exe\\EBWebView，注销后重开即可。")
+	fmt.Fprintf(&b, "\n排查提示（本对话框可用 Ctrl+C 复制）：\n"+
+		"  · 若日志显示数据库无法写入：检查安全软件（火绒 / 亚信等）是否拦住了\n"+
+		"    本程序对数据目录的写入；也可用环境变量 SWARMLINK_DATA_DIR 换一个可写目录。\n"+
+		"  · 若显示 WebView2 控制器创建失败：删掉 <数据目录>\\webview 后重开即可。")
 
 	slog.Error("后端启动失败", "err", cause)
 	if logFile != nil {
@@ -155,7 +205,7 @@ func reportFatalStartup(logFile *os.File, logErr error, cause error) {
 }
 
 func main() {
-	logFile, logErr := setupFileLog()
+	logFile, logPath, logErr := setupFileLog()
 	if logFile != nil {
 		defer func() { _ = logFile.Close() }()
 	}
@@ -163,7 +213,7 @@ func main() {
 	// 1. 先起后端：网络/存储起不来时，GUI 必须明确报错而不是静默半死。
 	node, err := bootstrap.Start(context.Background(), bootstrap.Options{Level: slog.LevelInfo})
 	if err != nil {
-		reportFatalStartup(logFile, logErr, err)
+		reportFatalStartup(logFile, logPath, logErr, err)
 		os.Exit(1)
 	}
 	defer node.Close()
