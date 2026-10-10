@@ -161,5 +161,41 @@ func TestOnAnnouncementDoesNotPublishSuppressedPeer(t *testing.T) {
 	}
 }
 
+// BYE 分支同样要抑制：MarkOffline 对 blocked 是空操作，但事件桥会把 peer:offline
+// 转成 peer:updated，前端对未知 nodeId 会 push 回列表 —— 删掉的节点在下线时又闪现一次。
+//
+// 注：B3 落地后本用例也要改写（签名有效的 BYE 会先解除标记，届时应当发布 offline）。
+func TestOnAnnouncementLeavingDoesNotPublishSuppressedPeer(t *testing.T) {
+	clk := clock.New()
+	dir := mem.NewPeers(clk)
+	bus := eventbus.New()
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{NodeID: peerID, DisplayName: "幽灵", State: peer.StateDiscovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.SetSuppressed(peerID, true, clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	published := 0
+	bus.Subscribe(eventbus.TopicPeerOffline, func(any) { published++ })
+
+	app := NewPeerApp(self, dir, bus, clk, 5*time.Minute, nil)
+	if err := app.OnAnnouncement(peer.Announcement{
+		NodeID: peerID, ObservedIP: "10.0.0.9", Leaving: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if published != 0 {
+		t.Fatalf("被移除的节点不该产生 peer.offline 事件（发了 %d 条）", published)
+	}
+	if got, _ := dir.Get(peerID); got.State != peer.StateBlocked {
+		t.Fatalf("状态 = %q，期望仍是 blocked", got.State)
+	}
+}
+
 // 确保测试里用到的 identity 类型不会被误删（helper 返回它）。
 var _ = identity.NodeID{}

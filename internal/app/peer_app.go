@@ -68,6 +68,14 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 		if err := a.dir.MarkOffline(an.NodeID, now); err != nil {
 			return err
 		}
+		// 被本地移除的节点连「告别」也不该产生事件：MarkOffline 对 blocked 是空操作，
+		// 但事件桥会把 peer:offline 转成 peer:updated，前端 peers store 对未知 nodeId
+		// 会 push 回列表 —— 于是删掉的节点在它优雅退出时又闪现一次。
+		//
+		// 与下面非 BYE 分支同一口径；B3 落地后，签名有效的 BYE 会先解除标记再走到这里。
+		if stored, ok := a.dir.Get(an.NodeID); ok && stored.State == peer.StateBlocked {
+			return nil
+		}
 		if a.lg != nil {
 			// 用 peer_id 而不是 node_id：logger 的上下文字段里已经有自己的 node_id 了
 			a.lg.Info("peer left", "peer_id", an.NodeID.String())
