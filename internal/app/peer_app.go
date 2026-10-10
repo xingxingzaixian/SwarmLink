@@ -211,6 +211,15 @@ func (a *PeerApp) Start() {
 		if ev.Addr != "" {
 			p.LastAddr = ev.Addr
 		}
+		// caps / proto_ver 是 HELLO 协商结果，announce 不携带，只能从这条事件学。
+		// 零值不覆盖：与 sqlite 仓储的粘性规则同一口径（「没协商出能力」不成信息，
+		// 不该抹掉已知的能力位）。
+		if ev.Caps != 0 {
+			p.Caps = ev.Caps
+		}
+		if ev.ProtoVer != 0 {
+			p.ProtoVer = ev.ProtoVer
+		}
 		if err := a.dir.Upsert(p); err != nil && a.lg != nil {
 			a.lg.Warn("peer directory upsert failed", "err", err)
 		}

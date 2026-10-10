@@ -209,6 +209,59 @@ func TestSendFolderRequiresCapability(t *testing.T) {
 	}
 }
 
+// 能力位必须能真的从握手协商走到目录 —— 这是「对方版本不支持文件夹传输」
+// 这个误报的正面回归。
+//
+// 缺陷成因：目录里的 caps 只会被「目录交换的第三方转述」写，而 announce 不携带
+// 能力位、session.Caps() 全仓无人调用 —— 于是无论对端升不升级，本机目录里的
+// caps 永远是 0，所有文件夹传输都被判成不支持。本用例走完整接缝：
+// conn 层发 peer.online（带 HELLO 协商出的 caps_common）→ PeerApp 写目录 →
+// SendFolderAs 放行。
+func TestFolderCapabilityLearnedFromHandshake(t *testing.T) {
+	root := t.TempDir()
+	mkFile(t, filepath.Join(root, "照片", "a.txt"), 1)
+
+	clk := clock.New()
+	dir := mem.NewPeers(clk)
+	bus := eventbus.New()
+
+	peerID := identity.NodeID{}
+	peerID[len(peerID)-1] = 7
+	// 只被 announce 发现过：announce 不携带能力位，条目里因此没有 caps。
+	if err := dir.Upsert(peer.Peer{NodeID: peerID, DisplayName: "bob"}); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewTransferApp(identity.NodeID{}, &stubTransferRepo{}, nil, noConns{}, dir, bus, clk, nil)
+	a.ChunkSize = 1024
+
+	// 协商前：能力位未知 ⇒ 必须拒绝（原有行为，不得退化）。
+	if _, err := a.SendFolderAs(context.Background(), peerID, filepath.Join(root, "照片"), "batch-before"); err == nil {
+		t.Fatal("协商前不该放行文件夹发送")
+	}
+
+	// 连接建立：连接层按 HELLO 的 caps_common 发 peer.online。
+	NewPeerApp(identity.NodeID{}, dir, bus, clk, time.Minute, nil).Start()
+	bus.Publish(eventbus.TopicPeerOnline, eventbus.PeerOnline{
+		NodeID:   peerID.String(),
+		Caps:     peer.CapsChatReliable | peer.CapsFolderTransfer,
+		ProtoVer: 2,
+	})
+
+	got, ok := dir.Get(peerID)
+	if !ok || !got.Caps.Has(peer.CapsFolderTransfer) {
+		t.Fatalf("协商出的能力位没有落到目录：%+v", got)
+	}
+	if got.ProtoVer != 2 {
+		t.Errorf("proto_ver = %d，期望 2", got.ProtoVer)
+	}
+
+	// 协商后：放行。
+	if _, err := a.SendFolderAs(context.Background(), peerID, filepath.Join(root, "照片"), "batch-after"); err != nil {
+		t.Fatalf("协商后必须放行，得到 %v", err)
+	}
+}
+
 // 传的文件不是一个目录：立即报错。
 func TestSendFolderRejectsNonDirectory(t *testing.T) {
 	root := t.TempDir()

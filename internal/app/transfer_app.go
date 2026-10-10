@@ -226,6 +226,11 @@ func (a *TransferApp) sendFile(
 		return transfer.Job{}, fmt.Errorf("transfer: 任务已不在等待中（当前 %s）", prev.Status)
 	}
 
+	// 目录条目（空目录占位）的线上形状与文件不同：零字节、无分块、无哈希。
+	// 它必须在这里分流 —— 落进下面「文件」那条路径会在 os.Stat 上就被判成
+	// "is a directory" 直接失败，于是整批里唯一能把空目录建出来的消息永远发不出去。
+	isDir := prevErr == nil && prev.IsDir
+
 	// networkAttempted 标记「失败是否已经发生在网络阶段」。
 	//
 	// 这是分类的硬前提：本地检查（stat / 打开 / 哈希）出错一律是【真失败】——
@@ -301,11 +306,18 @@ func (a *TransferApp) sendFile(
 	if serr != nil {
 		return transfer.Job{}, fmt.Errorf("transfer: %w", serr)
 	}
-	if st.IsDir() {
-		return transfer.Job{}, fmt.Errorf("transfer: %s is a directory", path)
+	if st.IsDir() != isDir {
+		// 两侧都要拦：目录条目把文件当路径（改名/重建后会出现），
+		// 文件任务把目录当路径（历史行为，文案保持不变）。
+		if st.IsDir() {
+			return transfer.Job{}, fmt.Errorf("transfer: %s is a directory", path)
+		}
+		return transfer.Job{}, fmt.Errorf("transfer: %s 不是目录（任务标记为目录条目）", path)
 	}
 	statSize := st.Size()
-	if transfer.ChunkCount(statSize, chunkSize) == 0 {
+	if isDir {
+		statSize = 0 // 目录条目零字节：st.Size() 在目录上是平台相关的元数据大小
+	} else if transfer.ChunkCount(statSize, chunkSize) == 0 {
 		return transfer.Job{}, fmt.Errorf("transfer: empty file")
 	}
 
@@ -329,13 +341,19 @@ func (a *TransferApp) sendFile(
 		return transfer.Job{}, ctx.Err()
 	}
 
-	fileHash, chunkHashes, size, err := hashFileChunks(path, chunkSize)
-	if err != nil {
-		return transfer.Job{}, fmt.Errorf("transfer: hash %s: %w", path, err)
-	}
-	total := transfer.ChunkCount(size, chunkSize)
-	if total == 0 {
-		return transfer.Job{}, fmt.Errorf("transfer: empty file")
+	// 目录条目没有内容可哈希、也没有分块：它的全部就是 META → ACK → DONE。
+	fileHash, size := "", statSize
+	var chunkHashes []string
+	total := 0
+	if !isDir {
+		h, hs, sz, herr := hashFileChunks(path, chunkSize)
+		if herr != nil {
+			return transfer.Job{}, fmt.Errorf("transfer: hash %s: %w", path, herr)
+		}
+		fileHash, chunkHashes, size = h, hs, sz
+		if total = transfer.ChunkCount(size, chunkSize); total == 0 {
+			return transfer.Job{}, fmt.Errorf("transfer: empty file")
+		}
 	}
 
 	window := a.WindowSize
@@ -378,11 +396,16 @@ func (a *TransferApp) sendFile(
 		return job, err
 	}
 
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return job, err
+	// 目录条目不打开文件句柄：Windows 上 OpenFile 一个目录会直接失败。
+	// sj.f 为 nil 是安全的 —— 下面 runSender 对目录条目根本不跑。
+	var f *os.File
+	if !isDir {
+		f, err = os.OpenFile(path, os.O_RDONLY, 0)
+		if err != nil {
+			return job, err
+		}
+		defer f.Close()
 	}
-	defer f.Close()
 
 	// 从这里开始进入网络阶段：之后的失败才可能是"对端够不着"。
 	networkAttempted = true
@@ -413,6 +436,12 @@ func (a *TransferApp) sendFile(
 		ChunkSize:   chunkSize,
 		TotalChunks: total,
 		ChunkHashes: chunkHashes,
+		// 批次字段必须上线：接收端据此还原目录树。漏掉它们，整批文件会被
+		// 平铺到下载目录、同名再互相加 (1)。单文件传输时三者是零值，
+		// 因 omitempty 不会多出线上体积。
+		BatchID: job.BatchID,
+		RelPath: job.RelPath,
+		IsDir:   isDir,
 	})
 	if err != nil {
 		return job, err
@@ -433,9 +462,12 @@ func (a *TransferApp) sendFile(
 		return job, ctx.Err()
 	}
 
-	// 失败时由函数顶部统一的出口发事件，避免这里和那里各发一次
-	if err := a.runSender(ctx, sess, sj); err != nil {
-		return job, err
+	// 失败时由函数顶部统一的出口发事件，避免这里和那里各发一次。
+	// 目录条目零字节零分块：META → ACK → DONE 就是它的全部，没有块要发。
+	if !isDir {
+		if err := a.runSender(ctx, sess, sj); err != nil {
+			return job, err
+		}
 	}
 
 	// 最后一段：完成

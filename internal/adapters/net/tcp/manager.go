@@ -379,6 +379,10 @@ func (m *Manager) publishOnline(s *session) {
 			NodeID: s.peerID.String(),
 			Addr:   s.RemoteAddr(),
 			RTT:    s.RTT(),
+			// 协商结果只有会话知道：adapter 不写目录，所以必须由事件带出去，
+			// 否则目录里的能力位永远是 0（文件夹传输会因此被误判为不支持）。
+			Caps:     s.caps,
+			ProtoVer: s.protoVersion,
 		})
 	}
 	if m.lg != nil {

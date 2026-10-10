@@ -1,15 +1,29 @@
 package eventbus
 
-import "time"
+import (
+	"time"
+
+	"github.com/swarmlink/swarmlink/internal/domain/peer"
+)
 
 // 事件载荷类型集中定义，避免各处重复声明匿名 struct。
 // 各 App 订阅后据此转换为领域类型或直接转发给 UI 层。
 
 // PeerOnline 是 peer.online 的载荷。
+//
+// Caps / ProtoVer 是 HELLO 协商出的共同能力（caps_common），【必须】随事件带出来：
+// 目录里的 caps 原本只有两条写入路径（目录交换的第三方转述、announce 的「保留旧值」），
+// 而 announce 不携带能力位 —— 于是能力位永远停在 0，任何文件夹传输都会被
+// 判成「对方版本不支持」。适配器不许写目录（依赖方向 R2），
+// 这条事件就是协商结果抵达目录的唯一通道。
 type PeerOnline struct {
 	NodeID string
 	Addr   string
 	RTT    time.Duration
+	// Caps 是协商后的共同能力位；零值表示「本次没有协商出能力」，不成信息。
+	Caps peer.Caps
+	// ProtoVer 是协商后选定的协议版本。
+	ProtoVer int
 }
 
 // PeerOffline 是 peer.offline 的载荷。

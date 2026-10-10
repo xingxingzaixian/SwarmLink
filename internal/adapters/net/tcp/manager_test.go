@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
+	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
@@ -21,17 +22,65 @@ type node struct {
 
 func newTestNode(t *testing.T, clk ports.Clock, handler FrameHandler) *node {
 	t.Helper()
+	return newTestNodeWithCaps(t, clk, 0, handler)
+}
+
+// newTestNodeWithCaps 造一个显式声明能力位的节点。
+func newTestNodeWithCaps(t *testing.T, clk ports.Clock, caps peer.Caps, handler FrameHandler) *node {
+	t.Helper()
 	kp, err := identity.GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
 	}
 	bus := eventbus.New()
-	mgr := NewManager(kp, testCfg("n-"+kp.NodeID().String()[:4], 0), DefaultPolicy(), clk, nil, bus, handler)
+	mgr := NewManager(kp, testCfg("n-"+kp.NodeID().String()[:4], caps), DefaultPolicy(), clk, nil, bus, handler)
 	if _, err := mgr.Start(context.Background(), "127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(mgr.Stop)
 	return &node{kp: kp, mgr: mgr, addr: mgr.LocalAddr(), bus: bus}
+}
+
+// 会话建立必须把协商出的能力位随 peer.online 事件发出去。
+//
+// 适配器不许写目录（依赖方向 R2），这条事件是协商结果抵达目录的唯一通道；
+// 漏掉它，接收端就只能看到 caps = 0，任何文件夹传输都会被判成「对方不支持」。
+func TestPeerOnlineCarriesNegotiatedCaps(t *testing.T) {
+	ctx := context.Background()
+	caps := peer.CapsChatReliable | peer.CapsFolderTransfer
+	a := newTestNodeWithCaps(t, clock.New(), caps, nil)
+	b := newTestNodeWithCaps(t, clock.New(), caps, nil)
+
+	online := make([]eventbus.PeerOnline, 0, 1)
+	a.bus.Subscribe(eventbus.TopicPeerOnline, func(payload any) {
+		if ev, ok := payload.(eventbus.PeerOnline); ok {
+			online = append(online, ev)
+		}
+	})
+
+	sess, err := a.mgr.Dial(ctx, b.kp.NodeID(), b.addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if len(online) != 1 {
+		t.Fatalf("期望 1 条 peer.online，得到 %d 条", len(online))
+	}
+	ev := online[0]
+	if !ev.Caps.Has(peer.CapsFolderTransfer) {
+		t.Errorf("事件必须带上协商能力位（含 CapsFolderTransfer），得到 %b", uint32(ev.Caps))
+	}
+	// ports.Session 上没有 Caps()：能力位跨不出适配器层，这本身就是原缺陷的一部分
+	// —— 因此这里断言事件与会话内部字段一致，而不是通过端口读。
+	s, ok := sess.(*session)
+	if !ok {
+		t.Fatalf("会话类型异常：%T", sess)
+	}
+	if ev.Caps != s.caps {
+		t.Errorf("事件能力位 %b 与会话 %b 不一致", uint32(ev.Caps), uint32(s.caps))
+	}
+	if ev.ProtoVer != s.protoVersion {
+		t.Errorf("事件协议版本 %d 与会话 %d 不一致", ev.ProtoVer, s.protoVersion)
+	}
 }
 
 func TestManagerDialAndExchangeFrames(t *testing.T) {

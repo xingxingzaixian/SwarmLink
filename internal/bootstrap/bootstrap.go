@@ -97,6 +97,9 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 		}
 		dir = d
 	}
+	// 身份托管目录与数据目录【无关】；返回空串表示禁用（便携模式 / 两者重合 / 平台无机器级位置）。
+	// 为什么要在这里解析而不是让 keystore 自己去问 config：adapters 之间禁止互引（R2）。
+	vaultDir := config.VaultDir(dir)
 	cfg, err := config.Load(dir)
 	if err != nil {
 		return nil, err
@@ -121,11 +124,22 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	}
 
 	// ---------------------------------------------------------------- 身份
-	kp, err := keystore.LoadOrCreate(dir)
+	res, err := keystore.LoadOrCreate(dir, vaultDir)
 	if err != nil {
 		return nil, err
 	}
+	kp := res.KeyPair
 	lg := newLogger(opts.Level, kp.NodeID().String())
+	// vaultDir == "" 有四种原因（便携 / 与数据目录重合 / 平台无机器级位置 / env 被设成数据目录），
+	// 其中最后一种最容易被踩，而排查「换了数据目录身份为什么没恢复」时它几乎不留线索。
+	if vaultDir == "" && strings.TrimSpace(os.Getenv(config.EnvVaultDir)) != "" {
+		lg.Warn("身份托管已禁用：SWARMLINK_VAULT_DIR 与数据目录重合", "data_dir", dir)
+	}
+	if res.Notice != "" {
+		// 当前只有日志这一个呈现面（设计文档「非目标」里排除了启动通知 UI）。
+		// 这条日志是「用户突然换了身份」时唯一能查到原因的地方，措辞要能自解释。
+		lg.Warn("identity notice", "notice", res.Notice, "restored", res.Restored)
+	}
 
 	n := &Node{KP: kp, Cfg: cfg, ConfigDir: dir}
 	clk := clock.New()
