@@ -168,14 +168,27 @@ keystore 不依赖日志、UI 或 `bootstrap`。
 
 ### 5.3 行为规则
 
-**① 抑制：下沉为写入侧不变量（0 个显式抑制点）**
+**① 抑制：落库状态靠粘性，事件流靠两处显式闸门**
 
 把 `blocked` 做成**粘性状态**：已存在的行若为 `blocked`，任何写入都不得把它改成别的状态
 （sqlite 侧在 `Upsert` 的 `ON CONFLICT DO UPDATE SET` 里加一个 `CASE`，`mem.Peers.Upsert` 加一行判断）。
-
 放在仓储的唯一写入点，是为了避免"每新增一条写入路径都要记得过滤"的漏点：
 今天有 3 条路径会写 peers（`OnAnnouncement`、`TopicPeerOnline`、`HandlePeerListResp`），
 以后只会更多。
+
+但**粘性只保住落库状态**：调用方在 `Upsert` 之后发布的是它自己构造的 `p`（`State=discovered`），
+事件桥照发 → 前端 `peers` store 对未知 `nodeId` 会 `push` 回列表（于是被删节点每隔一个通告周期闪现一次），
+连接层与传输等待也会据此去拨号一个用户已移除的节点。因此**两条非签名写入路径各需要一道显式闸门**：
+
+- `HandlePeerListResp`：条目对应的行已是 `blocked` → 整条 `continue`（连 `Upsert` 都不必做）
+- `OnAnnouncement`：`Upsert` 之后以 `Get` 到的实际状态为准，仍是 `blocked` 就不发布
+  （B3 落地后这条对「有效签名通告」自然为假 —— 那条路径会先解除标记再走到发布点）
+
+签名/连接路径（`TopicPeerOnline`、`TopicPeerOffline`）由 B3 的恢复触发点覆盖：
+握手成功即解除标记，发出 `online` 因此是正确的。
+
+> 本节初稿写的是"0 个显式抑制点"，在 B2 的代码质量评审里被证明不成立（事件流会泄漏被移除节点），
+> 已按上述两处闸门修正。
 
 **② 读取：`List()` 默认排除 `blocked`**
 

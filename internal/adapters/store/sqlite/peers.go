@@ -81,6 +81,8 @@ func (p *Peers) List(filter ports.PeerFilter) []peer.Peer {
 	} else if !filter.IncludeBlocked {
 		// 默认不返回「被本地移除」的条目（见 ports.PeerFilter.IncludeBlocked）。
 		// 显式按 State 查询优先：诊断面板要能看到那几条。
+		// 这里不需要 COALESCE：state 恒由 Upsert 写入，列也有 DEFAULT 'unknown'，
+		// 不会出现 NULL（NULL 会让 `state <> 'blocked'` 求值为 NULL 而丢掉整行）。
 		where = append(where, "state <> 'blocked'")
 	}
 	if filter.Source != "" {

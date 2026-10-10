@@ -149,8 +149,13 @@ func TestPeersDirectory(t *testing.T) {
 	// 与 sqlite 实现一致：这里原先只认 online，是评审发现的跨实现分歧（分组扇出正是
 	// 靠这个集合决定「值得拨号的对象」，把 discovered 排除会让它们收不到群消息）。
 	_ = p.Upsert(peer.Peer{NodeID: mkID(2), State: peer.StateDiscovered})
-	if list := p.List(ports.PeerFilter{OnlineOnly: true}); len(list) != 2 {
-		t.Fatalf("OnlineOnly 应返回 online + discovered 共 2 条，得到 %+v", list)
+	online := map[identity.NodeID]bool{}
+	for _, got := range p.List(ports.PeerFilter{OnlineOnly: true}) {
+		online[got.NodeID] = true
+	}
+	// 断言集合而不是顺序：两条的 last_seen 相同，排序是未定义的
+	if len(online) != 2 || !online[mkID(1)] || !online[mkID(2)] {
+		t.Fatalf("OnlineOnly 应返回 {1,2}（online + discovered），得到 %+v", online)
 	}
 	if list := p.List(ports.PeerFilter{Source: peer.SourceBroadcast}); len(list) != 1 {
 		t.Fatalf("source filter wrong: %+v", list)

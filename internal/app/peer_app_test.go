@@ -124,5 +124,42 @@ func TestOnAnnouncementLeavingForUnknownPeerIsNoop(t *testing.T) {
 	}
 }
 
+// 带着 blocked 行走到这里的通告不得被发布：仓储粘性会保住落库状态，
+// 但 p 本身是 discovered/online。把它发出去会让前端推回列表、让连接/传输层来拨号。
+//
+// 注：B3（有效签名通告自动恢复）落地后本用例要改写 —— 那时这条路径会先
+// SetSuppressed(false) 再走到发布点，因此应当断言「恢复并发布 discovered」。
+func TestOnAnnouncementDoesNotPublishSuppressedPeer(t *testing.T) {
+	clk := clock.New()
+	dir := mem.NewPeers(clk)
+	bus := eventbus.New()
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{NodeID: peerID, DisplayName: "幽灵", State: peer.StateDiscovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.SetSuppressed(peerID, true, clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	published := 0
+	bus.Subscribe(eventbus.TopicPeerDiscovered, func(any) { published++ })
+
+	app := NewPeerApp(self, dir, bus, clk, 5*time.Minute, nil)
+	if err := app.OnAnnouncement(peer.Announcement{
+		NodeID: peerID, DisplayName: "幽灵", ObservedIP: "10.0.0.9", TCPPort: 2425,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if published != 0 {
+		t.Fatalf("被移除的节点不该产生 peer.discovered 事件（发了 %d 条）", published)
+	}
+	if got, _ := dir.Get(peerID); got.State != peer.StateBlocked {
+		t.Fatalf("状态 = %q，期望仍是 blocked", got.State)
+	}
+}
+
 // 确保测试里用到的 identity 类型不会被误删（helper 返回它）。
 var _ = identity.NodeID{}

@@ -10,6 +10,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
+	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
 
 // captureSession 记录本端发出的帧，供断言 PEER_LIST_RESP 的内容。
@@ -92,6 +93,52 @@ func TestPeerListRespExcludesSuppressedPeer(t *testing.T) {
 	}
 	if !hasEntry(resp, kept.NodeID) {
 		t.Fatal("其它节点必须照常传播")
+	}
+}
+
+// 目录交换【接收】侧：对端把被移除的节点又送回来时，必须整条跳过 ——
+// 既不能改状态，也不能发事件。事件会经 eventbridge 让前端把它推回列表
+// （peers store 对未知 nodeId 会 push），并让连接/传输层去拨号它。
+//
+// 只靠仓储 Upsert 的粘性不够：粘性保住的是落库状态，而 p 本身仍是 discovered。
+func TestPeerListRespSkipsSuppressedPeerAndDoesNotPublish(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	dir := mem.NewPeers(clk)
+	bus := eventbus.New()
+	self := mustNodeID(t, testSelfHex)
+
+	gone := mustNodeID(t, "1112131415161718")
+	if err := dir.Upsert(peer.Peer{
+		NodeID: gone, DisplayName: "幽灵", State: peer.StateDiscovered, LastSeen: clk.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.SetSuppressed(gone, true, clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	published := 0
+	bus.Subscribe(eventbus.TopicPeerDiscovered, func(any) { published++ })
+
+	d := NewDiscoveryApp(self, nil, dir, nil, nil, nil, bus, clk, nil)
+	sess := &captureSession{peer: mustNodeID(t, testPeerHex)}
+
+	body, err := protocol.EncodeJSON(protocol.PeerListRespWire{
+		Epoch:   1,
+		Entries: []protocol.PeerListEntry{{NodeID: gone.String(), DisplayName: "幽灵"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.HandlePeerListResp(sess, protocol.New(protocol.TypePeerListResp, body)); err != nil {
+		t.Fatalf("HandlePeerListResp: %v", err)
+	}
+
+	if published != 0 {
+		t.Fatalf("被移除的节点不该产生 peer.discovered 事件（发了 %d 条）", published)
+	}
+	if got, _ := dir.Get(gone); got.State != peer.StateBlocked {
+		t.Fatalf("状态 = %q，期望仍是 blocked（目录交换不触发恢复）", got.State)
 	}
 }
 

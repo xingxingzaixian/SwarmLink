@@ -128,6 +128,16 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 	if err := a.dir.Upsert(p); err != nil {
 		return err
 	}
+	// 发布前以【落库后的状态】为准：仓储对 blocked 有粘性，上面的 p 可能是
+	// discovered/online，而目录里仍是 blocked（该节点已被本地移除）。
+	// 把 p 直接发出去会让 UI 把它推回列表、并让连接/传输层去拨号它。
+	//
+	// 注意本判断在「有效签名通告触发恢复」之后必然为假：那条路径会先
+	// SetSuppressed(false) 再走到这里（设计 §5.3 ③），此时发布 discovered 是正确的。
+	// 留着它是给任何仍能带着 blocked 行走到这里的路径兜底。
+	if stored, ok := a.dir.Get(an.NodeID); ok && stored.State == peer.StateBlocked {
+		return nil
+	}
 	if a.bus != nil {
 		a.bus.Publish(eventbus.TopicPeerDiscovered, p)
 	}

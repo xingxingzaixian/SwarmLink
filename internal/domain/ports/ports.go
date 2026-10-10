@@ -63,7 +63,7 @@ type PeerFilter struct {
 	// 「正在广播但还没握手」的节点在 UI 上凭空消失（ADR-009）。
 	OnlineOnly bool
 	// IncludeBlocked 让「被本地移除」的条目也出现在结果里（诊断用，默认不返回）。
-	// 注意：State 显式指定为 blocked 时本字段无意义 —— 显式查询优先。
+	// 注意：State 非空时本字段无意义 —— 显式查询优先。
 	IncludeBlocked bool
 	Limit          int
 }
@@ -91,8 +91,8 @@ type PeerDirectory interface {
 	// （List 默认排除 blocked；显式 IncludeBlocked 或显式 State=blocked 查询除外 ——
 	// 诊断类调用方要显式打开，否则会少统计被移除的条目）。
 	//
-	// 「恢复」不由本接口负责：app 层在该身份再次被验证到时（有效签名通告或握手成功）
-	// 调用 SetSuppressed(id, false)，见 app.PeerApp。
+	// 「恢复」不由本接口负责：app 层会在该身份再次被验证到时（有效签名通告或握手成功）
+	// 调用 SetSuppressed(id, false) —— 这一步随「无效节点删除」的 B3 落地，届时见 app.PeerApp。
 	//
 	// 完整设计见 docs/plans/2026-10-10-identity-vault-and-peer-removal-design.md §5。
 	SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error

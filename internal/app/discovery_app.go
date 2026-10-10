@@ -192,6 +192,17 @@ func (d *DiscoveryApp) HandlePeerListResp(sess ports.Session, f protocol.Frame) 
 		if err != nil || id == d.self {
 			continue
 		}
+		// 被本地移除的节点：整条跳过，而不是"让它 Upsert 后被粘性吃掉"。
+		//
+		// 这里的显式判断不能省：仓储的粘性保住的是【落库状态】，而下面的循环会把
+		// p（State=discovered）发到事件总线上 —— 事件桥照发，前端 peers store 对未知
+		// nodeId 会 push 回列表（于是删掉的节点每隔一个通告周期闪现一次），
+		// 连接层与传输等待也会据此去拨号一个用户已经移除的节点。
+		//
+		// 本路径【不触发恢复】：目录条目是第三方转述、没有签名（设计 §5.3 ③）。
+		if prev, ok := d.dir.Get(id); ok && prev.State == peer.StateBlocked {
+			continue
+		}
 		p := peer.Peer{
 			NodeID:      id,
 			DisplayName: e.DisplayName,

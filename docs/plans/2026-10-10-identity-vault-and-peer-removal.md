@@ -1248,7 +1248,9 @@ type PeerFilter struct {
 
 5. `mem/mem.go` 三处同步：
    - `Upsert`：`if old, ok := s.items[p.NodeID]; ok && old.State == peer.StateBlocked { p.State = peer.StateBlocked }`
-   - `MarkOffline`：若当前是 `blocked` 则只更新 `LastSeen`，不改状态
+   - `MarkOffline`：若当前是 `blocked` 则**直接提前返回**（连 `LastSeen` 也不动）——
+     必须与 sqlite 的 `AND state <> 'blocked'` 一致；只更新 `LastSeen` 会引入一条新的跨实现分歧
+     （这是实现阶段修正计划文本的一处，原计划写的是"只更新 LastSeen"）
    - `List`：`if filter.State != "" {...} else if !filter.IncludeBlocked && p.State == peer.StateBlocked { continue }`
 
 6. `discovery_app.go` 的 `entries()` 删掉那行 `if p.State == peer.StateBlocked { continue }`，
