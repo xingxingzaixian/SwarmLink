@@ -479,8 +479,15 @@ func NewPeers(clk ports.Clock) *Peers {
 func (s *Peers) Upsert(p peer.Peer) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.items[p.NodeID]; ok && !old.FirstSeen.IsZero() {
-		p.FirstSeen = old.FirstSeen
+	if old, ok := s.items[p.NodeID]; ok {
+		// blocked 是粘性状态：任何写入都不得覆盖它，否则每新增一条写入路径都是一次
+		// 「被移除的节点复活」的风险。解除只能走 SetSuppressed（见 ports.PeerDirectory）。
+		if old.State == peer.StateBlocked {
+			p.State = peer.StateBlocked
+		}
+		if !old.FirstSeen.IsZero() {
+			p.FirstSeen = old.FirstSeen
+		}
 	}
 	if p.FirstSeen.IsZero() {
 		p.FirstSeen = s.clk.Now()
@@ -505,13 +512,21 @@ func (s *Peers) List(filter ports.PeerFilter) []peer.Peer {
 	s.mu.RLock()
 	out := make([]peer.Peer, 0, len(s.items))
 	for _, p := range s.items {
-		if filter.State != "" && p.State != filter.State {
+		if filter.State != "" {
+			if p.State != filter.State {
+				continue
+			}
+		} else if !filter.IncludeBlocked && p.State == peer.StateBlocked {
+			// 默认不返回「被本地移除」的条目（见 ports.PeerFilter.IncludeBlocked）。
+			// 显式按 State 查询优先：诊断面板要能看到那几条。
 			continue
 		}
 		if filter.Source != "" && p.Source != filter.Source {
 			continue
 		}
-		if filter.OnlineOnly && p.State != peer.StateOnline {
+		// OnlineOnly：online 与 discovered 都算「在」，与 sqlite 实现保持一致
+		// （这里曾只认 online，两个互为替身的实现因此在同一条语句上分叉）
+		if filter.OnlineOnly && p.State != peer.StateOnline && p.State != peer.StateDiscovered {
 			continue
 		}
 		out = append(out, p)
@@ -531,6 +546,10 @@ func (s *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 	defer s.mu.Unlock()
 	p, ok := s.items[id]
 	if !ok {
+		return nil
+	}
+	if p.State == peer.StateBlocked {
+		// 已移除的条目不能被离线事件变回可见：List 只排除 blocked，而 offline 是可见的。
 		return nil
 	}
 	p.State = peer.StateOffline

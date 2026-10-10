@@ -235,9 +235,8 @@ func (d *DiscoveryApp) entries() []protocol.PeerListEntry {
 
 	out := make([]protocol.PeerListEntry, 0, len(ps))
 	for _, p := range ps {
-		if p.State == peer.StateBlocked {
-			continue
-		}
+		// 被本地移除的节点不会走到这里：List 的默认语义已经排除 blocked
+		// （ports.PeerFilter.IncludeBlocked）。此处不再重复过滤 —— 过滤规则只留一处真相。
 		entry := protocol.PeerListEntry{
 			NodeID:      p.NodeID.String(),
 			DisplayName: p.DisplayName,

@@ -307,6 +307,87 @@ func TestSetSuppressedOnMissingRowIsNoop(t *testing.T) {
 	}
 }
 
+// 粘性：被移除的节点不能被任何写入路径「复活」——这是删除能删干净的前提。
+func TestBlockedStateIsStickyAcrossWrites(t *testing.T) {
+	db, _ := openTest(t)
+	p := NewPeers(db, clock.New())
+
+	id := mkID(3)
+	if err := p.Upsert(peer.Peer{NodeID: id, State: peer.StateOffline, LastSeen: time.Unix(100, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSuppressed(id, true, time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	// 目录交换会把条目 Upsert 成 discovered；这一发不能生效
+	if err := p.Upsert(peer.Peer{
+		NodeID: id, DisplayName: "ghost", State: peer.StateDiscovered, LastSeen: time.Unix(1100, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := p.Get(id)
+	if got.State != peer.StateBlocked {
+		t.Fatalf("Upsert 覆盖了移除标记：%+v", got)
+	}
+	// 名字这类信息仍允许更新（诊断要能看出删掉的是谁）
+	if got.DisplayName != "ghost" {
+		t.Fatalf("非状态字段应当照常更新：%+v", got)
+	}
+
+	// 离线事件同样不能把它变回可见
+	if err := p.MarkOffline(id, time.Unix(1200, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := p.Get(id); got.State != peer.StateBlocked {
+		t.Fatalf("MarkOffline 覆盖了移除标记：%+v", got)
+	}
+}
+
+// 默认 List 不返回被移除的节点；显式 IncludeBlocked / 显式 State 查询仍能看到（诊断用）。
+func TestListExcludesBlockedByDefault(t *testing.T) {
+	db, _ := openTest(t)
+	p := NewPeers(db, clock.New())
+
+	kept, gone := mkID(4), mkID(5)
+	for _, id := range []identity.NodeID{kept, gone} {
+		if err := p.Upsert(peer.Peer{NodeID: id, State: peer.StateOffline}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.SetSuppressed(gone, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	all := p.List(ports.PeerFilter{})
+	if len(all) != 1 || all[0].NodeID != kept {
+		t.Fatalf("默认 List 应只剩 1 条，得到 %+v", all)
+	}
+	if with := p.List(ports.PeerFilter{IncludeBlocked: true}); len(with) != 2 {
+		t.Fatalf("IncludeBlocked 应返回 2 条，得到 %d", len(with))
+	}
+	if only := p.List(ports.PeerFilter{State: peer.StateBlocked}); len(only) != 1 || only[0].NodeID != gone {
+		t.Fatalf("显式按 blocked 查询应返回 1 条，得到 %+v", only)
+	}
+}
+
+// OnlineOnly 的语义：online 与 discovered 都算「在」（两个仓储实现必须一致）。
+func TestListOnlineOnlyIncludesDiscovered(t *testing.T) {
+	db, _ := openTest(t)
+	p := NewPeers(db, clock.New())
+
+	for i, st := range []peer.State{peer.StateOnline, peer.StateDiscovered, peer.StateOffline} {
+		if err := p.Upsert(peer.Peer{NodeID: mkID(byte(i + 1)), State: st}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := p.List(ports.PeerFilter{OnlineOnly: true})
+	if len(got) != 2 {
+		t.Fatalf("OnlineOnly 应包含 online 与 discovered 共 2 条，得到 %d: %+v", len(got), got)
+	}
+}
+
 func TestTransferBitmapPersistsAndResumes(t *testing.T) {
 	db, _ := openTest(t)
 	tr := NewTransfers(db)

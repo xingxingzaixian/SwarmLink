@@ -56,10 +56,16 @@ type EventBus interface {
 
 // PeerFilter 是目录查询过滤条件。
 type PeerFilter struct {
-	State      peer.State
-	Source     string
+	State  peer.State
+	Source string
+	// OnlineOnly 只返回「在」的节点：online 与 discovered 都算 ——
+	// 前者由连接层维护、后者由 announce 维护，把 discovered 排除掉会让
+	// 「正在广播但还没握手」的节点在 UI 上凭空消失（ADR-009）。
 	OnlineOnly bool
-	Limit      int
+	// IncludeBlocked 让「被本地移除」的条目也出现在结果里（诊断用，默认不返回）。
+	// 注意：State 显式指定为 blocked 时本字段无意义 —— 显式查询优先。
+	IncludeBlocked bool
+	Limit          int
 }
 
 // PeerDirectory 只回答「我听说过谁」，不回答「我现在连着谁」（那是 ConnManager）。

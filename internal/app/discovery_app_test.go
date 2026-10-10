@@ -52,6 +52,49 @@ func hasEntry(resp protocol.PeerListRespWire, id identity.NodeID) bool {
 	return false
 }
 
+// 被本地移除的节点不能再由本机传播给别人：目录交换是唯一的出口。
+//
+// 与 B3 的「目录交换不恢复」配对：一个讲出口、一个讲入口。
+// 以前 entries() 里有一次显式过滤，本计划把它下沉到 List 的默认语义 ——
+// 本用例正是钉住「删掉那行显式过滤之后行为不变」。
+func TestPeerListRespExcludesSuppressedPeer(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	dir := mem.NewPeers(clk)
+	self := mustNodeID(t, testSelfHex)
+
+	mk := func(hex, name, addr string) peer.Peer {
+		return peer.Peer{
+			NodeID:      mustNodeID(t, hex),
+			DisplayName: name,
+			LastAddr:    addr,
+			LastSeen:    clk.Now(),
+			State:       peer.StateDiscovered,
+			Source:      peer.SourceSeed,
+		}
+	}
+	kept := mk("0102030405060708", "甲", "10.1.1.5:2425")
+	gone := mk("1112131415161718", "幽灵", "10.2.2.9:2425")
+	for _, p := range []peer.Peer{kept, gone} {
+		if err := dir.Upsert(p); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+	if err := dir.SetSuppressed(gone.NodeID, true, clk.Now()); err != nil {
+		t.Fatalf("SetSuppressed: %v", err)
+	}
+
+	d := NewDiscoveryApp(self, nil, dir, nil, nil, nil, nil, clk, nil)
+	sess := &captureSession{peer: mustNodeID(t, testPeerHex)}
+
+	resp := requestPeerList(t, d, sess, 0)
+	if hasEntry(resp, gone.NodeID) {
+		t.Fatal("被移除的节点不该出现在目录交换响应里（否则会被别人再送回来）")
+	}
+	if !hasEntry(resp, kept.NodeID) {
+		t.Fatal("其它节点必须照常传播")
+	}
+}
+
 // requestPeerList 走一次完整的「请求 → 响应」：把 list_epoch 写进请求帧，
 // 交给 HandlePeerListReq，再取回本端发出的响应。
 func requestPeerList(t *testing.T, d *DiscoveryApp, sess *captureSession, listEpoch uint64) protocol.PeerListRespWire {

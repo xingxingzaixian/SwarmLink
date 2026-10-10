@@ -145,10 +145,12 @@ func TestPeersDirectory(t *testing.T) {
 		t.Fatal("window expired")
 	}
 
-	// 状态过滤
+	// 状态过滤：OnlineOnly 含 online 与 discovered ——「正在广播但还没握手」也算「在」。
+	// 与 sqlite 实现一致：这里原先只认 online，是评审发现的跨实现分歧（分组扇出正是
+	// 靠这个集合决定「值得拨号的对象」，把 discovered 排除会让它们收不到群消息）。
 	_ = p.Upsert(peer.Peer{NodeID: mkID(2), State: peer.StateDiscovered})
-	if list := p.List(ports.PeerFilter{OnlineOnly: true}); len(list) != 1 || list[0].NodeID != mkID(1) {
-		t.Fatalf("online filter wrong: %+v", list)
+	if list := p.List(ports.PeerFilter{OnlineOnly: true}); len(list) != 2 {
+		t.Fatalf("OnlineOnly 应返回 online + discovered 共 2 条，得到 %+v", list)
 	}
 	if list := p.List(ports.PeerFilter{Source: peer.SourceBroadcast}); len(list) != 1 {
 		t.Fatalf("source filter wrong: %+v", list)
@@ -218,6 +220,82 @@ func TestSetSuppressedRoundTrip(t *testing.T) {
 	}
 	if _, ok := p.Get(mkID(9)); ok {
 		t.Fatal("不该凭空造出一行")
+	}
+}
+
+// 粘性：被移除的节点不能被任何写入路径「复活」（与 sqlite 实现同一份语义）。
+func TestBlockedStateIsStickyAcrossWrites(t *testing.T) {
+	fc := clock.NewFake(time.Unix(4000, 0))
+	p := NewPeers(fc)
+
+	id := mkID(3)
+	if err := p.Upsert(peer.Peer{NodeID: id, State: peer.StateOffline}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSuppressed(id, true, time.Unix(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Upsert(peer.Peer{NodeID: id, DisplayName: "ghost", State: peer.StateDiscovered}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := p.Get(id)
+	if got.State != peer.StateBlocked {
+		t.Fatalf("Upsert 覆盖了移除标记：%+v", got)
+	}
+	if got.DisplayName != "ghost" {
+		t.Fatalf("非状态字段应当照常更新：%+v", got)
+	}
+
+	if err := p.MarkOffline(id, time.Unix(1200, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := p.Get(id); got.State != peer.StateBlocked {
+		t.Fatalf("MarkOffline 覆盖了移除标记：%+v", got)
+	}
+}
+
+// 默认 List 不返回被移除的节点；显式 IncludeBlocked / 显式 State 查询仍能看到。
+func TestListExcludesBlockedByDefault(t *testing.T) {
+	fc := clock.NewFake(time.Unix(4000, 0))
+	p := NewPeers(fc)
+
+	kept, gone := mkID(4), mkID(5)
+	for _, id := range []identity.NodeID{kept, gone} {
+		if err := p.Upsert(peer.Peer{NodeID: id, State: peer.StateOffline}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.SetSuppressed(gone, true, fc.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	all := p.List(ports.PeerFilter{})
+	if len(all) != 1 || all[0].NodeID != kept {
+		t.Fatalf("默认 List 应只剩 1 条，得到 %+v", all)
+	}
+	if with := p.List(ports.PeerFilter{IncludeBlocked: true}); len(with) != 2 {
+		t.Fatalf("IncludeBlocked 应返回 2 条，得到 %d", len(with))
+	}
+	if only := p.List(ports.PeerFilter{State: peer.StateBlocked}); len(only) != 1 || only[0].NodeID != gone {
+		t.Fatalf("显式按 blocked 查询应返回 1 条，得到 %+v", only)
+	}
+}
+
+// OnlineOnly 的语义：online 与 discovered 都算「在」（与 sqlite 实现必须一致）。
+func TestListOnlineOnlyIncludesDiscovered(t *testing.T) {
+	fc := clock.NewFake(time.Unix(4000, 0))
+	p := NewPeers(fc)
+
+	for i, st := range []peer.State{peer.StateOnline, peer.StateDiscovered, peer.StateOffline} {
+		if err := p.Upsert(peer.Peer{NodeID: mkID(byte(i + 1)), State: st}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := p.List(ports.PeerFilter{OnlineOnly: true})
+	if len(got) != 2 {
+		t.Fatalf("OnlineOnly 应包含 online 与 discovered 共 2 条，得到 %d: %+v", len(got), got)
 	}
 }
 

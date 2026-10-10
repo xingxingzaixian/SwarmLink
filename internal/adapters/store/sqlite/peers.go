@@ -45,7 +45,10 @@ ON CONFLICT(node_id) DO UPDATE SET
   first_seen   = CASE WHEN peers.first_seen IS NULL OR peers.first_seen = 0
                       THEN excluded.first_seen ELSE peers.first_seen END,
   last_seen    = excluded.last_seen,
-  state        = excluded.state,
+  -- blocked 是粘性状态：任何写入都不得覆盖它，否则每新增一条写入路径（announce /
+  -- 连接事件 / 目录交换）都是一次「被移除的节点复活」的风险。
+  -- 解除只能走 SetSuppressed（见 ports.PeerDirectory）。
+  state        = CASE WHEN peers.state = 'blocked' THEN peers.state ELSE excluded.state END,
   source       = excluded.source`,
 			in.NodeID.String(), in.DisplayName, pubKeyString(in.PublicKey), in.LastAddr,
 			uint32(in.Caps), in.ProtoVer,
@@ -75,6 +78,10 @@ func (p *Peers) List(filter ports.PeerFilter) []peer.Peer {
 	if filter.State != "" {
 		where = append(where, "state = ?")
 		args = append(args, string(filter.State))
+	} else if !filter.IncludeBlocked {
+		// 默认不返回「被本地移除」的条目（见 ports.PeerFilter.IncludeBlocked）。
+		// 显式按 State 查询优先：诊断面板要能看到那几条。
+		where = append(where, "state <> 'blocked'")
 	}
 	if filter.Source != "" {
 		where = append(where, "source = ?")
@@ -112,8 +119,10 @@ func (p *Peers) List(filter ports.PeerFilter) []peer.Peer {
 // MarkOffline 标记节点离线（保留条目）。
 func (p *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 	return p.db.Write(func(tx *sql.Tx) error {
+		// 已移除的条目不能被离线事件变回可见：List 只排除 blocked，而 offline 是可见的。
 		_, err := tx.Exec(
-			`UPDATE peers SET state = 'offline', last_seen = ? WHERE node_id = ?`,
+			`UPDATE peers SET state = 'offline', last_seen = ?
+			  WHERE node_id = ? AND state <> 'blocked'`,
 			msOf(at), id.String(),
 		)
 		return err
