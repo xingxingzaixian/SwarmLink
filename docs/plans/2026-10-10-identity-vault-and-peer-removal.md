@@ -830,6 +830,13 @@ func (v *vault) restore(dataPath string) (res Result, ok bool, broken error) {
 > **A2 评审补充**：非 Windows 侧 `unprotectVault` 是恒等变换、**永不失败**，
 > 所以「托管副本损坏」在 Unix 上只能靠 `parseKeyPair` 判定。
 > 不要指望 `unprotectVault` 能识别损坏，也不要在它返回成功时跳过解析。
+>
+> **A3 评审补充（错误必须分三类）**：`vault.load` 的错误不能只判「有没有」——
+> - `errors.Is(err, os.ErrNotExist)` → 没有副本（首次运行）
+> - `errors.Is(err, errVaultUnavailable)` → **读不到**（权限/IO）：降级 + 告警，**绝不覆盖**
+> - 其余（解包失败 / payload 非法）→ 真损坏，才走「生成新身份并覆盖 vault」
+>
+> 把 `EACCES` 之类当成「损坏」去覆盖，会把一个完好但暂时读不到的身份换掉。
 
 **Step 4: 运行测试确认通过**
 
