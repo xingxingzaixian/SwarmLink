@@ -76,7 +76,7 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 			return err
 		}
 		if a.lg != nil {
-			a.lg.Info("peer un-suppressed by signed announce", "peer_id", an.NodeID.String())
+			a.lg.Info("peer un-suppressed by signed announce/bye", "peer_id", an.NodeID.String())
 		}
 	}
 
@@ -107,6 +107,9 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 		return nil
 	}
 
+	// 重读一次：地址/名字的兜底要用当前字段。这里【不必】区分 blocked ——
+	// 上面刚解除时它是 discovered，未解除时下面算出的状态同样是 discovered
+	// （仓储的粘性会保证这次 Upsert 改不掉 blocked）。
 	prev, exists := a.dir.Get(an.NodeID)
 
 	// 「节点在线」由 announce 维护；「连接可用」由 tcp 层维护，两者互不覆盖。
@@ -185,6 +188,7 @@ func (a *PeerApp) Start() {
 		if err != nil {
 			return
 		}
+		now := a.clk.Now()
 		p, exists := a.dir.Get(id)
 		if !exists {
 			p = peer.Peer{NodeID: id}
@@ -194,12 +198,16 @@ func (a *PeerApp) Start() {
 		// 必须显式解除：仓储 Upsert 对 blocked 是粘性的，不解除的话下面的
 		// p.State = online 会被静默吃掉，节点永远不会回到列表。
 		if exists && p.State == peer.StateBlocked {
-			if err := a.dir.SetSuppressed(id, false, a.clk.Now()); err != nil {
+			if err := a.dir.SetSuppressed(id, false, now); err != nil {
+				// 与下面 Upsert 失败同样记 Warn：这条路径失败会让节点无声地保持「已移除」
+				if a.lg != nil {
+					a.lg.Warn("un-suppress failed", "err", err, "peer_id", id.String())
+				}
 				return
 			}
 		}
 		p.State = peer.StateOnline
-		p.LastSeen = a.clk.Now()
+		p.LastSeen = now
 		if ev.Addr != "" {
 			p.LastAddr = ev.Addr
 		}

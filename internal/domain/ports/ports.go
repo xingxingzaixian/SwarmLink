@@ -91,8 +91,9 @@ type PeerDirectory interface {
 	// （List 默认排除 blocked；显式 IncludeBlocked 或显式 State=blocked 查询除外 ——
 	// 诊断类调用方要显式打开，否则会少统计被移除的条目）。
 	//
-	// 「恢复」不由本接口负责：app 层会在该身份再次被验证到时（有效签名通告或握手成功）
-	// 调用 SetSuppressed(id, false) —— 这一步随「无效节点删除」的 B3 落地，届时见 app.PeerApp。
+	// 「恢复」不由本接口负责：app.PeerApp 在该身份再次被验证到时调用 SetSuppressed(id, false) ——
+	// 有效签名通告（ANNOUNCE / BYE）在 OnAnnouncement 里，握手成功在 TopicPeerOnline 的处理里；
+	// 目录交换的第三方转述【不】恢复（它没有签名）。
 	//
 	// 完整设计见 docs/plans/2026-10-10-identity-vault-and-peer-removal-design.md §5。
 	SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error

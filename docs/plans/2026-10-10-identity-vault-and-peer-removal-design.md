@@ -209,12 +209,18 @@ keystore 不依赖日志、UI 或 `bootstrap`。
 
 | 恢复触发 | 恢复后的 `state` | 依据 |
 |---|---|---|
-| `OnAnnouncement` | `discovered`（若会话仍在则 `online`） | `peer_app.go:87-90` |
-| `TopicPeerOnline` | `online` | `peer_app.go:156` |
+| `OnAnnouncement`（含 BYE） | `discovered` | `peer_app.go` 的 `OnAnnouncement` |
+| `TopicPeerOnline` | `online` | `peer_app.go` 的 `Start` |
 
 这条区分不能省：`PeerDTO.Online` 只认 `StateOnline`（`wails/dto.go:95`），
 把一条 announce 直接写成 `online` 等于违反 ADR-009（"在线状态与连接可用解耦"），
 UI 上会出现"显示在线但发不出消息"。
+
+> **注意一处固有限制**（B3 评审确认）：解除移除后即使该节点仍有存活会话，
+> announce 也只把它标成 `discovered` —— 因为 `SetSuppressed(true)` 早就把 `online`
+> 抹成了 `blocked`，取消移除时无从恢复旧状态（`false` 不是 `true` 的逆操作，见 ④）。
+> 该节点要到下一次握手（`TopicPeerOnline`）才会重新变成 `online`。
+> 不要试图在 announce 里补回 `online`：那会违反 ADR-009。
 
 > 实现注释必须钉住这条假设：`OnAnnouncement` 的可信度**来自调用方已验签**。
 > 将来若有未验签路径调用它，D7 就会变成"任何人都能让被删的节点复活"。
