@@ -266,8 +266,13 @@ func TestSetSuppressedRoundTrip(t *testing.T) {
 	if err := p.SetSuppressed(id, false, time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := p.Get(id); got.State == peer.StateBlocked {
+	got, _ = p.Get(id)
+	if got.State == peer.StateBlocked {
 		t.Fatal("解除后不该还是 blocked")
+	}
+	// 解除路径同样刷新 last_seen（诊断要看「什么时候解除的」）
+	if !got.LastSeen.Equal(time.Unix(2000, 0)) {
+		t.Fatalf("解除应刷新 last_seen，得到 %v", got.LastSeen)
 	}
 
 	// 解除只对「确实被移除」的行生效：不能把一个在线节点降级成 discovered

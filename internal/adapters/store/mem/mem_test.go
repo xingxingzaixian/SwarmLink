@@ -190,8 +190,12 @@ func TestSetSuppressedRoundTrip(t *testing.T) {
 	if err := p.SetSuppressed(id, false, time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := p.Get(id); got.State == peer.StateBlocked {
+	got, _ = p.Get(id)
+	if got.State == peer.StateBlocked {
 		t.Fatal("解除后不该还是 blocked")
+	}
+	if !got.LastSeen.Equal(time.Unix(2000, 0)) {
+		t.Fatalf("解除应刷新 last_seen，得到 %v", got.LastSeen)
 	}
 
 	// 与 sqlite 实现一致：解除只对「确实被移除」的行生效，不降级在线节点

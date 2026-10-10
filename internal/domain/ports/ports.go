@@ -70,11 +70,23 @@ type PeerDirectory interface {
 	MarkOffline(id identity.NodeID, at time.Time) error
 	// SetSuppressed 设置/清除「本地已移除」标记。
 	//
-	// suppressed=true：该节点默认不再出现在 List、也不再被目录交换传播，
-	// 直到它再次被验证到（有效签名通告或握手成功 —— 见 app.PeerApp）。
+	// 实现必须逐条满足下面的契约：两个仓储（sqlite / mem）互为替身，
+	// 任何一条上分叉都会让「测试跑 mem、生产跑 sqlite」出现行为差异。
 	//
-	// 语义与全部约束（包括为什么每一条写入路径都不能覆盖这个标记）见
-	// docs/plans/2026-10-10-identity-vault-and-peer-removal-design.md §5。
+	//   - suppressed=true：把该行标记为「已移除」，并把 at 写进 last_seen
+	//     （「什么时候删的」要能查）。对任意当前状态都生效，包括 online。
+	//   - suppressed=false：**只对当前确实被标记的行**生效，改回 discovered 并写 last_seen；
+	//     对其它状态必须是**彻底空操作**（连 last_seen 也不动）。因此它不是 true 的真逆操作 ——
+	//     旧状态（online / offline）不可恢复，需要精确状态的调用方随后自行 Upsert。
+	//   - node_id 不存在：静默空操作（返回 nil），**绝不插入新行**。
+	//   - at 必须是调用时刻：零值会静默把 last_seen 写成 0，破坏 SeenRecently 与 List 的排序。
+	//
+	// 标记效果：不再参与目录交换传播（已生效，见 DiscoveryApp.entries）；默认也不再出现在
+	// List（自「无效节点删除」的 B2 起生效：List 默认排除 blocked，显式 IncludeBlocked
+	// 或显式 State=blocked 查询除外）；直到该身份再次被验证到
+	// （有效签名通告或握手成功 —— 见 app.PeerApp）会自动恢复。
+	//
+	// 完整设计见 docs/plans/2026-10-10-identity-vault-and-peer-removal-design.md §5。
 	SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error
 	// SeenRecently 供发现层做重复抑制。
 	SeenRecently(id identity.NodeID, window time.Duration) bool

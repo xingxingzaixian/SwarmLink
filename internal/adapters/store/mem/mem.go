@@ -553,12 +553,13 @@ func (s *Peers) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time)
 		p.State = peer.StateBlocked
 		p.LastSeen = at
 	} else if p.State == peer.StateBlocked {
+		// 解除路径：只有真正发生迁移时才写 last_seen。非 blocked 行必须是彻底空操作
+		// （连 last_seen 也不动），与 sqlite 实现一致 —— 那里的解除语句带
+		// `AND state = 'blocked'`，匹配 0 行时 last_seen 保持原值。
+		// 两边在这点上分叉，List 的 ORDER BY last_seen DESC 与 SeenRecently 会跟着分叉。
 		p.State = peer.StateDiscovered
 		p.LastSeen = at
 	}
-	// 已经处于目标状态时不写 last_seen：与 sqlite 实现保持一致 —— 那里的解除语句带
-	// `AND state = 'blocked'`，非 blocked 行匹配 0 行，last_seen 保持原值。
-	// 两边若在这点上分叉，List 的 `ORDER BY last_seen DESC` 与 SeenRecently 会跟着分叉。
 	s.items[id] = p
 	return nil
 }
