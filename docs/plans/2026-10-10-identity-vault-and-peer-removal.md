@@ -1630,3 +1630,16 @@ git commit -m "docs(readme): 说明移除节点只在本机生效且会在对方
 - 同一台机器上长期并用两个数据目录：托管副本会在两者之间来回抖动（后启动者胜），当前不做来源记账。
 - 活跃节点删不掉（会自动恢复）——这是设计 D7 的既定行为，不是 bug。
 - 删除某节点后，指向它的等待中的传输任务仍会重试到退避上限（`app/transfer_waiting.go`）。
+
+### B2 评审期间记录的三条（不在本次修复范围）
+
+1. **`Upsert` 的「空值不覆盖」语义两个仓储仍然不同**（先于本次改动存在）：
+   sqlite 用 `CASE WHEN excluded.x <> ''` 保留旧值，mem 是整条替换（只保留 `FirstSeen`）。
+   后果：目录交换送来的空 `display_name` 在 mem 上会抹掉已有名字，sqlite 不会。
+   B2 的粘性用例刻意用了非空名字，因此检不出这条差。将来若有用例依赖它，两个实现要一起对齐。
+2. **`Upsert` 的 `last_seen` 零值处理两边不同**（先于本次改动存在）：
+   sqlite 无条件写 `excluded.last_seen`（零值会写成 0，破坏排序与 `SeenRecently`），
+   mem 在零值时回填 `clk.Now()`。端口注释只对 `SetSuppressed` 的 `at` 做了零值警告。
+3. **`test/e2e` 的 `TestFileTransferResumesAfterInterruption` 在全仓并发执行时偶发失败**：
+   2026-10-10 实测单独跑 3 次、全仓连跑 2 次均通过，失败那次不经过本次改动的方法，
+   判定为时序偶发（与 `docs/plans/2026-10-08-folder-transfer.md` 记录的同类现象一致）。

@@ -575,6 +575,8 @@ func (s *ChatService) ClearedAt(convID string) (int64, error) {
 func (s *ChatService) Conversations() ([]ConversationDTO, error) {
 	out := make([]ConversationDTO, 0)
 
+	// 会话列表由节点目录派生：被「本地移除」的节点不会出现在这里（List 默认排除 blocked），
+	// 它的会话也随之从列表消失 —— 这是刻意的（用户要的就是「列表里别再有它」）。
 	for _, p := range s.d.PeerDir.List(ports.PeerFilter{}) {
 		convID := message.DirectConvID(s.d.Self.NodeID, p.NodeID)
 		ms, err := s.d.Chat.History(convID, 1, 0)
@@ -867,7 +869,9 @@ func (s *PeerService) List() []PeerDTO {
 // 「常驻连接数」与「无保活流量」是 ADR-009 的两条可观测断言，
 // 因此它们必须出现在诊断面板上，而不是只存在于日志里。
 func (s *PeerService) Diagnostics() DiagnosticsDTO {
-	all := s.d.PeerDir.List(ports.PeerFilter{})
+	// IncludeBlocked：诊断面板要看到目录的【真实规模】，包含用户已从列表移除的条目 ——
+	// 否则「列表 4 条、目录其实 9 条」这种幽灵堆积在诊断里完全看不出来。
+	all := s.d.PeerDir.List(ports.PeerFilter{IncludeBlocked: true})
 	online := 0
 	for _, p := range all {
 		if p.State == peer.StateOnline {

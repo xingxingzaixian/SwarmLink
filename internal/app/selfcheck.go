@@ -73,11 +73,15 @@ func SelfCheck(ctx context.Context, in SelfCheckInput) SelfCheckResult {
 }
 
 // seedSourced 返回目录里由种子学到的条目（SourceSeed）。
+//
+// 显式 IncludeBlocked：这是自检/诊断，回答的是「种子这条路通不通」。
+// 用户把某个从种子学到的条目「本地移除」之后，它依然是「种子拉取成功过」的证据 ——
+// 按可见列表统计会让 P-1 的条数少算，甚至把成功的自检报成失败。
 func seedSourced(dir ports.PeerDirectory) []peer.Peer {
 	if dir == nil {
 		return nil
 	}
-	return dir.List(ports.PeerFilter{Source: peer.SourceSeed})
+	return dir.List(ports.PeerFilter{Source: peer.SourceSeed, IncludeBlocked: true})
 }
 
 // checkOverlap 判断「学到的条目与本机同地址段」，即 P-2 可能不成立。
