@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -25,6 +26,13 @@ const AppName = "SwarmLink"
 //
 //	SWARMLINK_DATA_DIR=D:\swarmlink-data
 const EnvDataDir = "SWARMLINK_DATA_DIR"
+
+// EnvVaultDir 覆盖身份托管目录（vault）：值是「其下含 identity 子目录的那个目录」。
+//
+// 与 EnvDataDir 对称，且优先级最高 —— 测试与受限部署都需要一个不依赖机器的确定位置。
+//
+//	SWARMLINK_VAULT_DIR=D:\swarmlink-vault
+const EnvVaultDir = "SWARMLINK_VAULT_DIR"
 
 // PortableMarker 是可执行文件同目录下的便携模式标记文件（空文件即可）。
 //
@@ -221,6 +229,69 @@ func portableDir() (string, bool) {
 		return "", false
 	}
 	return dir, true
+}
+
+// VaultDir 返回身份托管副本所在目录（与数据目录无关的机器级固定位置）。
+//
+// 返回 "" 表示本次运行【禁用】托管，调用方据此退回「只用数据目录」的历史行为：
+//
+//   - 便携模式（portable.mode 存在）：便携 = 自包含。否则把 U 盘插到别的机器上会
+//     恢复原机器的身份，同时污染那台机器的托管目录；
+//   - 解析结果与数据目录重合：一旦相同，「删数据目录」就等于「删身份」，必须拦住。
+//
+// 本函数只做路径解析，不创建目录、不做任何 I/O（与 Dir 的约定一致）。
+func VaultDir(dataDir string) string {
+	if d := strings.TrimSpace(os.Getenv(EnvVaultDir)); d != "" {
+		if sameDir(d, dataDir) {
+			return ""
+		}
+		return d
+	}
+	if _, ok := portableDir(); ok {
+		return ""
+	}
+	base := machineDataDir()
+	if base == "" {
+		return ""
+	}
+	d := filepath.Join(base, AppName)
+	if sameDir(d, dataDir) {
+		return ""
+	}
+	return d
+}
+
+// machineDataDir 返回「与用户无关的机器级数据目录」基座。
+//
+// 拿不到就返回空串（禁用托管），而不是猜一个可写但没有意义的位置：
+// 托管副本放在用户 profile 里就失去了「换数据目录仍能找回身份」的意义。
+func machineDataDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		if pd := strings.TrimSpace(os.Getenv("ProgramData")); pd != "" {
+			return pd
+		}
+		if sd := strings.TrimSpace(os.Getenv("SystemDrive")); sd != "" {
+			return filepath.Join(sd+string(filepath.Separator), "ProgramData")
+		}
+		return ""
+	case "darwin":
+		return "/Library/Application Support"
+	default:
+		return "/var/lib"
+	}
+}
+
+// sameDir 判断两个路径是否指向同一目录。Windows 上大小写不敏感。
+func sameDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ca, cb := filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(ca, cb)
+	}
+	return ca == cb
 }
 
 // Path 返回配置文件路径。

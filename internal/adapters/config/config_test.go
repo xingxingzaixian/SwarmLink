@@ -49,6 +49,43 @@ func TestDirEnvOverrideIgnoresBlank(t *testing.T) {
 	}
 }
 
+// 托管目录必须与数据目录【解耦】：它跟着环境变量走，不受数据目录影响。
+func TestVaultDirEnvOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "vault")
+	t.Setenv(EnvVaultDir, want)
+
+	if got := VaultDir(t.TempDir()); got != want {
+		t.Fatalf("VaultDir = %q，期望 %q", got, want)
+	}
+}
+
+// 空白值不算设置：空的 SWARMLINK_VAULT_DIR 会变成「当前目录」，比不设更糟。
+func TestVaultDirEnvOverrideIgnoresBlank(t *testing.T) {
+	t.Setenv(EnvVaultDir, "   ")
+
+	base := machineDataDir()
+	if base == "" {
+		t.Skip("本平台没有机器级目录基座")
+	}
+	if got, want := VaultDir(t.TempDir()), filepath.Join(base, AppName); got != want {
+		t.Fatalf("VaultDir = %q，期望回落到平台默认 %q", got, want)
+	}
+}
+
+// 解析结果与数据目录重合时必须禁用：一旦相同，「删数据目录」就等于「删身份」。
+func TestVaultDirRejectsDataDirOverlap(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvVaultDir, dir)
+
+	if got := VaultDir(dir); got != "" {
+		t.Fatalf("与数据目录重合时必须返回空串（禁用托管），得到 %q", got)
+	}
+	// 尾部分隔符不该骗过守卫（Clean 之后是同一个目录）
+	if got := VaultDir(dir + string(filepath.Separator)); got != "" {
+		t.Fatalf("尾部分隔符应视为同一目录，得到 %q", got)
+	}
+}
+
 // 提示设置的默认值与落盘往返。
 //
 // 重点在「默认即开启」：Load 是先 Default() 再 unmarshal 到同一个结构，
