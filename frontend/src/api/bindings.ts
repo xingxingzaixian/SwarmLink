@@ -117,6 +117,7 @@ export const realApi: SwarmApi = {
 
   self: async () => PeerService.Self(),
   peerList: async () => list(await PeerService.List()),
+  removePeer: async (nodeId) => PeerService.Remove(nodeId),
   diagnostics: async () => toDiagnostics(await PeerService.Diagnostics()),
 
   groupList: async () => list(await GroupService.List()).map(toGroup),

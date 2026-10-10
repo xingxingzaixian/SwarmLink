@@ -309,6 +309,8 @@ export interface SwarmApi {
   // 节点与诊断
   self(): Promise<Self>
   peerList(): Promise<Peer[]>
+  /** 从本机列表移除一个节点（只在本机生效；该节点再次上线会自动回来）。 */
+  removePeer(nodeId: string): Promise<void>
   diagnostics(): Promise<Diagnostics>
 
   // 群聊

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { getApi, type Diagnostics, type Peer, type Self } from '../api'
+import { withoutPeer } from '../utils/peers'
 
 /**
  * 该节点当前是否「能发起通信」—— 决定它进「在线」还是「离线」分组。
@@ -119,6 +120,19 @@ export const usePeersStore = defineStore('peers', () => {
     }
   }
 
+  /**
+   * 从本机列表移除一个节点。
+   *
+   * 先调后端再改本地：失败时列表保持原样，不会出现「界面上消失了但后端还在」的谎报。
+   * 后端只在本机打一个「已移除」标记，不删任何历史；该节点再次被验证到会自动回来
+   * ——所以这里不做「永久删除」的任何承诺（错误文案与提示里也不写）。
+   */
+  async function remove(nodeId: string): Promise<void> {
+    const api = await getApi()
+    await api.removePeer(nodeId)
+    peers.value = withoutPeer(peers.value, nodeId)
+  }
+
   function byId(nodeId: string): Peer | undefined {
     return peers.value.find((p) => p.nodeId === nodeId)
   }
@@ -163,6 +177,7 @@ export const usePeersStore = defineStore('peers', () => {
     onlineCount,
     refresh,
     applyUpdate,
+    remove,
     byId,
     nameOf
   }

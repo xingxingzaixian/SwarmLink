@@ -39,6 +39,11 @@ const memberIds = ref<string[]>([])
 const creating = ref(false)
 const createError = ref('')
 
+// 移除节点（只在本机生效；二次确认后再调后端）
+const removing = ref<Peer | null>(null)
+const removeBusy = ref(false)
+const removeError = ref('')
+
 // ---------------------------------------------------------------- 检索
 
 const q = computed(() => query.value.trim().toLowerCase())
@@ -128,6 +133,36 @@ async function submitCreate(): Promise<void> {
     createError.value = String(e?.message ?? e)
   } finally {
     creating.value = false
+  }
+}
+
+// ---------------------------------------------------------------- 移除节点
+
+function askRemove(p: Peer): void {
+  removing.value = p
+  removeError.value = ''
+}
+
+/**
+ * 确认移除。
+ *
+ * 三条边界与后端一致，也写在弹窗文案里（避免用户以为「删了就彻底断了」）：
+ * 只在本机生效、不是拉黑、对方再次被验证到会自动回到列表。
+ */
+async function confirmRemove(): Promise<void> {
+  const p = removing.value
+  if (!p) return
+  removeBusy.value = true
+  removeError.value = ''
+  try {
+    await peers.remove(p.nodeId)
+    removing.value = null
+    // 会话列表由节点目录派生：移除后左栏那条会话也不该留着
+    await chat.loadConversations()
+  } catch (e: any) {
+    removeError.value = String(e?.message ?? e)
+  } finally {
+    removeBusy.value = false
   }
 }
 
@@ -246,6 +281,14 @@ const self = computed(() => peers.self)
             <span v-if="chat.unreadOf(peerConvId(p))" class="badge">
               {{ chat.unreadOf(peerConvId(p)) > 99 ? '99+' : chat.unreadOf(peerConvId(p)) }}
             </span>
+            <button
+              class="icon-btn mini"
+              title="从本机列表移除"
+              aria-label="从本机列表移除"
+              @click.stop="askRemove(p)"
+            >
+              <Icon name="trash" :size="13" />
+            </button>
           </div>
         </div>
       </template>
@@ -267,6 +310,14 @@ const self = computed(() => peers.self)
           </div>
           <div class="row-meta">
             <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
+            <button
+              class="icon-btn mini"
+              title="从本机列表移除"
+              aria-label="从本机列表移除"
+              @click.stop="askRemove(p)"
+            >
+              <Icon name="trash" :size="13" />
+            </button>
           </div>
         </div>
       </template>
@@ -355,6 +406,33 @@ const self = computed(() => peers.self)
       <template #head>
         <button class="btn btn-primary" :disabled="creating" @click="submitCreate">
           {{ creating ? '创建中…' : '创建' }}
+        </button>
+      </template>
+    </Modal>
+
+    <!-- 移除节点：文案必须把三条边界说清楚（只在本机、不是拉黑、会随对方上线恢复），
+         否则用户会以为「删了就彻底断了」—— 后端的实际语义见设计文档 §5 -->
+    <Modal
+      v-if="removing"
+      title="从列表移除节点"
+      subtitle="只在本机生效，不会通知对方"
+      :width="440"
+      :height="300"
+      @close="removing = null"
+    >
+      <div class="form">
+        <div>将把「{{ removing.displayName }}」从本机列表中移除。</div>
+        <div class="faint small">
+          对方不会收到任何通知，别人的列表也不变，历史消息也不会被删除。
+          该节点若再次上线（或与它重新握手），会自动回到列表 ——
+          因此它适合清理已经失效的旧身份，不适合屏蔽一个还在使用的节点。
+        </div>
+        <div v-if="removeError" class="err">{{ removeError }}</div>
+      </div>
+
+      <template #head>
+        <button class="btn btn-primary" :disabled="removeBusy" @click="confirmRemove">
+          {{ removeBusy ? '移除中…' : '移除' }}
         </button>
       </template>
     </Modal>

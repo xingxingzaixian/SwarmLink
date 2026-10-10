@@ -698,6 +698,12 @@ export function createMockApi(): SwarmApi {
     async peerList() {
       return [...peers]
     },
+    async removePeer(nodeId) {
+      // 预览模式没有后端：直接从内存列表里摘掉，行为与真实实现一致
+      // （真实实现只在本机打标记，这里就是同一个语义的本地版）
+      const i = peers.findIndex((p) => p.nodeId === nodeId)
+      if (i >= 0) peers.splice(i, 1)
+    },
     async diagnostics() {
       return { ...diagnostics }
     },
