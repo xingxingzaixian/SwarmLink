@@ -62,6 +62,24 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 	}
 	now := a.clk.Now()
 
+	// 本地已移除的节点再次被【有效签名通告】验证到 ⇒ 它没死，自动恢复（设计 D7）。
+	//
+	// 能走到这里就说明 UDP 层已经验签，并校验过 node_id == Fingerprint(pub)
+	// （udp/broadcast.go 的 decodeAnnounce、udp/seed.go 的种子回包）。
+	// 携带该 node_id 的第三方转述（目录交换）不具备这个性质 ——
+	// HandlePeerListResp 那条路径必须继续抑制，不要在这里找对称性。
+	//
+	// 放在 BYE 分支之前：告别报文同样是签名有效的在世证明（它只是要走了），
+	// 先解除标记，下面才会把「离线」正常告知 UI 而不是被闸门吞掉。
+	if prev, ok := a.dir.Get(an.NodeID); ok && prev.State == peer.StateBlocked {
+		if err := a.dir.SetSuppressed(an.NodeID, false, now); err != nil {
+			return err
+		}
+		if a.lg != nil {
+			a.lg.Info("peer un-suppressed by signed announce", "peer_id", an.NodeID.String())
+		}
+	}
+
 	// 告别报文（BYE）：对方正在正常退出，立即判离线，不等 TTL。
 	// 这是「优雅退出」（秒级可见）与「崩溃/断电」（等 TTL）的区别所在。
 	if an.Leaving {
@@ -170,6 +188,15 @@ func (a *PeerApp) Start() {
 		p, exists := a.dir.Get(id)
 		if !exists {
 			p = peer.Peer{NodeID: id}
+		}
+		// 三段 Ed25519 握手已通过 ⇒ 该身份确实在世，清除移除标记（设计 D7）。
+		//
+		// 必须显式解除：仓储 Upsert 对 blocked 是粘性的，不解除的话下面的
+		// p.State = online 会被静默吃掉，节点永远不会回到列表。
+		if exists && p.State == peer.StateBlocked {
+			if err := a.dir.SetSuppressed(id, false, a.clk.Now()); err != nil {
+				return
+			}
 		}
 		p.State = peer.StateOnline
 		p.LastSeen = a.clk.Now()

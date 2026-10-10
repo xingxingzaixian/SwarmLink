@@ -124,12 +124,12 @@ func TestOnAnnouncementLeavingForUnknownPeerIsNoop(t *testing.T) {
 	}
 }
 
-// 带着 blocked 行走到这里的通告不得被发布：仓储粘性会保住落库状态，
-// 但 p 本身是 discovered/online。把它发出去会让前端推回列表、让连接/传输层来拨号。
+// 有效签名通告 = 该身份仍在世 ⇒ 自动解除本地移除（设计 D7）。
 //
-// 注：B3（有效签名通告自动恢复）落地后本用例要改写 —— 那时这条路径会先
-// SetSuppressed(false) 再走到发布点，因此应当断言「恢复并发布 discovered」。
-func TestOnAnnouncementDoesNotPublishSuppressedPeer(t *testing.T) {
+// 能走到 OnAnnouncement 就说明 UDP 层已经验签，并校验过 node_id == Fingerprint(pub)
+// （udp/broadcast.go 的 decodeAnnounce、udp/seed.go 的种子回包）—— 这正是它
+// 与「目录交换的第三方转述」的本质区别，后者必须继续抑制。
+func TestSignedAnnouncementRestoresSuppressedPeer(t *testing.T) {
 	clk := clock.New()
 	dir := mem.NewPeers(clk)
 	bus := eventbus.New()
@@ -153,19 +153,26 @@ func TestOnAnnouncementDoesNotPublishSuppressedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if published != 0 {
-		t.Fatalf("被移除的节点不该产生 peer.discovered 事件（发了 %d 条）", published)
+	got, _ := dir.Get(peerID)
+	if got.State == peer.StateBlocked {
+		t.Fatal("有效签名通告必须解除移除标记")
 	}
-	if got, _ := dir.Get(peerID); got.State != peer.StateBlocked {
-		t.Fatalf("状态 = %q，期望仍是 blocked", got.State)
+	// 恢复的是「它在世」这件事；状态按 announce 的口径是 discovered，不直接写 online
+	// （ADR-009：在线状态由 announce 维护、连接可用由 TCP 维护）
+	if got.State != peer.StateDiscovered {
+		t.Fatalf("状态 = %q，期望 discovered", got.State)
+	}
+	if published != 1 {
+		t.Fatalf("恢复后应当发布一次 peer.discovered，发了 %d 条", published)
+	}
+	if list := dir.List(ports.PeerFilter{}); len(list) != 1 {
+		t.Fatalf("恢复后应当重新出现在默认列表里，得到 %+v", list)
 	}
 }
 
-// BYE 分支同样要抑制：MarkOffline 对 blocked 是空操作，但事件桥会把 peer:offline
-// 转成 peer:updated，前端对未知 nodeId 会 push 回列表 —— 删掉的节点在下线时又闪现一次。
-//
-// 注：B3 落地后本用例也要改写（签名有效的 BYE 会先解除标记，届时应当发布 offline）。
-func TestOnAnnouncementLeavingDoesNotPublishSuppressedPeer(t *testing.T) {
+// 签名有效的 BYE 同样是「它在世」的证据（只是要走了）：先解除移除标记，
+// 再把「离线」正常告知 UI —— 顺序反了就会发布一条状态自相矛盾的事件。
+func TestSignedByeRestoresSuppressedPeerThenMarksOffline(t *testing.T) {
 	clk := clock.New()
 	dir := mem.NewPeers(clk)
 	bus := eventbus.New()
@@ -179,8 +186,12 @@ func TestOnAnnouncementLeavingDoesNotPublishSuppressedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	published := 0
-	bus.Subscribe(eventbus.TopicPeerOffline, func(any) { published++ })
+	offline := make([]eventbus.PeerOffline, 0, 1)
+	bus.Subscribe(eventbus.TopicPeerOffline, func(payload any) {
+		if ev, ok := payload.(eventbus.PeerOffline); ok {
+			offline = append(offline, ev)
+		}
+	})
 
 	app := NewPeerApp(self, dir, bus, clk, 5*time.Minute, nil)
 	if err := app.OnAnnouncement(peer.Announcement{
@@ -189,11 +200,46 @@ func TestOnAnnouncementLeavingDoesNotPublishSuppressedPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if published != 0 {
-		t.Fatalf("被移除的节点不该产生 peer.offline 事件（发了 %d 条）", published)
+	got, _ := dir.Get(peerID)
+	if got.State != peer.StateOffline {
+		t.Fatalf("状态 = %q，期望 offline（BYE 应先解除标记再标离线）", got.State)
 	}
-	if got, _ := dir.Get(peerID); got.State != peer.StateBlocked {
-		t.Fatalf("状态 = %q，期望仍是 blocked", got.State)
+	if len(offline) != 1 || offline[0].Reason != "leave" {
+		t.Fatalf("应当发布一次 reason=leave 的 peer.offline，得到 %+v", offline)
+	}
+}
+
+// 握手成功是更强的在世证明（三段 Ed25519 认证都过了）⇒ 同样解除移除标记。
+//
+// 这条同时是「TCP 适配器不需要知道目录」的依据：恢复点在这里，事件发布在适配器，
+// 两者由事件总线连接（R2 的依赖方向因此不被破坏）。
+func TestConnectionRestoresSuppressedPeer(t *testing.T) {
+	clk := clock.New()
+	dir := mem.NewPeers(clk)
+	bus := eventbus.New()
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{NodeID: peerID, DisplayName: "幽灵", State: peer.StateDiscovered}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.SetSuppressed(peerID, true, clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewPeerApp(self, dir, bus, clk, 5*time.Minute, nil)
+	app.Start()
+
+	bus.Publish(eventbus.TopicPeerOnline, eventbus.PeerOnline{
+		NodeID: peerID.String(), Addr: "10.0.0.9:2425",
+	})
+
+	got, _ := dir.Get(peerID)
+	if got.State != peer.StateOnline {
+		t.Fatalf("状态 = %q，期望 online", got.State)
+	}
+	if list := dir.List(ports.PeerFilter{}); len(list) != 1 {
+		t.Fatalf("恢复后应当重新出现在默认列表里，得到 %+v", list)
 	}
 }
 
