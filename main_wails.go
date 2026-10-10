@@ -4,7 +4,9 @@
 //
 // 这是【唯一】接触 Wails API 的文件：五个服务与事件桥都在
 // internal/adapters/wails 里以纯 Go 实现，因此 Wails beta 期的 API 波动
-// 只需要在这里适配一次（架构书 7.5：锁定 v3.0.0-beta.24，升级作为独立任务）。
+// 只需要在这里适配一次（架构书 7.5：Wails 版本锁定，升级作为独立任务 + 回归测试。
+// 当前版本以 go.mod 为准，且 CLI 必须装同一个版本 —— 版本号不在注释里重复一遍，
+// 免得它成为下一个「文档说了但实际不成立」的地方）。
 //
 // 例外是系统通知（internal/adapters/systemnotify）：它只能经由 Wails 的
 // notifications 服务获得，没有「纯 Go 实现」这一说。因此那里的对外接口

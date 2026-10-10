@@ -1,7 +1,7 @@
 # SwarmLink — 项目长期约定
 
 **项目**：无中心内网 P2P 聊天与文件分享工具（类飞秋/内网通/飞鸽传书）
-**技术栈**：Go 1.23+ · Wails v3.0.0-beta.24（锁定版本）· Vue3 + Pinia · modernc.org/sqlite
+**技术栈**：Go 1.26+ · Wails v3.0.0-beta.28（锁定版本，CLI 必须与 go.mod 同版本）· Vue3 + Pinia · modernc.org/sqlite
 **命名**：项目名 `SwarmLink`；设计文档中的占位名 `MyApp` / `myapp` 一律替换
 **文档**：`设计书.md`（技术方案 v1.0，用户侧）· `架构设计书.md`（架构评审与目标架构 v1.2，本助手产出）
 

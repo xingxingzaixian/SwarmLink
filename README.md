@@ -63,7 +63,7 @@ make ci                 # 等价于 CI 的一条命令
 ### 2.3 桌面 GUI
 
 前置：**Go ≥ 1.26**、**Node ≥ 24**（见 [`frontend/.nvmrc`](frontend/.nvmrc)，
-CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.24**。
+CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.28**。
 
 > **`wails3` CLI 还必须是「用与你相同的 Go 版本编译」的那一份。** 否则
 > `wails3 build` 会刷出一屏
@@ -76,7 +76,7 @@ CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.24**。
 >
 > ```powershell
 > go version (Get-Command wails3).Source          # 应当与本机 `go version` 一致
-> go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.24
+> go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.28
 > ```
 >
 > 多版本 Go（vfox / asdf / scoop 等）下格外容易踩：`go install` 会把 CLI 装进
