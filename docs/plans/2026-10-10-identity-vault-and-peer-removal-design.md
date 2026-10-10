@@ -216,6 +216,19 @@ SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error
 实现四处：`sqlite.Peers`、`mem.Peers`，以及 `wails/services_test.go` 的 `emptyDir`、`capDir` 两个桩
 （`MarkOffline` 是现成的同类方法，照抄它的形状即可）。
 
+**调用契约（两个仓储互为替身，下面每一条都必须逐字一致）**：
+
+- `suppressed=true` → `state='blocked'` + 写 `last_seen=at`；对**任意当前状态**都生效（包括 `online`）
+- `suppressed=false` → **只对当前确实被标记的行生效**（改回 `discovered` + 写 `last_seen`）；
+  其它状态是**彻底空操作**（连 `last_seen` 也不动）。因此它**不是** `true` 的逆操作，
+  旧状态（`online`/`offline`）不可恢复 —— 需要精确状态的调用方随后自行 `Upsert`
+- `node_id` 不存在 → 静默空操作（返回 `nil`），**绝不插入新行**
+- `at` 必须是调用时刻；零值会静默把 `last_seen` 写成 `0`，破坏 `SeenRecently` 与 `List` 排序
+
+> 这条契约已上移到 `ports.PeerDirectory` 的注释（单一契约定义点），实现侧只写局部理由。
+> 它是在 B1 的评审里固化下来的：最初的实现允许 `suppressed=false` 无条件把行降级为 `discovered`，
+> 会让「测试跑 mem、生产跑 sqlite」出现分歧。
+
 选择显式方法而不是"`Get` 后改字段再 `Upsert` 回去"，是为了让"删除"在领域端口上是一个明确动作，
 而不是一次读改写的副作用。
 
