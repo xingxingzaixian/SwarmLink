@@ -826,6 +826,10 @@ func (v *vault) restore(dataPath string) (res Result, ok bool, broken error) {
 
 > `restore` 的 `broken` 与「没有托管副本」必须区分：前者要生成新身份并**覆盖**坏文件
 > （否则每次启动都刷同一条告警），后者是正常的首次运行。这个区分靠 `os.ErrNotExist`，见 `vault.go`。
+>
+> **A2 评审补充**：非 Windows 侧 `unprotectVault` 是恒等变换、**永不失败**，
+> 所以「托管副本损坏」在 Unix 上只能靠 `parseKeyPair` 判定。
+> 不要指望 `unprotectVault` 能识别损坏，也不要在它返回成功时跳过解析。
 
 **Step 4: 运行测试确认通过**
 
@@ -975,8 +979,12 @@ git commit -m "feat(bootstrap): 接入身份托管目录，并把身份恢复/�
 
 - `设计书.md:158-170` 的「存储位置」段落补一段 vault 说明（位置优先级、Windows 用 DPAPI 机器作用域、数据副本优先、托管不可用时降级）。
 - 新建 `docs/adr/ADR-012-identity-vault.md`，沿用既有 ADR 的结构（决策 / 背景 / 后果 / 实现注记 / 验证），验证一栏指向
-  `keystore.TestLoadOrCreateRestoresFromVault`、`TestLoadOrCreateRepairsCorruptDataCopy`、`TestLoadOrCreateDataCopyWins`。
+  `keystore.TestLoadOrCreateRestoresFromVault`、`TestLoadOrCreateRepairsCorruptDataCopy`、`TestLoadOrCreateDataCopyWins`、
+  `TestVaultEntropyIsActuallyUsed`。
   必须写进去的两条「代价」：机器级共享身份、DPAPI 只防跨机拷贝。
+  **还要记入一条残余测试缺口**（A2 评审要求）：`CRYPTPROTECT_LOCAL_MACHINE` 在单用户环境下
+  无法端到端验证（把它改成用户作用域不会有任何用例变红）；能被钉住的只有「真的加密了 /
+  篡改会报错 / 熵参与了运算 / 空载荷被拒」这四条 —— 不要让它停留在「测试通过」的印象里。
 - `docs/adr/README.md:18` 的索引表补一行 ADR-012。
 
 **Step 4: 验证**
@@ -1660,6 +1668,9 @@ git commit -m "docs(readme): 说明移除节点只在本机生效且会在对方
 2. **`Upsert` 的 `last_seen` 零值处理两边不同**（先于本次改动存在）：
    sqlite 无条件写 `excluded.last_seen`（零值会写成 0，破坏排序与 `SeenRecently`），
    mem 在零值时回填 `clk.Now()`。端口注释只对 `SetSuppressed` 的 `at` 做了零值警告。
-3. **`test/e2e` 的 `TestFileTransferResumesAfterInterruption` 在全仓并发执行时偶发失败**：
-   2026-10-10 实测单独跑 3 次、全仓连跑 2 次均通过，失败那次不经过本次改动的方法，
-   判定为时序偶发（与 `docs/plans/2026-10-08-folder-transfer.md` 记录的同类现象一致）。
+3. **`test/e2e` 在全仓并发执行时偶发失败**（单包跑稳定通过）：
+   2026-10-10 实测命中过两个不同用例 —— `TestFileTransferResumesAfterInterruption`
+   与 `TestThreeNodesDiscoveryAndChat`；两者单独跑（3~4 次）与全仓连跑均通过，
+   失败那次都不经过本次改动的方法，判定为时序偶发
+   （与 `docs/plans/2026-10-08-folder-transfer.md` 记录的同类现象一致）。
+   判断「是否弄坏了什么」时：先单包复跑，再看是否为这两个用例。
