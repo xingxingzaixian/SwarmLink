@@ -156,13 +156,22 @@ async function confirmRemove(): Promise<void> {
   removeError.value = ''
   try {
     await peers.remove(p.nodeId)
-    removing.value = null
-    // 会话列表由节点目录派生：移除后左栏那条会话也不该留着
-    await chat.loadConversations()
+    // 只在弹窗仍是这个节点时才关闭：用户可能在等待期间关掉弹窗、又对另一个节点点了移除，
+    // 无条件清空会把那个新弹窗一起关掉。
+    if (removing.value?.nodeId === p.nodeId) removing.value = null
   } catch (e: any) {
     removeError.value = String(e?.message ?? e)
+    return
   } finally {
     removeBusy.value = false
+  }
+
+  // 重算会话状态：删的若正是当前会话，右侧不该继续显示它。
+  // 单独收尾而不是放进上面的 try：它失败与「移除失败」是两回事，不能混进同一个错误通道。
+  try {
+    await chat.loadConversations()
+  } catch {
+    // 忽略：会话状态是一次可重算的投影，失败不该影响移除这个已完成的动作
   }
 }
 
@@ -276,19 +285,21 @@ const self = computed(() => peers.self)
             </div>
             <div class="list-row-sub">{{ peerSub(p) }}</div>
           </div>
+          <!-- 放在 .row-meta 之外当同级元素：.row-meta 是列式布局，
+               塞进去会让「带未读角标的行」比其它行更高 -->
+          <button
+            class="icon-btn mini"
+            title="从本机列表移除"
+            aria-label="从本机列表移除"
+            @click.stop="askRemove(p)"
+          >
+            <Icon name="trash" :size="13" />
+          </button>
           <div class="row-meta">
             <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
             <span v-if="chat.unreadOf(peerConvId(p))" class="badge">
               {{ chat.unreadOf(peerConvId(p)) > 99 ? '99+' : chat.unreadOf(peerConvId(p)) }}
             </span>
-            <button
-              class="icon-btn mini"
-              title="从本机列表移除"
-              aria-label="从本机列表移除"
-              @click.stop="askRemove(p)"
-            >
-              <Icon name="trash" :size="13" />
-            </button>
           </div>
         </div>
       </template>
@@ -308,16 +319,16 @@ const self = computed(() => peers.self)
             <div class="list-row-title nowrap">{{ p.displayName }}</div>
             <div class="list-row-sub">{{ peerSub(p) }}</div>
           </div>
+          <button
+            class="icon-btn mini"
+            title="从本机列表移除"
+            aria-label="从本机列表移除"
+            @click.stop="askRemove(p)"
+          >
+            <Icon name="trash" :size="13" />
+          </button>
           <div class="row-meta">
             <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
-            <button
-              class="icon-btn mini"
-              title="从本机列表移除"
-              aria-label="从本机列表移除"
-              @click.stop="askRemove(p)"
-            >
-              <Icon name="trash" :size="13" />
-            </button>
           </div>
         </div>
       </template>
@@ -424,6 +435,7 @@ const self = computed(() => peers.self)
         <div>将把「{{ removing.displayName }}」从本机列表中移除。</div>
         <div class="faint small">
           对方不会收到任何通知，别人的列表也不变，历史消息也不会被删除。
+          这也不是拉黑：不会拒绝对方的握手与连接，只是让它不再出现在你的列表里。
           该节点若再次上线（或与它重新握手），会自动回到列表 ——
           因此它适合清理已经失效的旧身份，不适合屏蔽一个还在使用的节点。
         </div>

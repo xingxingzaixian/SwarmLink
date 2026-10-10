@@ -22,12 +22,22 @@ test('withoutPeer 对不存在的节点是原样返回', () => {
   assert.deepEqual(withoutPeer(list, 'zz'), [{ nodeId: 'a' }])
 })
 
-test('withoutPeer 不误删前缀相同的其它节点', () => {
-  // node_id 是 16 位 hex，前 8 位相同很常见；用 startsWith 之类的实现会误删一片
-  const list = [{ nodeId: 'aabbccddeeff0011' }, { nodeId: 'aabbccddeeff0022' }]
+test('withoutPeer 只比严格相等，不做短 ID / 前缀匹配', () => {
+  // (a) 定长 16 位 hex 下前 8 位相同很常见：按 shortId（前 8 位）比较会一次误删两个
+  const sameShort = [{ nodeId: 'aabbccddeeff0011' }, { nodeId: 'aabbccddeeff0022' }]
   assert.deepEqual(
-    withoutPeer(list, 'aabbccddeeff0011').map((p) => p.nodeId),
+    withoutPeer(sameShort, 'aabbccddeeff0011').map((p) => p.nodeId),
     ['aabbccddeeff0022']
+  )
+
+  // (b) 严格前缀：把「目标以该项开头」也算命中，会连带删掉更短的 id。
+  //     16 位 hex 的真实数据里不会出现这种项（等长时 startsWith 等价于 ===），
+  //     这条钉的是「按严格相等比较」这个属性 —— 改成 nodeId.startsWith(p.nodeId)
+  //     或 nodeId.includes(p.nodeId) 都会红。
+  const withPrefix = [{ nodeId: 'aabb' }, { nodeId: 'aabbccddeeff0011' }]
+  assert.deepEqual(
+    withoutPeer(withPrefix, 'aabbccddeeff0011').map((p) => p.nodeId),
+    ['aabb']
   )
 })
 

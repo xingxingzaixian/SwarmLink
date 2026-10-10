@@ -699,13 +699,19 @@ export function createMockApi(): SwarmApi {
       return [...peers]
     },
     async removePeer(nodeId) {
-      // 预览模式没有后端：直接从内存列表里摘掉，行为与真实实现一致
-      // （真实实现只在本机打标记，这里就是同一个语义的本地版）
+      // 预览模式没有后端，也没有「自动恢复」这回事：这里就是本地摘除。
+      // 真实实现只在本机打一个「已移除」标记（可被有效通告或握手自动解除，历史也不删），
+      // 因此这条路径只保证「界面上立即消失」这一点与真实实现一致。
       const i = peers.findIndex((p) => p.nodeId === nodeId)
       if (i >= 0) peers.splice(i, 1)
     },
     async diagnostics() {
-      return { ...diagnostics }
+      // 两个计数现算：mock 里删过节点之后，创建时的快照会与列表对不上
+      return {
+        ...diagnostics,
+        peersTotal: peers.length,
+        peersOnline: peers.filter((p) => p.online).length
+      }
     },
 
     async groupList(): Promise<Group[]> {
