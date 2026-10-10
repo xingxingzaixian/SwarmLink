@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -18,6 +19,17 @@ import (
 
 // AppName 是配置目录名。
 const AppName = "SwarmLink"
+
+// EnvDataDir 覆盖配置/数据目录（优先级最高），值是「含 config.toml 的那个目录」，
+// 数据库落在其下的 data/app.db。
+//
+//	SWARMLINK_DATA_DIR=D:\swarmlink-data
+const EnvDataDir = "SWARMLINK_DATA_DIR"
+
+// PortableMarker 是可执行文件同目录下的便携模式标记文件（空文件即可）。
+//
+// 存在时数据与程序放在一起，便于拷到 U 盘、或在没写用户目录权限的机器上运行。
+const PortableMarker = "portable.mode"
 
 // Duration 让 TOML 里可以写 "5s" / "300s" 这样的可读值。
 type Duration time.Duration
@@ -170,16 +182,45 @@ func Default() *Config {
 	return c
 }
 
-// Dir 返回应用配置目录。
+// Dir 返回应用配置目录（其下放 config.toml 与 data/app.db）。
+//
+// 优先级：
+//  1. 环境变量 SWARMLINK_DATA_DIR —— 任何平台都可显式指定；
+//  2. 可执行文件同目录存在 portable.mode 标记 —— 便携模式，数据与程序在一起；
+//  3. 系统用户配置目录（Windows 是 %APPDATA%\SwarmLink）。
+//
+// 为什么不【默认】放在可执行文件旁边：装到 C:\Program Files 之后普通用户对它
+// 没有写权限（这正是 Windows 要引入 %APPDATA% 的原因），而且同一台机器上的多个
+// 用户会共用同一个数据库。所以「放在程序旁边」做成显式选择，而不是默认行为。
 //
 // 注意：macOS 上 os.UserConfigDir() 硬编码为 ~/Library/Application Support，
 // 不响应 XDG_CONFIG_HOME —— 这是标准库的既定行为。
 func Dir() (string, error) {
+	if d := strings.TrimSpace(os.Getenv(EnvDataDir)); d != "" {
+		return d, nil
+	}
+	if d, ok := portableDir(); ok {
+		return d, nil
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("config: user config dir: %w", err)
 	}
 	return filepath.Join(base, AppName), nil
+}
+
+// portableDir 在可执行文件同目录发现便携标记时，返回该目录本身
+// （于是 config.toml 与它平级，数据库在该目录的 data/ 下，与常规布局一致）。
+func portableDir() (string, bool) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	dir := filepath.Dir(exe)
+	if _, err := os.Stat(filepath.Join(dir, PortableMarker)); err != nil {
+		return "", false
+	}
+	return dir, true
 }
 
 // Path 返回配置文件路径。

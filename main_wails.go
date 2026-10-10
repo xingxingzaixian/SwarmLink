@@ -260,6 +260,15 @@ func main() {
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
 		},
+		// WebView2 的缓存目录默认是 %APPDATA%\<可执行文件名>。两个问题：
+		//  ① 浏览器缓存放 Roaming 本就不对（会被漫游配置文件同步，体积也不小）；
+		//  ② 用户目录不可写时它会以 ERROR_BUSY / 0x8000FFFF 失败，而那个错误
+		//     由 Wails 内部 os.Exit 收尾 —— 我们放在 main 里的启动失败对话框
+		//     根本来不及介入，用户看到的仍然是「双击没反应」。
+		// 让它跟着数据目录走，「换一个可写目录就能跑」这条出路才真正成立。
+		Windows: application.WindowsOptions{
+			WebviewUserDataPath: filepath.Join(node.ConfigDir, "webview"),
+		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},

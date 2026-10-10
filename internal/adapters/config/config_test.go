@@ -2,8 +2,52 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+// 数据目录的可切换性：SWARMLINK_DATA_DIR 一旦设置就必须生效且原样使用。
+//
+// 这条能力是有实际来源的：程序装在只读目录、或运行在写不了用户配置目录的
+// 受限环境里时，「把数据放到我指定的地方」是唯一的出路。默认仍是用户配置
+// 目录 —— 见 Dir 的说明（装到 Program Files 之后程序旁边同样不可写）。
+func TestDirEnvOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "custom-data")
+	t.Setenv(EnvDataDir, want)
+
+	got, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("Dir() = %q，期望 %q", got, want)
+	}
+	// 数据库与配置文件都必须落在被覆盖的目录下，而不是各走各的。
+	if db := DBPath(got); !filepath.IsAbs(db) || filepath.Dir(filepath.Dir(db)) != want {
+		t.Fatalf("DBPath(%q) = %q，未落在覆盖目录下", got, db)
+	}
+	if p := Path(got); filepath.Dir(p) != want {
+		t.Fatalf("Path(%q) = %q，未落在覆盖目录下", got, p)
+	}
+}
+
+// 空白值不算设置：否则一个空的 SWARMLINK_DATA_DIR 会变成「当前工作目录」，
+// 用户会莫名其妙发现数据跑到别处去了。
+func TestDirEnvOverrideIgnoresBlank(t *testing.T) {
+	t.Setenv(EnvDataDir, "   ")
+
+	got, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, AppName); got != want {
+		t.Fatalf("空白覆盖值应当回落到用户配置目录：Dir() = %q，期望 %q", got, want)
+	}
+}
 
 // 提示设置的默认值与落盘往返。
 //

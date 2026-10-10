@@ -190,6 +190,37 @@ cd frontend && npm run typecheck && npm run build
 配置文件：`<用户配置目录>/SwarmLink/config.toml`（首次启动自动生成）。
 数据库：`<用户配置目录>/SwarmLink/data/app.db`。
 
+### 5.1 数据放在哪里（以及放不了时怎么办）
+
+默认在系统用户配置目录（Windows 是 `%APPDATA%\SwarmLink`）。两种方式改掉它：
+
+```powershell
+# ① 环境变量：想放哪就放哪（脚本 / 终端里最方便）
+$env:SWARMLINK_DATA_DIR = 'D:\swarmlink-data'
+.\bin\SwarmLink.exe
+
+# ② 便携模式：在 exe 旁边放一个空的 portable.mode，数据就与程序在一起
+New-Item -ItemType File .\bin\portable.mode
+```
+
+便携模式下 `config.toml`、`data/`、`identity/`、`logs/`、`webview/` 全部落在 exe 同级目录，
+适合拷到 U 盘、或运行在写不了用户目录的机器上。
+
+> **为什么不默认放在程序旁边**：装到 `C:\Program Files` 之后普通用户对它没有写权限 ——
+> 这正是 Windows 要引入 `%APPDATA%` 的原因；而且同一台机器上的多个用户会共用同一个数据库。
+> 所以「放在程序旁边」是显式选择，不是默认行为。
+>
+> **两个必须知道的副作用**：
+> 1. **换数据目录 = 换节点身份**。`identity/node.key` 跟着数据目录走，换一处就会生成新的
+>    `node_id`，对端看到的是一个新节点（历史聊天记录也留在旧目录里）。
+> 2. WebView2 的缓存目录也跟着数据目录走（`<数据目录>/webview`）。它默认在
+>    `%APPDATA%\<exe 名>`，那里不可写时 WebView2 会以 `ERROR_BUSY` 失败，且错误由
+>    Wails 内部收尾 —— 现象就是「双击没反应」。跟着数据目录走，「换个可写目录就能跑」才真正成立。
+
+**启动失败不再静默**：产物没有控制台（`-H windowsgui`），所以后端起不来时会弹一个原生
+对话框说明原因，日志落在 `<数据目录>/logs/swarmlink.log`。
+自动化场景可用 `SWARMLINK_NO_STARTUP_DIALOG=1` 关掉对话框。
+
 | 段                  | 关键项                                                                                                  |
 | ------------------- | ------------------------------------------------------------------------------------------------------- |
 | `[general]`         | `display_name`                                                                                          |
