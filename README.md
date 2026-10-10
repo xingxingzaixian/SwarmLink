@@ -65,6 +65,26 @@ make ci                 # 等价于 CI 的一条命令
 前置：**Go ≥ 1.26**、**Node ≥ 24**（见 [`frontend/.nvmrc`](frontend/.nvmrc)，
 CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.24**。
 
+> **`wails3` CLI 还必须是「用与你相同的 Go 版本编译」的那一份。** 否则
+> `wails3 build` 会刷出一屏
+> `package requires newer Go version go1.26 (application built with go1.25)` 和
+> `This application uses version go1.25 of the source-processing packages but runs
+> version go1.26 of 'go list'`。
+>
+> 关键点：**`wails3 doctor` 里的 `Go Version` 报的是 CLI 自己的构建版本，不是 PATH
+> 里的 Go** —— 两者不一致时就以它为准。核对与修复：
+>
+> ```powershell
+> go version (Get-Command wails3).Source          # 应当与本机 `go version` 一致
+> go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.24
+> ```
+>
+> 多版本 Go（vfox / asdf / scoop 等）下格外容易踩：`go install` 会把 CLI 装进
+> **当时激活的那个 Go 的 `GOPATH\bin`**，之后切换 Go 版本**不会**更新它，而旧的那份
+> 仍留在 PATH 上（用 `Get-Command wails3 -All` 可以看到全部副本）。实测本机两份副本的
+> 构建版本分别是 go1.26.8 与 go1.25.5，且后者的路径还经一层 Junction 指向旧 Go 的安装树。
+> `scripts/pack.ps1` 会把当前 Go 的 `GOPATH\bin` 提到 PATH 最前，因此经它构建总是用对的那份。
+
 > Go 的下限以 `go.mod` 的 `go 1.26.0` 为准，**不是**更早文档里写的 1.25。
 > 用 1.25 也能编，但那会触发 `GOTOOLCHAIN=auto` 去下载第二份工具链，进而出现
 > `GOROOT` 与实际使用的 go 不一致的经典报错
