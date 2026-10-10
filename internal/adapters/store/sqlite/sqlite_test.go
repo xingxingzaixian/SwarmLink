@@ -280,8 +280,12 @@ func TestSetSuppressedRoundTrip(t *testing.T) {
 	if err := p.SetSuppressed(id, false, time.Unix(3100, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := p.Get(id); got.State != peer.StateOnline {
+	got, _ = p.Get(id)
+	if got.State != peer.StateOnline {
 		t.Fatalf("解除不该动一个本来就不是 blocked 的行：%+v", got)
+	}
+	if !got.LastSeen.Equal(time.Unix(3000, 0)) {
+		t.Fatalf("非 blocked 行的解除必须是彻底空操作（last_seen 也不该动），得到 %v", got.LastSeen)
 	}
 }
 
