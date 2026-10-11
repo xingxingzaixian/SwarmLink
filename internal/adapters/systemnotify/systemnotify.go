@@ -112,22 +112,45 @@ func (n *Notifier) ServiceShutdown() error {
 //
 //wails:ignore
 func (n *Notifier) Send(m Message) error {
-	err := n.svc.SendNotification(notifications.NotificationOptions{
-		ID:    m.ID,
-		Title: m.Title,
-		Body:  m.Body,
-		// ThreadID 让同一会话的通知在系统侧归成一组（macOS 通知中心 /
-		// Windows 操作中心），刷屏时按会话折叠，而不是按时间堆一列。
-		ThreadID: m.ConvID,
-		// Sound 是「按需静音」：用户关了提示音时通知也别响，
-		// 否则设置里那个开关在 Windows 上会看起来失效。
-		Sound: &notifications.NotificationSound{Silent: m.Silent},
-		Data:  map[string]any{"convId": m.ConvID},
-	})
+	err := n.svc.SendNotification(msgOptions(m))
 	if err != nil {
 		n.ok.Store(false)
 	}
 	return err
+}
+
+// msgOptions 把本包的消息翻译成 Wails 的通知选项。
+//
+// 抽成独立函数只为一个理由：下面那条【不能违反】的约束必须能被测试钉住
+// （见 systemnotify_test.go），而不是靠注释提醒下一个人。
+func msgOptions(m Message) notifications.NotificationOptions {
+	return notifications.NotificationOptions{
+		ID:    m.ID,
+		Title: m.Title,
+		Body:  m.Body,
+		// 【刻意不设 ThreadID —— 这一条是「通知上只有『新通知』四个字」的正面修复】
+		//
+		// Wails beta.28 只要看到非空 ThreadID，就会往 toast XML 里塞一个
+		// <header>（notifications_windows.go:511），而它的 toastHeader.Arguments
+		// 带 `omitempty`（:425）且【从不赋值】：
+		//
+		//	<header id="direct:…" title="direct:…"/>   ← 少了 arguments
+		//
+		// 而 header 的 id / title / arguments 三个属性在 Windows 的 toast schema 里
+		// 【全是必需】（learn.microsoft.com/uwp/schemas/tiles/toastschema/element-header，
+		// 明确写着 arguments "不能为 null"）。少一个属性的后果不是「少显示一行」，
+		// 而是整条 toast 不合规：Windows 退化成一条通用通知，标题与正文【全部丢失】，
+		// 用户看到的就是光秃秃的「新通知」。
+		//
+		// 代价是放弃「按会话在通知中心分组」。取舍很清楚：分组只是好看，
+		// 正文才是这条通知存在的理由；何况即便渲染出来，header 标题也只是那串会话 id。
+		// 点击回跳不受影响 —— 它靠的是下面的 Data.convId。
+		//
+		// Sound 是「按需静音」：用户关了提示音时通知也别响，
+		// 否则设置里那个开关在 Windows 上会看起来失效。
+		Sound: &notifications.NotificationSound{Silent: m.Silent},
+		Data:  map[string]any{"convId": m.ConvID},
+	}
 }
 
 // OnActivated 注册「用户点了通知」的回调，参数是通知里带的会话 ID（取不到时为空串）。
