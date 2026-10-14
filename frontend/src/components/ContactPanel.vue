@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /**
- * 左栏：联系人。
+ * 左栏：联系人 / 群组。
  *
- * 分三组而不是一个大列表：
- *   群聊 / 在线好友 / 离线好友
+ * 顶部用「联系人 / 群组」两个图标页签切换，而不是把二者纵向堆在一起：
+ * 它们不是同一类条目（人 vs 会话容器），混排时用户得自己找分隔线。
  *
- * 这个分组不是为了好看 —— 本项目里「在线」由 UDP announce 维护，
- * 「已连接」由 TCP 会话维护，两者可以不一致（ADR-009）。
- * 把能立刻发消息的人聚在上面，用户就不用自己判断哪个绿点算数。
+ * 联系人页签内部仍分「在线 / 离线」两段 —— 这个分组不是为了好看：
+ * 本项目里「在线」由 UDP announce 维护，「已连接」由 TCP 会话维护，
+ * 两者可以不一致（ADR-009）。把能立刻发消息的人聚在上面，
+ * 用户就不用自己判断哪个绿点算数。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
@@ -65,8 +66,21 @@ const searchedPeers = computed(() => peers.peers.filter(matchPeer))
 const onlinePeers = computed(() => (searching.value ? searchedPeers.value : peers.onlinePeers))
 const offlinePeers = computed(() => (searching.value ? [] : peers.offlinePeers))
 
-const nothingFound = computed(
-  () => searching.value && !matchedGroups.value.length && !searchedPeers.value.length
+/** 视图标签：联系人与群组分开，一个列表里不再混排两种不同性质的条目。 */
+const tab = ref<'contacts' | 'groups'>('contacts')
+
+/** 标签计数：联系人用全部节点数（与「在线 + 离线」两段之和一致），群组用群数。 */
+const contactsCount = computed(() => peers.peers.length)
+
+/** 搜索命中按标签各自判断：在联系人页搜不到群名，不该在联系人页报错。 */
+const noPeerMatch = computed(() => searching.value && !searchedPeers.value.length)
+const noGroupMatch = computed(() => searching.value && !matchedGroups.value.length)
+
+/** 联系人页空态：用 ready 而不是 !loading，否则 3 秒一次的轮询会让空态反复闪。 */
+const noPeers = computed(() => peers.ready && !peers.peers.length)
+
+const searchPlaceholder = computed(() =>
+  tab.value === 'groups' ? '搜索群组…' : '搜索会话 / 节点…'
 )
 
 // ---------------------------------------------------------------- 行数据
@@ -235,7 +249,12 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
     <header class="rail-head">
       <label class="search">
         <Icon name="search" :size="14" />
-        <input v-model="query" type="text" placeholder="搜索会话 / 节点…" spellcheck="false" />
+        <input
+          v-model="query"
+          type="text"
+          :placeholder="searchPlaceholder"
+          spellcheck="false"
+        />
         <button
           v-if="query"
           class="icon-btn clear"
@@ -246,6 +265,34 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
           <Icon name="x" :size="13" />
         </button>
       </label>
+
+      <!-- 视图切换：联系人与群组改成图标 + 标签两个页签，而不是在同一列表里纵向排布。
+           两者是不同性质的条目（人 vs 会话容器），混排时用户得自己找分隔线；
+           计数并入标签，切换前就能知道另一侧有没有内容。 -->
+      <div class="tabs" role="tablist" aria-label="切换联系人与群组">
+        <button
+          class="tab"
+          :class="{ on: tab === 'contacts' }"
+          role="tab"
+          :aria-selected="tab === 'contacts'"
+          @click="tab = 'contacts'"
+        >
+          <Icon name="user" :size="15" />
+          <span>联系人</span>
+          <span v-if="contactsCount" class="tab-count">{{ contactsCount }}</span>
+        </button>
+        <button
+          class="tab"
+          :class="{ on: tab === 'groups' }"
+          role="tab"
+          :aria-selected="tab === 'groups'"
+          @click="tab = 'groups'"
+        >
+          <Icon name="users" :size="15" />
+          <span>群组</span>
+          <span v-if="groups.groups.length" class="tab-count">{{ groups.groups.length }}</span>
+        </button>
+      </div>
     </header>
 
     <div v-if="mock" class="banner">
@@ -253,8 +300,9 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
     </div>
 
     <div class="rail-body scroll">
-      <!-- 群聊：即使为空也保留分区头，否则「新建群聊」这个唯一入口就消失了 -->
-      <template v-if="matchedGroups.length || !searching">
+      <!-- 群组页签 -->
+      <template v-if="tab === 'groups'">
+        <!-- 即使为空也保留分区头，否则「新建群聊」这个唯一入口就消失了 -->
         <div class="section-head">
           <span>群聊 · {{ matchedGroups.length }}</span>
           <button
@@ -267,7 +315,11 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
             <Icon name="plus" :size="15" />
           </button>
         </div>
-        <div v-if="!matchedGroups.length" class="hint">还没有群聊，点右上角 + 建一个。</div>
+        <div v-if="noGroupMatch" class="empty">
+          <div class="empty-title">没有匹配的群聊</div>
+          <div>换个关键词，或者清空搜索看全部。</div>
+        </div>
+        <div v-else-if="!matchedGroups.length" class="hint">还没有群聊，点右上角 + 建一个。</div>
         <div
           v-for="g in matchedGroups"
           :key="g.groupId"
@@ -289,95 +341,97 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
         </div>
       </template>
 
-      <!-- 在线好友 -->
-      <template v-if="onlinePeers.length">
-        <div class="section-head">
-          <span>{{ searching ? '好友' : '在线' }} · {{ onlinePeers.length }}</span>
-        </div>
-        <div
-          v-for="p in onlinePeers"
-          :key="p.nodeId"
-          class="list-row"
-          :class="{ active: isActive(peerConvId(p)) }"
-          :title="`NodeID ${p.nodeId}\n地址 ${p.lastAddr || '未知'}\n子网 ${p.subnet || '未知'}`"
-          @click="openPeer(p)"
-        >
-          <!-- 在线点用 reachable：正在广播、还没握手的节点也算「在」，
-               差别由下面的「未连接」标签表达，而不是把点画成灰色 -->
-          <Avatar :seed="p.nodeId" :name="p.displayName" :size="38" :online="reachable(p)" />
-          <div class="list-row-main">
-            <div class="list-row-title nowrap">
-              <span class="nowrap">{{ p.displayName }}</span>
-              <!-- 只给「在线但未连接」加标识：它意味着首条消息要多等一个 RTT -->
-              <span v-if="!p.connected" class="tag">未连接</span>
+      <!-- 联系人页签 -->
+      <template v-else>
+
+        <!-- 在线好友 -->
+        <template v-if="onlinePeers.length">
+          <div class="section-head">
+            <span>{{ searching ? '好友' : '在线' }} · {{ onlinePeers.length }}</span>
+          </div>
+          <div
+            v-for="p in onlinePeers"
+            :key="p.nodeId"
+            class="list-row"
+            :class="{ active: isActive(peerConvId(p)) }"
+            :title="`NodeID ${p.nodeId}\n地址 ${p.lastAddr || '未知'}\n子网 ${p.subnet || '未知'}`"
+            @click="openPeer(p)"
+          >
+            <!-- 在线点用 reachable：正在广播、还没握手的节点也算「在」，
+                 差别由下面的「未连接」标签表达，而不是把点画成灰色 -->
+            <Avatar :seed="p.nodeId" :name="p.displayName" :size="38" :online="reachable(p)" />
+            <div class="list-row-main">
+              <div class="list-row-title nowrap">
+                <span class="nowrap">{{ p.displayName }}</span>
+                <!-- 只给「在线但未连接」加标识：它意味着首条消息要多等一个 RTT -->
+                <span v-if="!p.connected" class="tag">未连接</span>
+              </div>
+              <div class="list-row-sub">{{ peerSub(p) }}</div>
             </div>
-            <div class="list-row-sub">{{ peerSub(p) }}</div>
+            <!-- 放在 .row-meta 之外当同级元素：.row-meta 是列式布局，
+                 塞进去会让「带未读角标的行」比其它行更高 -->
+            <button
+              class="icon-btn mini"
+              title="从本机列表移除"
+              aria-label="从本机列表移除"
+              @click.stop="askRemove(p)"
+            >
+              <Icon name="trash" :size="13" />
+            </button>
+            <div class="row-meta">
+              <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
+              <span v-if="chat.unreadOf(peerConvId(p))" class="badge">
+                {{ chat.unreadOf(peerConvId(p)) > 99 ? '99+' : chat.unreadOf(peerConvId(p)) }}
+              </span>
+            </div>
           </div>
-          <!-- 放在 .row-meta 之外当同级元素：.row-meta 是列式布局，
-               塞进去会让「带未读角标的行」比其它行更高 -->
-          <button
-            class="icon-btn mini"
-            title="从本机列表移除"
-            aria-label="从本机列表移除"
-            @click.stop="askRemove(p)"
+        </template>
+
+        <!-- 离线好友 -->
+        <template v-if="offlinePeers.length">
+          <div class="section-head"><span>离线 · {{ offlinePeers.length }}</span></div>
+          <div
+            v-for="p in offlinePeers"
+            :key="p.nodeId"
+            class="list-row offline"
+            :class="{ active: isActive(peerConvId(p)) }"
+            @click="openPeer(p)"
           >
-            <Icon name="trash" :size="13" />
-          </button>
-          <div class="row-meta">
-            <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
-            <span v-if="chat.unreadOf(peerConvId(p))" class="badge">
-              {{ chat.unreadOf(peerConvId(p)) > 99 ? '99+' : chat.unreadOf(peerConvId(p)) }}
-            </span>
+            <Avatar :seed="p.nodeId" :name="p.displayName" :size="38" :online="false" />
+            <div class="list-row-main">
+              <div class="list-row-title nowrap">{{ p.displayName }}</div>
+              <div class="list-row-sub">{{ peerSub(p) }}</div>
+            </div>
+            <button
+              class="icon-btn mini"
+              title="从本机列表移除"
+              aria-label="从本机列表移除"
+              @click.stop="askRemove(p)"
+            >
+              <Icon name="trash" :size="13" />
+            </button>
+            <div class="row-meta">
+              <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
+            </div>
           </div>
+        </template>
+
+        <div v-if="noPeerMatch" class="empty">
+          <div class="empty-title">没有匹配的联系人</div>
+          <div>试试 NodeID 的前几位，或者直接搜地址。</div>
+        </div>
+
+        <!-- 用 ready 而不是 !loading：后台轮询每 3 秒跑一次，
+             用 loading 会让这个空状态被反复卸载再挂载，肉眼就是定时闪一下。
+             ready 一旦为真就不再回落，空状态也就不会再动。 -->
+        <div v-else-if="noPeers" class="empty">
+          <div class="empty-title">还没有发现任何节点</div>
+          <div>同网段会自动广播发现；跨网段需要在设置里配置种子清单。</div>
+          <button class="btn btn-soft" @click="ui.openPanel('settings')">
+            <Icon name="sliders" :size="14" />打开设置
+          </button>
         </div>
       </template>
-
-      <!-- 离线好友 -->
-      <template v-if="offlinePeers.length">
-        <div class="section-head"><span>离线 · {{ offlinePeers.length }}</span></div>
-        <div
-          v-for="p in offlinePeers"
-          :key="p.nodeId"
-          class="list-row offline"
-          :class="{ active: isActive(peerConvId(p)) }"
-          @click="openPeer(p)"
-        >
-          <Avatar :seed="p.nodeId" :name="p.displayName" :size="38" :online="false" />
-          <div class="list-row-main">
-            <div class="list-row-title nowrap">{{ p.displayName }}</div>
-            <div class="list-row-sub">{{ peerSub(p) }}</div>
-          </div>
-          <button
-            class="icon-btn mini"
-            title="从本机列表移除"
-            aria-label="从本机列表移除"
-            @click.stop="askRemove(p)"
-          >
-            <Icon name="trash" :size="13" />
-          </button>
-          <div class="row-meta">
-            <span class="row-time">{{ when(peerConvId(p), p.lastSeen) }}</span>
-          </div>
-        </div>
-      </template>
-
-      <div v-if="nothingFound" class="empty">
-        <div class="empty-title">没有匹配的联系人</div>
-        <div>试试 NodeID 的前几位，或者直接搜地址。</div>
-      </div>
-
-      <!-- 用 ready 而不是 !loading：后台轮询每 3 秒跑一次，
-           用 loading 会让这个空状态被反复卸载再挂载，肉眼就是定时闪一下。
-           ready 一旦为真就不再回落，空状态也就不会再动。 -->
-      <div v-else-if="peers.ready && !peers.peers.length && !groups.groups.length" class="empty">
-        <div class="empty-title">还没有发现任何节点</div>
-        <div>
-          同网段会自动广播发现；跨网段需要在设置里配置种子清单。
-        </div>
-        <button class="btn btn-soft" @click="ui.openPanel('settings')">
-          <Icon name="sliders" :size="14" />打开设置
-        </button>
-      </div>
     </div>
 
     <!-- 本人 + 菜单入口 -->
@@ -542,6 +596,67 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
   height: 20px;
   border: 0;
   color: var(--text-muted);
+}
+
+/* ---------------------------------------------------------------- 视图切换 */
+
+/* 两枚等宽页签装在一条凹槽里：凹槽给出「同一组里的互斥选项」这一层语义，
+   选中项浮到 elevated 面上，未选中项留在槽里。 */
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  margin-top: 8px;
+  padding: 3px;
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--divider);
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: background var(--dur-2) var(--ease), color var(--dur-2) var(--ease),
+    box-shadow var(--dur-2) var(--ease);
+}
+
+.tab:hover:not(.on) {
+  color: var(--text-primary);
+}
+
+.tab.on {
+  background: var(--bg-elevated);
+  color: var(--accent);
+  box-shadow: 0 1px 3px oklch(0% 0 0 / 0.28);
+}
+
+/* 计数做成小药丸：只有真有内容时才出现，0 不值得占一格。 */
+.tab-count {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 17px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.tab.on .tab-count {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* ---------------------------------------------------------------- 列表 */
