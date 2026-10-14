@@ -21,6 +21,7 @@ import (
 
 	"github.com/swarmlink/swarmlink/internal/adapters/store/mem"
 	"github.com/swarmlink/swarmlink/internal/app"
+	"github.com/swarmlink/swarmlink/internal/domain/group"
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
@@ -144,6 +145,7 @@ func (emptyDir) Upsert(peer.Peer) error                       { return nil }
 func (emptyDir) Get(identity.NodeID) (peer.Peer, bool)        { return peer.Peer{}, false }
 func (emptyDir) List(ports.PeerFilter) []peer.Peer            { return nil }
 func (emptyDir) MarkOffline(identity.NodeID, time.Time) error { return nil }
+func (emptyDir) ResetLiveness() (int, error)                  { return 0, nil }
 func (emptyDir) SetSuppressed(identity.NodeID, bool, time.Time) error {
 	return nil
 }
@@ -177,6 +179,7 @@ func (d capDir) Get(id identity.NodeID) (peer.Peer, bool) {
 }
 func (d capDir) List(ports.PeerFilter) []peer.Peer            { return nil }
 func (d capDir) MarkOffline(identity.NodeID, time.Time) error { return nil }
+func (d capDir) ResetLiveness() (int, error)                  { return 0, nil }
 func (d capDir) SetSuppressed(identity.NodeID, bool, time.Time) error {
 	return nil
 }
@@ -396,6 +399,65 @@ func TestDiagnosticsCountsSuppressedPeers(t *testing.T) {
 	}
 	if got := len(svc.List()); got != 1 {
 		t.Fatalf("可见列表 = %d，期望 1（被移除的不显示）", got)
+	}
+}
+
+// 退出群（本人）：DTO 里自己那条必须立刻变成 active=false，且票号可读。
+//
+// 这条锁的是「退出权属于本人」在服务层的落地：服务层不能要求调用方是群主，
+// 也不能把它做成一次 RPC 到群主 —— 那正是原设计的硬伤。
+func TestGroupServiceLeave(t *testing.T) {
+	kp, err := identity.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	owner := mkNodeID(t, testPeerHex)
+	self := kp.NodeID()
+
+	groups := mem.NewGroups()
+	if err := groups.Upsert(group.Group{
+		ID: "g1", Name: "群", OwnerID: owner, Epoch: 1, MintSeq: 2, State: group.StateActive,
+		Members: []group.Member{
+			{NodeID: owner, Role: group.RoleOwner, AdmitSeq: 1},
+			{NodeID: self, Role: group.RoleMember, AdmitSeq: 2},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gapp := app.NewGroupApp(self, kp, groups, mem.NewMessages(clk), mem.NewGroupDeliveries(),
+		stubConns{}, mem.NewPeers(clk), eventbus.New(), clk, nil)
+	svc := &GroupService{d: Deps{Self: SelfInfo{NodeID: self}, Group: gapp, GroupRepo: groups}}
+
+	dto, err := svc.Leave("g1")
+	if err != nil {
+		t.Fatalf("Leave: %v", err)
+	}
+	var me GroupMemberDTO
+	for _, m := range dto.Members {
+		if m.NodeID == self.String() {
+			me = m
+		}
+	}
+	if me.NodeID == "" {
+		t.Fatal("退出后自己那条成员记录必须保留（审计与 epoch 一致都要它）")
+	}
+	if me.Active {
+		t.Error("退出后 DTO 里自己必须 active=false，否则前端仍显示在群")
+	}
+	if me.LeftSeq != me.AdmitSeq || me.LeftSeq == 0 {
+		t.Errorf("撕票号 = %d，期望等于票号 %d", me.LeftSeq, me.AdmitSeq)
+	}
+
+	// List 与 Leave 返回必须一致：两处各算一遍，UI 就会出现「刚退出又被列成在群」。
+	list := svc.List()
+	if len(list) != 1 {
+		t.Fatalf("List 长度 = %d，期望 1", len(list))
+	}
+	for _, m := range list[0].Members {
+		if m.NodeID == self.String() && m.Active {
+			t.Error("List 里的自己仍是 active，与 Leave 的返回值不一致")
+		}
 	}
 }
 

@@ -2,6 +2,8 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 
 import App from './App.vue'
+// 字体先于样式：@font-face 必须在任何用到它的规则之前完成声明
+import './fonts.css'
 import './style.css'
 import { registerEvents } from './events'
 

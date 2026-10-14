@@ -13,8 +13,18 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
+
+// ConnLookup 只回答「此刻本机是否与该节点存在活动 TCP 会话」。
+//
+// PeerApp 用它把 TTL 兜底（Sweep）从 discovered 扩展到 online：online 由握手置位
+// （ADR-009），一旦会话消失且 announce 也停了，它就该像 discovered 一样过期。
+// 判会话是为了不误伤「连接仍在、只是 announce 恰好断档」的节点。
+type ConnLookup interface {
+	SessionOf(id identity.NodeID) (ports.Session, bool)
+}
 
 // PeerApp 维护节点目录：把发现层产出的 Announcement 归一化为 Peer 并落目录。
 type PeerApp struct {
@@ -24,7 +34,12 @@ type PeerApp struct {
 	clk  ports.Clock
 	ttl  time.Duration
 	lg   *slog.Logger
+	// conns 让 Sweep 判断「是否仍有活动会话」（可选，见 SetConnLookup）。
+	conns ConnLookup
 }
+
+// SetConnLookup 注入连接层（可选）。未注入时 Sweep 把 online 一律按「无会话」处理。
+func (a *PeerApp) SetConnLookup(c ConnLookup) { a.conns = c }
 
 // NewPeerApp 构造节点目录应用。
 func NewPeerApp(
@@ -141,6 +156,10 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 		Subnet:   an.Subnet,
 		State:    state,
 		Source:   source,
+		// 共享摘要随通告刷新。刻意【不做】「空值不覆盖」：通告是周期性的
+		// 全量状态，对方取消发布后摘要就该立刻变空 —— 沿用空值保留规则
+		// 会让取消掉的共享在别人列表里挂到 TTL 过期。
+		Shares: share.NormalizeSummaries(an.Shares),
 	}
 	if exists {
 		if p.DisplayName == "" {
@@ -253,11 +272,28 @@ func (a *PeerApp) Start() {
 	})
 }
 
-// Sweep 把 TTL 过期的 discovered 节点标记为 offline。
+// Sweep 做过期兜底：
+//   - discovered：announce 停发超过 TTL ⇒ 判离线（原有语义）；
+//   - online：连接层已无该会话【且】announce 也停了超过 TTL ⇒ 判离线。
+//
+// online 由握手置位（ADR-009），一旦会话消失却没有收到离线事件（进程重启后残留、
+// 或离线事件在对方不在线期间丢失），它就会永久卡在 online —— 现象正是
+// 「对方明明不在线，列表却一直显示在线」。这一层兜底让 online 也能被 TTL 收回。
+// 先判会话：有活动会话的节点即便 announce 恰好断档也不该被判离线。
 func (a *PeerApp) Sweep() {
 	now := a.clk.Now()
 	for _, p := range a.dir.List(ports.PeerFilter{}) {
-		if p.State != peer.StateDiscovered {
+		switch p.State {
+		case peer.StateDiscovered:
+			// announce 维护的状态，照常按 TTL 过期。
+		case peer.StateOnline:
+			// 有活动会话 ⇒ 它确实连着，只是这次没等到 announce，不判离线。
+			if a.conns != nil {
+				if _, ok := a.conns.SessionOf(p.NodeID); ok {
+					continue
+				}
+			}
+		default:
 			continue
 		}
 		if !p.Expired(now, a.ttl) {

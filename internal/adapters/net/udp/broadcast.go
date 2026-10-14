@@ -16,6 +16,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 )
 
 // Config 是发现配置（对应 7.4 节 TOML [discovery]）。
@@ -41,6 +42,15 @@ type Config struct {
 	// （这正是「udp_port=0 时默认发现失效」的根因）。
 	// 为空时退化为只发自己的端口（兼容旧调用方与测试）。
 	AnnouncePorts []int
+
+	// Shares 返回本机共享摘要（FR-14），由组合根注入。
+	//
+	// 为什么是回调而不是值：摘要会随发布/取消变化，而 Config 在 Start 之前
+	// 就固定了 —— 传值的话「发布完别人看不到」会一直到重启。回调也让
+	// udp 适配器不必认识 app 层（只依赖 domain/share 这个值类型）。
+	//
+	// 为 nil 时不携带任何摘要（旧行为）。
+	Shares func() []share.Summary
 }
 
 // DefaultConfig 返回默认配置。
@@ -177,6 +187,26 @@ func (b *Broadcaster) SetInterfaces(ifaces []Interface) { b.forced = ifaces }
 // 用途：ADR-008 的端口回退 —— 2425 被占则试 2426…2434。
 // 实际端口会写进 ANNOUNCE 供对端学习，因此对端无需配置。
 func (b *Broadcaster) SetUDPPort(port int) { b.cfg.UDPPort = port }
+
+// SetSharesFunc 注入「本机共享摘要」的取值回调。可在 Start 之后调用。
+//
+// 与 SetAnnouncePorts 同样是【晚绑定】：共享清单由 app 层维护，而
+// 广播器在 app 层之前就构造好了（组合根的顺序约束，见 bootstrap）。
+func (b *Broadcaster) SetSharesFunc(fn func() []share.Summary) { b.cfg.Shares = fn }
+
+// AnnounceNow 立刻广播一次 ANNOUNCE（不等下一个周期）。
+//
+// 用途：共享发布/取消后让对端在秒级看见（周期是 45 秒，用户会以为没生效）。
+// 未启动（没有网卡）时是空操作 —— 这时本来也无处可发。
+//
+// 刻意不并发：调用点在「用户点了发布」这条路径上，多等一次 UDP 写
+// （微秒级）换来「顺序可推理」是划算的。
+func (b *Broadcaster) AnnounceNow() {
+	if b.ctx == nil || b.cfg.SeedOnly || len(b.ifaces) == 0 {
+		return
+	}
+	b.sendAnnounces()
+}
 
 // SetAnnouncePorts 设置广播 ANNOUNCE 的目标端口集合。必须在 Start 之前调用。
 //
@@ -378,6 +408,11 @@ func (b *Broadcaster) buildAnnounce(subnet string) peer.Announcement {
 		Timestamp:   b.clk.Now().Unix(),
 		Epoch:       b.epoch.Load(),
 		Source:      peer.SourceBroadcast,
+	}
+	// 摘要在签名【之前】填好但【不参与】签名域（见 peer.Announcement.Shares）：
+	// 这样旧版本收到它照常验签通过，新版本能读到它。
+	if b.cfg.Shares != nil {
+		a.Shares = share.NormalizeSummaries(b.cfg.Shares())
 	}
 	a.Sig = b.kp.Sign(a.SigningBytes())
 	return a

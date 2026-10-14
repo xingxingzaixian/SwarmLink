@@ -245,3 +245,144 @@ func TestConnectionRestoresSuppressedPeer(t *testing.T) {
 
 // 确保测试里用到的 identity 类型不会被误删（helper 返回它）。
 var _ = identity.NodeID{}
+
+// noSessionLookup 报告「没有任何活动会话」，等价于连接层不可用。
+type noSessionLookup struct{}
+
+func (noSessionLookup) SessionOf(identity.NodeID) (ports.Session, bool) { return nil, false }
+
+// sessionLookupFor 只对指定 node_id 报告「有会话」，其余报告无会话。
+type sessionLookupFor struct{ id identity.NodeID }
+
+func (s sessionLookupFor) SessionOf(id identity.NodeID) (ports.Session, bool) {
+	return nil, id == s.id
+}
+
+// Sweep 的原有语义不能回退：announce 停发超过 TTL 的 discovered 判离线。
+func TestSweepExpiresStaleDiscovered(t *testing.T) {
+	clk := clock.NewFake(time.Unix(10_000, 0))
+	dir := mem.NewPeers(clk)
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateDiscovered, LastSeen: clk.Now().Add(-6 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewPeerApp(self, dir, nil, clk, 5*time.Minute, nil)
+	app.Sweep()
+
+	if got, _ := dir.Get(peerID); got.State != peer.StateOffline {
+		t.Fatalf("过期 discovered 应判离线，得到 %q", got.State)
+	}
+}
+
+// Sweep 的兜底必须覆盖 online：会话已消失且 announce 停了超过 TTL ⇒ 判离线。
+// 否则「本机重启后残留的 online」会永久卡住，现象就是「对方明明不在线，列表却一直显示在线」。
+func TestSweepExpiresStaleOnlineWithoutSession(t *testing.T) {
+	clk := clock.NewFake(time.Unix(10_000, 0))
+	dir := mem.NewPeers(clk)
+	bus := eventbus.New()
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastSeen: clk.Now().Add(-6 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	offline := 0
+	bus.Subscribe(eventbus.TopicPeerOffline, func(any) { offline++ })
+
+	app := NewPeerApp(self, dir, bus, clk, 5*time.Minute, nil)
+	app.SetConnLookup(noSessionLookup{})
+	app.Sweep()
+
+	if got, _ := dir.Get(peerID); got.State != peer.StateOffline {
+		t.Fatalf("过期且无会话的 online 应判离线，得到 %q", got.State)
+	}
+	if offline != 1 {
+		t.Fatalf("应发布 1 条 peer.offline，得到 %d", offline)
+	}
+}
+
+// 有活动会话时不能判离线：announce 恰好断档不代表节点下线（连接层知道它还在）。
+func TestSweepKeepsOnlineWithActiveSession(t *testing.T) {
+	clk := clock.NewFake(time.Unix(10_000, 0))
+	dir := mem.NewPeers(clk)
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastSeen: clk.Now().Add(-6 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewPeerApp(self, dir, nil, clk, 5*time.Minute, nil)
+	app.SetConnLookup(sessionLookupFor{id: peerID})
+	app.Sweep()
+
+	if got, _ := dir.Get(peerID); got.State != peer.StateOnline {
+		t.Fatalf("仍有活动会话的 online 不该被判离线，得到 %q", got.State)
+	}
+}
+
+// 未过 TTL 的 online 不动（避免把「在线但本轮还没等到 announce」误杀）。
+func TestSweepKeepsFreshOnline(t *testing.T) {
+	clk := clock.NewFake(time.Unix(10_000, 0))
+	dir := mem.NewPeers(clk)
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	if err := dir.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastSeen: clk.Now().Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewPeerApp(self, dir, nil, clk, 5*time.Minute, nil)
+	app.SetConnLookup(noSessionLookup{})
+	app.Sweep()
+
+	if got, _ := dir.Get(peerID); got.State != peer.StateOnline {
+		t.Fatalf("未过 TTL 的 online 不该被动，得到 %q", got.State)
+	}
+}
+
+// 锁住用户报告的场景：A 离线期间 B 也离线，A 重启后 B 不能继续显示在线。
+// 「启动清理 + TTL 兜底」两步合起来把它纠正 —— 单靠离线事件是修不好的（事件到不了 A）。
+func TestStartupResetThenSweepClearsStaleOnline(t *testing.T) {
+	clk := clock.NewFake(time.Unix(10_000, 0))
+	dir := mem.NewPeers(clk)
+	self := mustNodeID(t, testSelfHex)
+	peerID := mustNodeID(t, testPeerHex)
+
+	// A 上次退出时 B 是 online；此后 A 离线期间 B 也离线，那条离线事件永远到不了 A。
+	if err := dir.Upsert(peer.Peer{
+		NodeID: peerID, State: peer.StateOnline, LastSeen: clk.Now().Add(-10 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A 重新启动：清空残留的在线（否则 ToPeerDTO.Online 会为真 → 列表显示 B 在线）。
+	n, err := dir.ResetLiveness()
+	if err != nil || n != 1 {
+		t.Fatalf("启动清理应降级 1 条，得到 count=%d err=%v", n, err)
+	}
+	if got, _ := dir.Get(peerID); got.State == peer.StateOnline {
+		t.Fatal("重启后不应残留 online")
+	}
+
+	// B 确实已离线：last_seen 早已过期，一次 Sweep 即判离线。
+	app := NewPeerApp(self, dir, eventbus.New(), clk, 5*time.Minute, nil)
+	app.SetConnLookup(noSessionLookup{})
+	app.Sweep()
+
+	if got, _ := dir.Get(peerID); got.State != peer.StateOffline {
+		t.Fatalf("重启后经过一轮 Sweep 应判离线，得到 %q", got.State)
+	}
+}

@@ -67,17 +67,15 @@ onBeforeUnmount(() => {
   max-height: 232px;
   overflow-y: auto;
   padding: 8px;
-  border-radius: var(--r-lg);
-  background: var(--glass-float);
-  backdrop-filter: blur(var(--blur-lg)) saturate(140%);
-  -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(140%);
-  box-shadow: inset 0 0 0 1px var(--edge), 0 18px 40px -22px rgba(2, 0, 12, 0.95);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider-strong);
+  box-shadow: var(--shadow-lg);
 }
 
 .gname {
   margin: 2px 0 4px;
-  font-size: var(--fs-xs);
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 .grid {
@@ -95,11 +93,12 @@ onBeforeUnmount(() => {
   padding: 0;
   font-size: 17px;
   line-height: 1;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-xs);
   background: transparent;
+  transition: background var(--dur-1) var(--ease);
 }
 
 .cell:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 </style>

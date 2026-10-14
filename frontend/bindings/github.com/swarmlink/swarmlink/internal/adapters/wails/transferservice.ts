@@ -119,3 +119,13 @@ export function SendFile(peerID: string, path: string): $CancellablePromise<stri
 export function SendFolder(peerID: string, path: string): $CancellablePromise<$models.FolderDTO> {
     return $Call.ByID(2773910899, peerID, path);
 }
+
+/**
+ * SendFolderTo 把同一个文件夹发给多个对端（群聊用），全批共享一个 batch_id。
+ * 
+ * 与 SendFolder 的差别只有「一次发给谁」：群聊里聊天框只出现一张卡片，
+ * 因此所有成员的任务必须落在同一个批次下，否则卡片进度会按「文件数 × 成员数」算。
+ */
+export function SendFolderTo(peerIDs: string[] | null, path: string): $CancellablePromise<$models.FolderDTO> {
+    return $Call.ByID(2235474878, peerIDs, path);
+}

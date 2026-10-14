@@ -295,6 +295,18 @@ export const useTransferStore = defineStore('transfer', () => {
   }
 
   /**
+   * 群聊发文件夹：一次发给多个成员，全批共享一个 batch_id。
+   *
+   * 与 sendFolder 同一套理由（枚举与落库在返回前完成，可以立刻 refresh）；
+   * 差别只在于「发给谁」是一个集合，而卡片仍然只有一张。
+   */
+  async function sendFolderTo(peerIds: string[], path: string): Promise<FolderSummary> {
+    const sum = await (await getApi()).sendFolderTo(peerIds, path)
+    await refresh()
+    return sum
+  }
+
+  /**
    * 取消整个批次里未结束的任务，返回取消条数。
    *
    * 乐观更新只碰【未结束】的那几条：后端也会为每条推 transfer:state，
@@ -361,6 +373,7 @@ export const useTransferStore = defineStore('transfer', () => {
     registerPending,
     sendFile,
     sendFiles,
-    sendFolder
+    sendFolder,
+    sendFolderTo
   }
 })

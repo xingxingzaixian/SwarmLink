@@ -195,29 +195,59 @@ type FileDoneAck struct {
 // ---------------------------------------------------------------------------
 
 // GroupMemberWire 是群成员的线上表示。
+//
+// AdmitSeq/KickSeq 属于【群主签名块】，LeftSeq/LeftSig 属于【本人签名域】——
+// 两块在同一条消息里携带，但各自独立认证、独立合并（见 ADR-012 Decision §5）。
+// State 只是派生缓存，接收端应当用票号自行判定，不要信它。
 type GroupMemberWire struct {
 	NodeID      string `json:"node_id"`
-	DisplayName string `json:"display_name"`
+	DisplayName string `json:"display_name,omitempty"` // 非权威提示
 	Role        string `json:"role"`
-	State       string `json:"state"`
+	State       string `json:"state,omitempty"`
 	JoinedAt    int64  `json:"joined_at"`
+
+	AdmitSeq int64 `json:"admit_seq"`
+	KickSeq  int64 `json:"kick_seq"`
+
+	LeftSeq int64  `json:"left_seq,omitempty"`
+	LeftSig string `json:"left_sig,omitempty"` // base64
 }
 
-// GroupMeta 传播群状态（owner 签名）。
+// GroupMeta 传播群名册快照（owner 签名的名册块 + 各成员自签的 left 覆盖）。
+//
+// State 是群级状态（active/dissolved），它已进入群主签名域 —— 单独一个
+// 字段而不是「把成员删光」：解散要能被成员明确识别并提示，而不是看起来像自己被踢。
 type GroupMeta struct {
-	GroupID   string            `json:"group_id"`
-	Name      string            `json:"name"`
-	OwnerID   string            `json:"owner_id"`
-	Epoch     int64             `json:"epoch"`
-	StateSig  string            `json:"state_sig"` // base64
+	GroupID string `json:"group_id"`
+	Name    string `json:"name"`
+	OwnerID string `json:"owner_id"`
+	Epoch   int64  `json:"epoch"`
+	State   string `json:"state,omitempty"`
+	// RosterSig 是群主对「群级字段 + 每成员 admit/kick」的签名（base64）。
+	RosterSig string            `json:"roster_sig"`
+	MintSeq   int64             `json:"mint_seq"`
 	Members   []GroupMemberWire `json:"members"`
 	CreatedAt int64             `json:"created_at"`
+	// RosterDigest 是名册完整状态摘要（base64）：回答「我是不是拿全了」。
+	RosterDigest string `json:"roster_digest,omitempty"`
 }
 
 // GroupMembersReq 拉取成员快照。
 type GroupMembersReq struct {
 	GroupID    string `json:"group_id"`
 	KnownEpoch int64  `json:"known_epoch"`
+	// KnownDigest 是请求方当前的名册摘要（base64）。一致则响应方回空，
+	// 省掉一次「其实什么都没变」的全量往返。
+	KnownDigest string `json:"known_digest,omitempty"`
+}
+
+// GroupLeave 是【本人签名】的退出增量。
+type GroupLeave struct {
+	GroupID string `json:"group_id"`
+	NodeID  string `json:"node_id"`
+	LeftSeq int64  `json:"left_seq"`
+	// Sig 是本人对 LeftSigningBytes(group_id, node_id, left_seq) 的签名（base64）。
+	Sig string `json:"sig"`
 }
 
 // GroupMembersResp 返回成员快照。
@@ -237,6 +267,82 @@ type GroupMsg struct {
 	MsgType  string `json:"msg_type,omitempty"`
 	FileID   string `json:"file_id,omitempty"`
 	SentAt   int64  `json:"sent_at"`
+}
+
+// ---------------------------------------------------------------------------
+// 文件共享报文（FR-14）
+// ---------------------------------------------------------------------------
+//
+// 共享的发现不在这里：摘要随 ANNOUNCE / PEER_LIST 走（peer.Announcement.Shares）。
+// 这一组只承载「要清单」与「要文件」两件事，都是请求-响应式的单次交互。
+//
+// 为什么不在通告里直接带完整清单：一个大目录的 item 列表可达数 MB，而通告是
+// 45 秒一轮的广播、目录拉取还要逐条目转发 —— 把清单塞进去等于让每个节点的
+// 每次心跳都背着全网的目录走（PRD RK-09）。
+
+// ShareIndexReq 请求某个共享的完整文件清单。
+type ShareIndexReq struct {
+	ShareID string `json:"share_id"`
+}
+
+// ShareIndexItem 是清单里的一条。
+type ShareIndexItem struct {
+	// Path 是相对共享根的路径（斜杠分隔）。
+	Path string `json:"path"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	// Hash 当前恒为空（发布时不预先算哈希，见 share.Item）。
+	Hash  string `json:"hash,omitempty"`
+	MTime int64  `json:"mtime,omitempty"`
+}
+
+// ShareIndexResp 返回清单；OK=false 时 Error 是给用户看的拒绝原因。
+//
+// 拒绝原因必须在线上回传而不是只在日志里：越权访问与「共享方已取消共享」
+// 对请求方是两种完全不同的处置（前者要改可见性、后者要让对方重新发布），
+// 而请求方看不到对方的日志。
+type ShareIndexResp struct {
+	OK      bool             `json:"ok"`
+	Error   string           `json:"error,omitempty"`
+	ShareID string           `json:"share_id"`
+	Name    string           `json:"name"`
+	Owner   string           `json:"owner,omitempty"`
+	Items   []ShareIndexItem `json:"items,omitempty"`
+}
+
+// SharePullReq 请共享方把指定文件【推】给自己。
+//
+// 方向说明：拉取方主动，但数据方向仍然是「共享方 → 拉取方」，
+// 因为文件在共享方手里 —— 复用现有的发送引擎（FILE_META 起头）
+// 比新写一条反向的拉取通道省下整套分块/续传/校验逻辑。
+type SharePullReq struct {
+	ShareID string `json:"share_id"`
+	// Paths 是相对共享根的文件路径（斜杠分隔，来自 ShareIndexResp.Items）。
+	Paths []string `json:"paths"`
+	// BatchID 由【拉取方】生成并在这里传给共享方，共享方原样回填到每个
+	// 传输任务的 batch_id 上：接收端的目录树还原与同一个批次根目录的分配
+	// 都靠它，两边对不上就会出现「文件落到了别的目录」。
+	BatchID string `json:"batch_id"`
+	// RootName 是批次的根目录名（共享名）。接收端 RelPath 的首段就是它。
+	RootName string `json:"root_name"`
+}
+
+// SharePullResp 是拉取请求的受理结果。
+//
+// 只回复「受理与否」：被受理的文件通过随后到来的 FILE_META 列表体现，
+// 逐文件的成败由传输层自己的事件承担 —— 在这里再维护一份进度真相，
+// 迟早会与传输任务列表不一致。
+type SharePullResp struct {
+	// BatchID 原样回填请求里的值：protocol.Frame 没有 msg_id，
+	// 而这份响应天然要对应「哪一次请求」，batch_id 是唯一稳定的关联键。
+	BatchID string `json:"batch_id"`
+	OK      bool   `json:"ok"`
+	// Accepted 是受理的文件数（0 与 OK=true 同时出现表示「清单已过期」）。
+	Accepted int `json:"accepted,omitempty"`
+	// Rejected 是被跳过的条目（文件已删除/越界/超限），带原因是让用户知道
+	// 「少传了几个、为什么」。
+	Rejected []string `json:"rejected,omitempty"`
+	Error    string   `json:"error,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

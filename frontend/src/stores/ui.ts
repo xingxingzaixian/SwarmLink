@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 /** 全局功能面板。它们与「当前会话」无关，因此不占右栏，改用弹层。 */
-export type PanelKind = '' | 'settings' | 'debug' | 'transfers'
+export type PanelKind = '' | 'settings' | 'debug' | 'transfers' | 'share'
 
 /** 右栏的两种形态。 */
 export type SideMode = 'info' | 'transfer'

@@ -1,0 +1,26 @@
+/* ============================================================================
+   自托管字体（@fontsource，随应用打包）
+   ----------------------------------------------------------------------------
+   为什么不用 Google Fonts CDN：这是内网 P2P 工具，隔离网络 / 断网时 CDN 必然
+   失败，字体会静默回落到系统栈 —— 设计系统里「展示字体 + 等宽微标」的技术
+   性格就没了，而且回落是无声的，排查时没人会想到是网络问题。
+
+   只引 latin 子集：界面正文是中文，CJK 字形本来就由系统字体承担
+   （--font-display / --font-body 栈里排在后面的 PingFang SC / Microsoft YaHei
+   / 苹方），把 latin-ext、cyrillic、vietnamese 一起打进来只是白增体积。
+   ========================================================================= */
+
+/* 展示 / 标题 —— 品牌名、会话名、面板标题、选项卡 */
+@import '@fontsource/space-grotesk/latin-500.css';
+@import '@fontsource/space-grotesk/latin-600.css';
+@import '@fontsource/space-grotesk/latin-700.css';
+
+/* 正文 —— 消息、键值、按钮 */
+@import '@fontsource/plus-jakarta-sans/latin-400.css';
+@import '@fontsource/plus-jakarta-sans/latin-500.css';
+@import '@fontsource/plus-jakarta-sans/latin-600.css';
+@import '@fontsource/plus-jakarta-sans/latin-700.css';
+
+/* 等宽 —— 节点 ID、IP、时间戳、微型标签 */
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';

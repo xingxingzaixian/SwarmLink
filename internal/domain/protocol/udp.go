@@ -7,6 +7,7 @@ import (
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 )
 
 // UDP 报文的固定前缀长度：Magic(4) + Version(1) + Type(1)。
@@ -60,6 +61,9 @@ type AnnounceWire struct {
 	Timestamp   int64  `json:"timestamp"`
 	Epoch       uint64 `json:"epoch"`
 	Sig         string `json:"sig"`
+	// Shares 是共享摘要（FR-14）。不参与签名，见 peer.Announcement.Shares：
+	// 旧版本收到带该字段的报文会因为 encoding/json 忽略未知键而照常通过验签。
+	Shares []share.Summary `json:"shares,omitempty"`
 }
 
 // NewAnnounceWire 把领域通告转为线上结构。
@@ -75,6 +79,7 @@ func NewAnnounceWire(a peer.Announcement) AnnounceWire {
 		Timestamp:   a.Timestamp,
 		Epoch:       a.Epoch,
 		Sig:         base64.StdEncoding.EncodeToString(a.Sig),
+		Shares:      share.NormalizeSummaries(a.Shares),
 	}
 }
 
@@ -112,6 +117,9 @@ func (w AnnounceWire) Announcement() (peer.Announcement, error) {
 	a.Timestamp = w.Timestamp
 	a.Epoch = w.Epoch
 	a.Sig = sig
+	// 摘要归一化后再进领域：畸形摘要（空 id / 空名）在这里被丢掉，
+	// 而不是让它们一路传到 UI 才炸。
+	a.Shares = share.NormalizeSummaries(w.Shares)
 	return a, nil
 }
 
@@ -128,6 +136,10 @@ type PeerListEntry struct {
 	Subnet      string `json:"subnet"`
 	Caps        uint32 `json:"caps"`
 	ProtoVer    int    `json:"proto_ver"`
+	// Shares 是该条目的共享摘要，由【转述方】带出（可能不是本人写的）。
+	// 跨网段时共享就是靠这一条抵达另一侧：种子手里的目录里存着它学到的
+	// 摘要，拉取方据此知道「去哪儿问」。
+	Shares []share.Summary `json:"shares,omitempty"`
 }
 
 // PeerListReqWire 是目录拉取请求。

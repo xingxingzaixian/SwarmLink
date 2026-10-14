@@ -3,12 +3,14 @@ package sqlite
 import (
 	"crypto/ed25519"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 )
 
 // Peers 实现 ports.PeerDirectory。
@@ -23,7 +25,7 @@ var _ ports.PeerDirectory = (*Peers)(nil)
 func NewPeers(db *DB, clk ports.Clock) *Peers { return &Peers{db: db, clk: clk} }
 
 const peerColumns = `node_id, display_name, pub_key, last_addr, caps, proto_ver,
-                     first_seen, last_seen, subnet, state, source`
+                     first_seen, last_seen, subnet, state, source, shares`
 
 // Upsert 写入/更新节点条目。
 //
@@ -33,8 +35,8 @@ func (p *Peers) Upsert(in peer.Peer) error {
 	return p.db.Write(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
 INSERT INTO peers(node_id, display_name, pub_key, last_addr, caps, proto_ver,
-                  first_seen, last_seen, subnet, state, source)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                  first_seen, last_seen, subnet, state, source, shares)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(node_id) DO UPDATE SET
   display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE peers.display_name END,
   pub_key      = CASE WHEN excluded.pub_key      <> '' THEN excluded.pub_key      ELSE peers.pub_key      END,
@@ -49,10 +51,15 @@ ON CONFLICT(node_id) DO UPDATE SET
   -- 连接事件 / 目录交换）都是一次「被移除的节点复活」的风险。
   -- 解除只能走 SetSuppressed（见 ports.PeerDirectory）。
   state        = CASE WHEN peers.state = 'blocked' THEN peers.state ELSE excluded.state END,
-  source       = excluded.source`,
+  source       = excluded.source,
+  -- shares 【刻意不沿用】上面「空值不覆盖」的规则：摘要是对方周期性通告的
+  -- 全量状态，对方取消发布后正文就是空的。保留旧值会让取消掉的共享一直
+  -- 挂在别人列表里，直到 TTL 过期 —— 用户看到的是「点了提示共享不存在」。
+  shares       = excluded.shares`,
 			in.NodeID.String(), in.DisplayName, pubKeyString(in.PublicKey), in.LastAddr,
 			uint32(in.Caps), in.ProtoVer,
 			msOf(in.FirstSeen), msOf(in.LastSeen), in.Subnet, string(in.State), in.Source,
+			encodeShares(in.Shares),
 		)
 		return err
 	})
@@ -131,6 +138,23 @@ func (p *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 	})
 }
 
+// ResetLiveness 清零上次运行残留的在线状态（语义见 ports.PeerDirectory）。
+//
+// 单条 UPDATE 而不是先 List 再逐条写：启动清理必须是一次原子操作，
+// 中途失败也不该留下「清了一半」的目录。last_seen 保持原值（见端口契约）。
+func (p *Peers) ResetLiveness() (int, error) {
+	var affected int64
+	err := p.db.Write(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE peers SET state = 'discovered' WHERE state = 'online'`)
+		if err != nil {
+			return err
+		}
+		affected, _ = res.RowsAffected()
+		return nil
+	})
+	return int(affected), err
+}
+
 // SetSuppressed 设置/清除「本地已移除」标记：复用 state='blocked'（设计文档 §5.2）。
 //
 // 只更新已存在的行：删除的前提是「它出现在我的列表里」，没有行时什么都不做（幂等）。
@@ -182,9 +206,10 @@ func scanPeer(s rowScanner) (peer.Peer, error) {
 		subnet    sql.NullString
 		state     sql.NullString
 		source    sql.NullString
+		shares    sql.NullString
 	)
 	if err := s.Scan(&nodeID, &dispName, &pubKey, &lastAddr, &caps, &protoVer,
-		&firstSeen, &lastSeen, &subnet, &state, &source); err != nil {
+		&firstSeen, &lastSeen, &subnet, &state, &source, &shares); err != nil {
 		return out, err
 	}
 
@@ -203,7 +228,36 @@ func scanPeer(s rowScanner) (peer.Peer, error) {
 	out.Subnet = nullString(subnet)
 	out.State = peer.State(nullString(state))
 	out.Source = nullString(source)
+	out.Shares = decodeShares(nullString(shares))
 	return out, nil
+}
+
+// encodeShares 把共享摘要折成一行 JSON。
+//
+// 解析失败的一律当作空：摘要是可丢的展示数据，为了它让整条节点记录读不出来
+// （进而让该节点从列表里消失）是完全不成比例的代价。
+func encodeShares(in []share.Summary) string {
+	in = share.NormalizeSummaries(in)
+	if len(in) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeShares 还原共享摘要。
+func decodeShares(s string) []share.Summary {
+	if s == "" {
+		return nil
+	}
+	var out []share.Summary
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return share.NormalizeSummaries(out)
 }
 
 func pubKeyString(pub ed25519.PublicKey) string {

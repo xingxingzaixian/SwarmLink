@@ -64,6 +64,37 @@ export async function pickFolder(): Promise<PickOutcome> {
   }
 }
 
+/** 共享发布时允许选择的类型。 */
+export type ShareTargetKind = 'any' | 'file' | 'folder'
+
+/**
+ * 选择要共享（发布）的目录或单个文件。
+ *
+ * kind 由调用方决定：共享中心把「共享文件」「共享文件夹」做成两个按钮，
+ * 于是这里必须能各自限制 —— 让用户先点「共享文件」再选到一个目录，
+ * 只能在点完确认之后才报错，那是最没必要的一次往返。
+ * 'any' 保留给「一次问清楚」的场景（发布向导里的「选择…」）。
+ *
+ * 一律单选：一个共享只对应一个根，多选会让「这条共享是什么」失去答案。
+ */
+export async function pickShareTarget(kind: ShareTargetKind = 'any'): Promise<PickOutcome> {
+  const onlyFile = kind === 'file'
+  const onlyFolder = kind === 'folder'
+  try {
+    const res = await Dialogs.OpenFile({
+      Title: onlyFile ? '选择要共享的文件' : onlyFolder ? '选择要共享的文件夹' : '选择要共享的目录或文件',
+      CanChooseFiles: !onlyFolder,
+      CanChooseDirectories: !onlyFile,
+      AllowsMultipleSelection: false,
+      ButtonText: '共享'
+    })
+    const paths = (Array.isArray(res) ? res : [res]).filter((p): p is string => !!p)
+    return { picked: paths.length > 0, paths, available: true }
+  } catch {
+    return { picked: false, paths: [], available: false }
+  }
+}
+
 /**
  * 只选图片文件。
  *

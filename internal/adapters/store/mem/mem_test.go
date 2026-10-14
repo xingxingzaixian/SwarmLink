@@ -171,6 +171,49 @@ func TestPeersDirectory(t *testing.T) {
 	}
 }
 
+// 启动清理：只降级 online，保留 last_seen，不动 discovered/offline/blocked
+// （与 sqlite 实现必须一致，两者互为替身）。
+func TestPeersResetLivenessClearsOnlyOnline(t *testing.T) {
+	fc := clock.NewFake(time.Unix(4000, 0))
+	p := NewPeers(fc)
+
+	_ = p.Upsert(peer.Peer{NodeID: mkID(1), State: peer.StateOnline, LastSeen: time.Unix(3000, 0)})
+	_ = p.Upsert(peer.Peer{NodeID: mkID(2), State: peer.StateDiscovered, LastSeen: time.Unix(3000, 0)})
+	_ = p.Upsert(peer.Peer{NodeID: mkID(3), State: peer.StateOffline, LastSeen: time.Unix(3000, 0)})
+	_ = p.Upsert(peer.Peer{NodeID: mkID(4), State: peer.StateOnline, LastSeen: time.Unix(3000, 0)})
+	_ = p.SetSuppressed(mkID(4), true, time.Unix(3500, 0))
+
+	n, err := p.ResetLiveness()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("应只降级 1 条 online，得到 %d", n)
+	}
+	got, _ := p.Get(mkID(1))
+	if got.State != peer.StateDiscovered {
+		t.Fatalf("online 应降级为 discovered，得到 %q", got.State)
+	}
+	// last_seen 必须保留：TTL 兜底据此判断条目是否已过期。写成 now 会把失联伪装成刚见过。
+	if !got.LastSeen.Equal(time.Unix(3000, 0)) {
+		t.Fatalf("last_seen 必须保留，得到 %v", got.LastSeen)
+	}
+	if g, _ := p.Get(mkID(2)); g.State != peer.StateDiscovered {
+		t.Fatalf("discovered 不该被动，得到 %q", g.State)
+	}
+	if g, _ := p.Get(mkID(3)); g.State != peer.StateOffline {
+		t.Fatalf("offline 不该被动，得到 %q", g.State)
+	}
+	if g, _ := p.Get(mkID(4)); g.State != peer.StateBlocked {
+		t.Fatalf("blocked 是粘性状态，不该被动，得到 %q", g.State)
+	}
+
+	// 幂等：没有 online 了
+	if n2, _ := p.ResetLiveness(); n2 != 0 {
+		t.Fatalf("第二次应返回 0，得到 %d", n2)
+	}
+}
+
 // 与 sqlite 实现保持同一份语义：可打可解、不存在的行是空操作。
 // 两个实现的行为必须一致 —— 它们互作替身（R2 允许测试跨引适配器正是为此）。
 func TestSetSuppressedRoundTrip(t *testing.T) {
@@ -326,6 +369,58 @@ func TestGroupsRepo(t *testing.T) {
 	}
 	if len(g.List()) != 1 {
 		t.Fatal("list wrong")
+	}
+}
+
+// 票号与自签的往返 + State 派生缓存刷新。
+//
+// 与 sqlite 侧的 TestGroupMemberTokensRoundTrip 是镜像：两边必须同时保留
+// admit/kick/left 与 left_sig，并同样按票号刷新 State —— 少做一样，
+// 就会出现「mem 跑测试绿、sqlite 跑生产错」这类最难查的漂移。
+func TestGroupsRepoTokensAndDerivedState(t *testing.T) {
+	g := NewGroups()
+	owner, m2 := mkID(1), mkID(2)
+	grp := group.Group{
+		ID: "g1", Name: "群", OwnerID: owner, Epoch: 7, MintSeq: 13,
+		Members: []group.Member{
+			{NodeID: owner, Role: group.RoleOwner, AdmitSeq: 1},
+			// 13 > 9 ⇒ 在群（退出后被重新拉回）；State 故意留空，应由票号推出。
+			{NodeID: m2, Role: group.RoleMember, AdmitSeq: 13, LeftSeq: 9, LeftSig: []byte{9, 9}},
+		},
+	}
+	if err := g.Upsert(grp); err != nil {
+		t.Fatal(err)
+	}
+	back, _ := g.Get("g1")
+	if back.MintSeq != 13 {
+		t.Errorf("MintSeq 未往返：%d", back.MintSeq)
+	}
+	m, ok := back.Member(m2)
+	if !ok {
+		t.Fatal("成员记录丢失")
+	}
+	if m.AdmitSeq != 13 || m.LeftSeq != 9 || len(m.LeftSig) != 2 {
+		t.Errorf("票号未往返：%+v", m)
+	}
+	if !m.Active() {
+		t.Error("admit=13 > left=9 ⇒ 应是在群")
+	}
+	if m.State != group.MemberActive {
+		t.Errorf("State 派生缓存 = %q，期望 active", m.State)
+	}
+
+	// 撕到同一号 ⇒ 不在群，且缓存应变成 left。
+	grp.Members[1].AdmitSeq = 9
+	if err := g.Upsert(grp); err != nil {
+		t.Fatal(err)
+	}
+	back, _ = g.Get("g1")
+	m, _ = back.Member(m2)
+	if m.Active() {
+		t.Error("admit == left ⇒ 必须是不在群")
+	}
+	if m.State != group.MemberLeft {
+		t.Errorf("State 派生缓存 = %q，期望 left", m.State)
 	}
 }
 

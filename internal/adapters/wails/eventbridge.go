@@ -1,6 +1,7 @@
 package wails
 
 import (
+	"encoding/base64"
 	"sync"
 	"time"
 
@@ -37,6 +38,12 @@ const (
 	EventTransferState = "transfer:state"
 	EventNetError      = "net:error"
 	EventConfigChanged = "config:changed"
+	// EventShareUpdated 是【本机】共享清单变化（发布 / 取消 / 刷新索引）。
+	// 载荷：{ shareId: string, action: "published"|"unpublished"|"refreshed" }。
+	//
+	// 他人共享的变化不走这里：那是目录条目的变化，已经由 peer:updated 承担 ——
+	// 再发一次只会让界面在同一件事上刷新两遍。
+	EventShareUpdated = "share:updated"
 	// EventDebug 把原始总线事件整体送到前端「调试面板」。
 	//
 	// P2P 排障极难，这个面板的投入产出比极高（架构书 3.5）。
@@ -103,6 +110,9 @@ func (b *Bridge) Start() {
 			return
 		}
 		b.debug(eventbus.TopicPeerDiscovered, p)
+		// 刻意【不带 rttMs】：通告这条路径不知道延迟，而它每几秒就推一次；
+		// 若跟着带一个 0，就会把已知的真实延迟反复抹成「无数据」，
+		// 信号卡会在真值与测量中之间来回跳。
 		b.emitter.Emit(EventPeerUpdated, peerUpdate(pp.NodeID.String(), pp.DisplayName, string(pp.State), pp.LastAddr))
 	})
 
@@ -112,7 +122,12 @@ func (b *Bridge) Start() {
 			return
 		}
 		b.debug(eventbus.TopicPeerOnline, p)
-		b.emitter.Emit(EventPeerUpdated, peerUpdate(ev.NodeID, "", string(peer.StateOnline), ev.Addr))
+		update := peerUpdate(ev.NodeID, "", string(peer.StateOnline), ev.Addr)
+		// 握手成功这一刻就把 RTT 带上（PeerOnline 载荷里本来就有，之前被丢掉了），
+		// 前端不必等下一次 List() 才画得出连接质量。
+		// 刚建连时它是 0 —— 心跳还没跑完一轮，界面按「测量中」显示。
+		update["rttMs"] = int64(ev.RTT / time.Millisecond)
+		b.emitter.Emit(EventPeerUpdated, update)
 	})
 
 	b.on(eventbus.TopicPeerOffline, func(p any) {
@@ -128,6 +143,9 @@ func (b *Bridge) Start() {
 		}
 		update := peerUpdate(ev.NodeID, "", string(state), "")
 		update["reason"] = ev.Reason
+		// 会话没了 ⇒ 延迟也就没有数据了，必须显式清零。
+		// 否则信号卡会一直挂着上一个会话的旧数字，看起来像「还连着」。
+		update["rttMs"] = int64(0)
 		b.emitter.Emit(EventPeerUpdated, update)
 	})
 
@@ -159,6 +177,10 @@ func (b *Bridge) Start() {
 			"groupId": g.ID,
 			"name":    g.Name,
 			"epoch":   g.Epoch,
+			"state":   string(g.State.StateOrActive()),
+			// digest 让前端能判断「这条事件是否真的改变了名册」：
+			// 摘要一致就跳过重新拉取，避免重复投递引发一轮刷新风暴。
+			"digest": base64.StdEncoding.EncodeToString(g.RosterDigest()),
 		})
 	})
 
@@ -224,6 +246,18 @@ func (b *Bridge) Start() {
 			"jobId":  ev.JobID,
 			"status": ev.To,
 			"reason": ev.Reason,
+		})
+	})
+
+	b.on(eventbus.TopicShareUpdated, func(p any) {
+		ev, ok := p.(eventbus.ShareUpdated)
+		if !ok {
+			return
+		}
+		b.debug(eventbus.TopicShareUpdated, p)
+		b.emitter.Emit(EventShareUpdated, map[string]any{
+			"shareId": ev.ShareID,
+			"action":  ev.Action,
 		})
 	})
 

@@ -27,6 +27,11 @@ type ChatApp struct {
 	// BaseBackoff / MaxBackoff 控制 outbox 重发退避（1s → 2s → … → 5min）。
 	BaseBackoff time.Duration
 	MaxBackoff  time.Duration
+
+	// GroupAck 是群消息送达确认的委派出口：群里与单聊共用 TypeChatAck，
+	// 但群要「按成员」记账（一条 ACK 不等于全员送达）。由组合根接到
+	// GroupApp.HandleGroupAck。nil 时群消息退回旧语义（任一 ACK 即出队）。
+	GroupAck func(from identity.NodeID, msgID string) error
 }
 
 // NewChatApp 构造单聊应用。
@@ -305,13 +310,22 @@ func (a *ChatApp) sendAck(sess ports.Session, msgID string) error {
 }
 
 // HandleChatAck 处理送达确认。
-func (a *ChatApp) HandleChatAck(_ ports.Session, f protocol.Frame) error {
+//
+// 群消息与单聊共用 TypeChatAck，但送达语义不同：单聊是一对一（一条 ACK 即完成），
+// 群聊要按成员记账。因此先按 msg_id 查消息，若它属于群会话则委派给 GroupAck，
+// 只有当它不是群消息、或没有接入群应用时才走单聊的 Deliver。
+func (a *ChatApp) HandleChatAck(sess ports.Session, f protocol.Frame) error {
 	var ack protocol.ChatAck
 	if err := protocol.DecodeJSON(f.Payload, &ack); err != nil {
 		return err
 	}
 	if ack.MsgID == "" {
 		return nil
+	}
+	if a.GroupAck != nil {
+		if m, ok := a.store.Get(ack.MsgID); ok && !message.IsDirectConv(m.ConvID) {
+			return a.GroupAck(sess.PeerID(), ack.MsgID)
+		}
 	}
 	if err := a.store.Deliver(ack.MsgID); err != nil {
 		return err

@@ -16,6 +16,7 @@
 | [ADR-009](ADR-009-online-state-vs-connections.md) | 在线状态与传输连接解耦 | §3.7 | `test/scale` 常驻连接数 = 0 |
 | [ADR-010](ADR-010-full-directory-sync.md) | 全量节点目录同步，不做增量 | §4.5 | `test/scale` 目录 19/19 条 |
 | [ADR-011](ADR-011-cross-subnet-seeds.md) | 每网段多种子 + 单跳目录拉取 | §4.5.1 | `e2e.TestCrossSubnetConvergenceViaSeed` |
+| [ADR-012](ADR-012-group-membership-token-crdt.md) | 群成员「发票 / 撕票」：退出权归本人、准入权归群主 | §4.6（部分替代 ADR-003） | `group.TestMerge*` / `group.TestReAddAfterLeaveWins` / `e2e.TestOfflineMemberLearnsGroupOnRejoin` |
 
 ## 本仓库相对架构书的实现偏差
 

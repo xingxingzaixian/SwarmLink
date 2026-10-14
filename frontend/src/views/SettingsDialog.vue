@@ -5,6 +5,9 @@
  * 这三件事都与「当前会话」无关，所以不该占右栏 —— 右栏要留给
  * 「对方的资料」和「正在发的文件」。它们又都需要整屏空间，
  * 因此用一个带分页的弹层承载。
+ *
+ * 共享中心【不在这里】：它的形态（左右分栏 + 文件表格 + 一排动作）与这里的
+ * 单列表单不是一回事，硬塞进页签组会两边都别扭，因此独立成 ShareDialog。
  */
 import { computed } from 'vue'
 
@@ -12,20 +15,31 @@ import Modal from '../components/Modal.vue'
 import DebugPanel from './DebugPanel.vue'
 import SettingsView from './SettingsView.vue'
 import TransferView from './TransferView.vue'
-import type { PanelKind } from '../stores/ui'
 import { useUiStore } from '../stores/ui'
 
 const ui = useUiStore()
 
-const tabs: { key: Exclude<PanelKind, ''>; label: string }[] = [
+/** 本弹层承载的三页。 */
+type DialogTab = 'settings' | 'debug' | 'transfers'
+
+const tabs: { key: DialogTab; label: string }[] = [
   { key: 'settings', label: '设置' },
   { key: 'debug', label: '调试面板' },
   { key: 'transfers', label: '文件传输' }
 ]
 
-const active = computed(() => (ui.panel || 'settings') as Exclude<PanelKind, ''>)
+/**
+ * 当前页。
+ *
+ * panel 为 'share' 时本组件根本不会被渲染（App 渲染 ShareDialog），
+ * 但类型上仍要把这种情况收敛掉 —— 否则 META 会取到 undefined，
+ * 一旦将来有人误改渲染条件就是一片白屏。
+ */
+const active = computed<DialogTab>(() =>
+  ui.panel === 'debug' || ui.panel === 'transfers' ? ui.panel : 'settings'
+)
 
-const META: Record<string, { title: string; subtitle: string }> = {
+const META: Record<DialogTab, { title: string; subtitle: string }> = {
   settings: {
     title: '设置',
     subtitle: '端口与网卡相关项需重启应用生效'

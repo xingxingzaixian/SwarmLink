@@ -4,9 +4,35 @@ import { isMockMode } from '../api'
 import { pickFiles, pickFolder, pickImages } from '../api/dialog'
 import type { Conversation, FolderSummary } from '../api/types'
 import { useChatStore } from '../stores/chat'
+import { useGroupStore } from '../stores/group'
+import { usePeersStore } from '../stores/peers'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
 import { baseName } from '../utils/format'
+
+/**
+ * 群会话的传输目标：active 且在线的成员（不含自己）。
+ *
+ * 群文件传输是「发送端对每个在线成员各起一条点对点传输」——
+ * 离线成员由传输引擎自身的「等对方上线」机制负责（这里不建任务，
+ * 因为群成员可能长期离线，为 TA 立刻排队一批空任务没有意义）。
+ */
+export function groupFileTargets(conv: Conversation): string[] {
+  if (conv.kind !== 'group') return []
+  const g = useGroupStore().byId(conv.convId)
+  if (!g || g.state === 'dissolved') return []
+  const peers = usePeersStore()
+  const selfId = peers.self?.nodeId ?? ''
+  return g.members
+    // 判据用 active（后端按票号算好），不用 state 缓存：缓存没刷新时
+    // 会把已退出的人当成目标，白建一批永远传不完的任务。
+    .filter((m) => m.active && m.nodeId !== selfId)
+    .map((m) => m.nodeId)
+    .filter((id) => {
+      const p = peers.byId(id)
+      return !!p && (p.online || p.connected)
+    })
+}
 
 /** sendFilesWithMessages 的结果：成功数 + 逐个失败原因。 */
 export interface SendFilesResult {
@@ -35,6 +61,20 @@ export async function sendFolderWithMessage(
 ): Promise<SendFolderResult> {
   const chat = useChatStore()
   const transfers = useTransferStore()
+
+  // 群聊：一次发给所有在线成员，全批共享一个 batch_id（卡片只有一张，
+  // 进度按「文件夹里有几个文件」算，见 utils/batch.ts）。
+  if (conv.kind === 'group') {
+    const targets = groupFileTargets(conv)
+    if (!targets.length) throw new Error('群里当前没有在线成员，文件夹暂时发不出去')
+    const summary = await transfers.sendFolderTo(targets, path)
+    try {
+      await chat.sendFolder(conv, summary)
+    } catch (e: any) {
+      return { summary, cardError: `文件夹消息未显示（${String(e?.message ?? e)}）` }
+    }
+    return { summary, cardError: '' }
+  }
 
   const summary = await transfers.sendFolder(conv.peerId ?? '', path)
 
@@ -71,6 +111,37 @@ export async function sendFilesWithMessages(
 
   const errors: string[] = []
   let sent = 0
+
+  // 群聊：每个文件对每个在线成员各起一条 P2P 传输，聊天框只插【一条】卡片。
+  // 卡片上的 job_id 取第一个成员的传输（用于显示这张卡的状态）；
+  // 每个成员各自的进度在右栏传输列表里逐条可见。
+  if (conv.kind === 'group') {
+    const targets = groupFileTargets(conv)
+    if (!targets.length) {
+      return { sent: 0, errors: ['群里当前没有在线成员，文件暂时发不出去'] }
+    }
+    for (const path of paths) {
+      let firstJobId = ''
+      let ok = 0
+      for (const pid of targets) {
+        try {
+          const jobId = await transfers.sendFile(pid, path)
+          if (!firstJobId) firstJobId = jobId
+          ok++
+        } catch (e: any) {
+          errors.push(`${baseName(path)} → ${pid.slice(0, 8)}：${String(e?.message ?? e)}`)
+        }
+      }
+      if (ok === 0) continue
+      sent++
+      try {
+        await chat.sendFile(conv, firstJobId, baseName(path))
+      } catch (e: any) {
+        errors.push(`文件消息未显示: ${baseName(path)}（${String(e?.message ?? e)}）`)
+      }
+    }
+    return { sent, errors }
+  }
 
   for (const path of paths) {
     try {
@@ -111,7 +182,16 @@ export function useFileSend() {
     // 没有会话就【必须】说出来。这里曾经是静默 return：用户点回形针、
     // 选完文件，界面毫无反应，也没有任何提示 —— 看起来就像功能坏了。
     const conv = chat.activeConversation
-    if (!conv?.peerId) {
+    if (!conv) {
+      ui.notify('先打开一个会话，再发送文件')
+      return
+    }
+    if (conv.kind === 'group') {
+      if (!groupFileTargets(conv).length) {
+        ui.notify('群里当前没有在线成员，文件暂时发不出去')
+        return
+      }
+    } else if (!conv.peerId) {
       ui.notify('先打开与某个联系人的会话，再发送文件')
       return
     }
@@ -132,7 +212,8 @@ export function useFileSend() {
 
   /** 附件按钮：优先原生对话框；不可用时打开手动填路径的兜底输入。 */
   async function attach(): Promise<void> {
-    if (!chat.activePeerId) {
+    const conv = chat.activeConversation
+    if (!conv || (conv.kind !== 'group' && !conv.peerId)) {
       ui.notify('先打开与某个联系人的会话')
       return
     }
@@ -159,7 +240,16 @@ export function useFileSend() {
    */
   async function attachFolder(): Promise<void> {
     const conv = chat.activeConversation
-    if (!conv?.peerId) {
+    if (!conv) {
+      ui.notify('先打开一个会话，再发送文件夹')
+      return
+    }
+    if (conv.kind === 'group') {
+      if (!groupFileTargets(conv).length) {
+        ui.notify('群里当前没有在线成员，文件夹暂时发不出去')
+        return
+      }
+    } else if (!conv.peerId) {
       ui.notify('先打开与某个联系人的会话，再发送文件夹')
       return
     }

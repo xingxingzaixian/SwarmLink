@@ -9,7 +9,7 @@
  * 送达状态只对【自己发的】显示，且只显示异常/未完成态：
  * 每条都挂一个「已送达」标签是纯噪音（QQ 也不显示）。
  */
-import { computed, ref, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, watchEffect } from 'vue'
 
 import Avatar from './Avatar.vue'
 import Icon from './Icon.vue'
@@ -39,7 +39,7 @@ const props = withDefaults(
   { senderName: '', senderSeed: '', showSender: false, tail: true, first: true }
 )
 
-const emit = defineEmits<{ (e: 'zoom', m: Message): void }>()
+const emit = defineEmits<{ (e: 'zoom', m: Message): void; (e: 'quote', m: Message): void }>()
 
 const time = computed(() => bubbleTime(props.message.sentAt))
 
@@ -228,6 +228,106 @@ const stateText = computed(() => {
   }
 })
 
+/**
+ * 群消息的未送达提示。
+ *
+ * 只对【自己发的】且确实还有人没收到的消息显示。后端在全员送达后会清掉统计，
+ * 因此这里的 0 就是「都到了」，不必再区分 null / 0。
+ */
+const pendingText = computed(() => {
+  if (!props.out) return ''
+  const n = props.message.pendingCount ?? 0
+  if (n <= 0) return ''
+  const total = props.message.memberCount ?? 0
+  return total > 0 ? `${n}/${total} 人未送达` : `${n} 人未送达`
+})
+
+// ---------------------------------------------------------------- 右键菜单
+//
+// 只放「复制」与「引用」两项：这两件是看消息时最常做的，且都不改数据。
+// 转发 / 删除涉及跨会话与不可逆语义，等有明确需求再做。
+const menu = ref<{ x: number; y: number } | null>(null)
+
+function onContextMenu(e: MouseEvent): void {
+  e.preventDefault()
+  menu.value = { x: e.clientX, y: e.clientY }
+}
+
+function closeMenu(): void {
+  menu.value = null
+}
+
+function onDocClick(): void {
+  closeMenu()
+}
+
+watch(menu, (open) => {
+  if (open) document.addEventListener('click', onDocClick, true)
+  else document.removeEventListener('click', onDocClick, true)
+})
+
+onBeforeUnmount(() => document.removeEventListener('click', onDocClick, true))
+
+/** 可复制的文本：图片/文件/文件夹的 content 是 JSON 信封，透出去没人看得懂。 */
+function copyableText(): string {
+  if (isImage.value) return '[图片]'
+  if (isFile.value) return fileInfo.value?.fileName || '文件'
+  if (isFileFailed.value) return fileFailed.value?.fileName || '文件'
+  if (isFolder.value) return `${folder.value?.folderName ?? '文件夹'}/`
+  return props.message.content
+}
+
+async function copyMessage(): Promise<void> {
+  const text = copyableText()
+  closeMenu()
+  try {
+    await navigator.clipboard.writeText(text)
+    ui.notify('已复制')
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || '复制失败')
+  }
+}
+
+function quoteMessage(): void {
+  closeMenu()
+  emit('quote', props.message)
+}
+
+// ---------------------------------------------------------------- 文本渲染
+//
+// 两件事在渲染层完成，都不改消息模型：
+//   1. `@名字` 高亮（提及）；
+//   2. 以 `> ` 开头的行渲染成引用块（见 ChatView 的 quoteMessage）。
+interface TextSeg {
+  t: 'text' | 'mention'
+  v: string
+}
+interface TextLine {
+  quote: boolean
+  segs: TextSeg[]
+}
+
+function splitMentions(s: string): TextSeg[] {
+  const out: TextSeg[] = []
+  const re = /@([^\s@]+)/g
+  let last = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) out.push({ t: 'text', v: s.slice(last, m.index) })
+    out.push({ t: 'mention', v: m[0] })
+    last = m.index + m[0].length
+  }
+  if (last < s.length) out.push({ t: 'text', v: s.slice(last) })
+  return out
+}
+
+const textLines = computed<TextLine[]>(() =>
+  (props.message.content ?? '').split('\n').map((raw) => {
+    const quote = raw.startsWith('> ')
+    return { quote, segs: splitMentions(quote ? raw.slice(2) : raw) }
+  })
+)
+
 // 点击文件名打开所在文件夹。
 //
 // 原写法 `(await import('../api')).then((m) => m.getApi())` 是坏的：命名空间
@@ -268,10 +368,8 @@ async function openFileLocation() {
           'bubble-image': isImage,
           'bubble-file': isFile || isFileFailed || isFolder
         }"
+        @contextmenu="onContextMenu"
       >
-        <!-- 时间显示在内容上面 -->
-        <div class="bubble-time">{{ time }}</div>
-
         <template v-if="isImage">
           <img
             v-if="image && !broken"
@@ -289,7 +387,7 @@ async function openFileLocation() {
         </template>
         <template v-else-if="isFile">
           <div class="file-message">
-            <Icon name="file" :size="32" />
+            <div class="file__icon"><Icon name="file" :size="18" /></div>
             <div class="file-info">
               <div 
                 class="file-name" 
@@ -309,7 +407,7 @@ async function openFileLocation() {
         -->
         <template v-else-if="isFileFailed">
           <div class="file-message failed">
-            <Icon name="alert" :size="32" />
+            <div class="file__icon"><Icon name="alert" :size="18" /></div>
             <div class="file-info">
               <div class="file-name">{{ fileFailed?.fileName || '文件' }}</div>
               <div class="file-meta">{{ fileFailed?.reason || '发送失败' }}</div>
@@ -322,7 +420,7 @@ async function openFileLocation() {
         -->
         <template v-else-if="isFolder">
           <div class="file-message">
-            <Icon name="folder" :size="32" />
+            <div class="file__icon"><Icon name="folder" :size="18" /></div>
             <div class="file-info">
               <div class="file-name">{{ folder?.folderName }}/</div>
               <div class="file-meta">
@@ -352,17 +450,54 @@ async function openFileLocation() {
             </button>
           </div>
         </template>
-        <div v-else class="text">{{ message.content }}</div>
-        <div class="meta">
-          <Icon
-            v-if="stateIcon"
-            :name="stateIcon"
-            :size="12"
-            :class="['state', message.state]"
-          />
+        <!--
+          文本：按行渲染，`> ` 开头的行是引用块、`@名字` 高亮。
+          行尾补一个换行字符而不是 <br> —— 气泡是 pre-wrap，加 <br> 会变成空两行。
+        -->
+        <div v-else class="text">
+          <template v-for="(line, li) in textLines" :key="li">
+            <span :class="{ 'quote-line': line.quote }">
+              <template v-for="(s, si) in line.segs" :key="si">
+                <span v-if="s.t === 'mention'" class="mention">{{ s.v }}</span>
+                <template v-else>{{ s.v }}</template>
+              </template>
+              <template v-if="li < textLines.length - 1">{{ '\n' }}</template>
+            </span>
+          </template>
         </div>
       </div>
+
+      <!-- 时间与送达状态都放在气泡【外面】。放里面有两个问题：
+           正文会被挤出一条对不齐的窄行；而自己的气泡是深色渐变，
+           时间戳在那里只能靠调透明度凑对比度。 -->
+      <div class="meta">
+        <span class="stamp">{{ time }}</span>
+        <span v-if="pendingText" class="pending">{{ pendingText }}</span>
+        <Icon
+          v-if="stateIcon"
+          :name="stateIcon"
+          :size="12"
+          :class="['state', message.state]"
+        />
+      </div>
     </div>
+
+    <!-- 右键菜单：固定定位，因为它在气泡的 overflow 之外 -->
+    <Teleport to="body">
+      <div
+        v-if="menu"
+        class="ctx-menu"
+        :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
+        @click.stop
+      >
+        <button class="ctx-item" @click="copyMessage">
+          <Icon name="copy" :size="14" />复制
+        </button>
+        <button class="ctx-item" @click="quoteMessage">
+          <Icon name="back" :size="14" />引用
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -370,17 +505,19 @@ async function openFileLocation() {
 .row {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  margin-top: 2px;
+  gap: 11px;
+  /* 入场：新消息逐条上浮显形。已存在的行不会重播 ——
+     Vue 复用 DOM，只有新插入的那一行才走到这段动画。 */
+  animation: rise 0.55s var(--ease) both;
 }
 
-/* 连续消息之间收紧；一组结束后留出节奏感 */
+/* 连续消息之间收紧；一组结束后留出节奏感（20px 是设计系统定的消息间距） */
 .row:not(.tail) {
   margin-top: 2px;
 }
 
 .row.tail {
-  margin-top: 10px;
+  margin-top: 20px;
 }
 
 .row.out {
@@ -389,26 +526,27 @@ async function openFileLocation() {
 
 .ava {
   /* 用 visibility 而不是 v-if：占位必须保留，否则气泡会左右跳 */
-  margin-top: 1px;
+  margin-top: 2px;
 }
 
 .ava.hidden {
   visibility: hidden;
 }
 
-/* 自己的头像：显示"我"字 */
+/* 自己的头像：与 Avatar 的「我」保持同一套渐变（accent → warm） */
 .self-avatar {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin-top: 1px;
+  width: 38px;
+  height: 38px;
+  margin-top: 2px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #c93a82, #9c1f60);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
+  background: linear-gradient(135deg, var(--accent), var(--warm));
+  color: var(--accent-ink);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
@@ -416,7 +554,7 @@ async function openFileLocation() {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  max-width: min(568px, 68%);
+  max-width: min(568px, 74%);
 }
 
 .row.out .col {
@@ -424,70 +562,127 @@ async function openFileLocation() {
 }
 
 .who {
-  margin: 0 0 3px 2px;
-  font-size: var(--fs-xs);
-  color: var(--t3);
+  margin: 0 0 5px 2px;
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
 }
 
-/* 气泡顶部时间。
-   收到消息的气泡底是浅色纸面，所以这里必须用纸面墨色而不是 --t2：
-   深色主题下 --t2 是白色，白字落在白纸上会让时间戳彻底消失。 */
-.bubble-time {
-  font-size: 10px;
-  color: var(--paper-ink-soft);
-  margin-bottom: 4px;
-  user-select: none;
-}
-
-.row.out .bubble-time {
-  color: rgba(255, 255, 255, 0.9);
-}
-
-/* 收到消息 = 浅色「纸面」+ 深字。
-   这是深色玻璃界面上唯一能把「别人的话」和「背景」彻底分开的做法：
-   若也做成半透明白霜，长文本会跟着背景色漂移，越读越累。
-   白纸在饱和玻璃上也最好看 —— 它和背景的明度差最大。 */
+/* 对方的气泡：浮起的中性卡片（--bg-elevated + 一道亮边）。
+   这是深色界面上把「别人的话」与背景分开的标准做法，
+   而且是靠明度分层，不是靠透明度 —— 长文本不会跟着背景漂。 */
 .bubble {
   position: relative;
-  padding: 8px 12px 6px;
-  border-radius: var(--r-lg);
-  background: var(--paper);
-  color: var(--paper-ink);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55),
-    0 10px 24px -16px rgba(4, 0, 18, 0.85);
-  /* 靠头像那一角收小：这是气泡「指向说话人」的暗示，比画三角形稳 */
-  border-top-left-radius: var(--r-xs);
+  padding: 11px 15px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-lg);
+  line-height: 1.55;
   word-break: break-word;
   white-space: pre-wrap;
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider-strong);
+  color: var(--text-primary);
+  /* 靠头像那一角收小：气泡「指向说话人」的暗示，比画三角形稳 */
+  border-top-left-radius: 4px;
+  transition: transform var(--dur-2) var(--ease);
 }
 
-/* 发出消息 = 粉。
-   注意这里用的是【加深版】的 #EC4899：白字直接落在 #EC4899 上只有 3.5:1，
-   压深到 #C93A82 起才有 4.8:1 —— 色相没变，只是把明度让给了可读性。 */
+.bubble:hover {
+  transform: translateY(-1px);
+}
+
+/* 自己的气泡 = 信号绿渐变 + 深绿字。
+   整屏只有它与发送键用这条渐变 —— 强调色的预算全花在「我发的」上。 */
 .row.out .bubble {
-  border-top-left-radius: var(--r-lg);
-  border-top-right-radius: var(--r-xs);
-  background: linear-gradient(135deg, #c93a82, #9c1f60);
-  color: #fff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.26),
-    0 10px 24px -14px rgba(156, 31, 96, 0.95);
+  border-top-left-radius: var(--r-md);
+  border-top-right-radius: 4px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  border-color: transparent;
+  color: var(--accent-ink);
+  box-shadow: 0 8px 24px -10px oklch(86% 0.19 140 / 0.55);
 }
 
 .text {
-  font-size: var(--fs-md);
-  line-height: 1.58;
+  font-size: var(--fs-lg);
+  line-height: 1.55;
 }
 
-/* 图片气泡：padding 收紧到 4px —— 图片自带留白，
-   沿用文字的 padding 会让它看起来被「框」住了。 */
+/* 引用块：左侧一条竖线 + 稍微压暗。它必须一眼可辨，
+   否则「引用」和「复制了一段话」在界面上完全一样。 */
+.quote-line {
+  display: inline;
+  border-left: 2px solid currentColor;
+  margin-right: 2px;
+  padding-left: 8px;
+  opacity: 0.82;
+}
+
+/* @提及：强调色 + 极淡底。深色自己气泡上换成墨色，避免绿底叠绿字。 */
+.mention {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.row.out .mention {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 未送达计数：与时间戳同排，但要更显眼一点（它是「有东西没到」） */
+.pending {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--warn);
+}
+
+.row.out .pending {
+  color: color-mix(in oklch, var(--accent-ink) 82%, transparent);
+}
+
+/* 右键菜单：固定定位在光标处（Teleport 到 body 以逃出气泡的裁剪） */
+.ctx-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 132px;
+  padding: 5px;
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-md);
+  color: var(--text-primary);
+  text-align: left;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+
+.ctx-item:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+/* 图片气泡：无底色、无内边距、无边框。
+   图片自带留白，再套一层卡片就是「框中框」；白边还会吃掉缩略图的一圈。
+   注意 pre-wrap 要关掉：气泡里没有文字，留着它会把模板换行渲染成空隙。 */
 .bubble-image {
-  padding: 4px 4px 2px;
-  /* 文字气泡靠 pre-wrap 保留换行；图片气泡里没有文字，
-     留着它只会把模板换行渲染成额外空隙。 */
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
   white-space: normal;
 }
 
-/* 文件气泡：展示文件图标和文件名 */
+/* 文件 / 文件夹 / 失败卡：左 38px 图标块 + 名称与元信息 */
 .bubble-file {
   padding: 10px 14px;
 }
@@ -498,55 +693,73 @@ async function openFileLocation() {
   gap: 12px;
 }
 
+/* 图标块：对方用 accent-soft（暗示「这是一份内容」），
+   自己用深绿半透明 —— 绿渐变底上没有对比空间再放绿图标。 */
+.file__icon {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.row.out .file__icon {
+  background: color-mix(in oklch, var(--accent-ink) 18%, transparent);
+  color: var(--accent-ink);
+}
+
 .file-info {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .file-name {
-  font-size: var(--fs-md);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .file-name.clickable {
   text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
-  color: var(--brand);
 }
 
 .file-name.clickable:hover {
-  opacity: 0.8;
+  opacity: 0.82;
 }
 
-.row.out .file-name.clickable {
-  color: rgba(255, 255, 255, 0.9);
-}
-
-/* 同 .bubble-time：文件卡的副标题也落在纸面/粉面上，不吃全局 --t3 */
 .file-meta {
+  font-family: var(--font-mono);
   font-size: var(--fs-xs);
-  color: var(--paper-ink-soft);
+  color: var(--text-muted);
 }
 
+/* 绿底上不能用中性灰（会发脏），用强调色墨色压一档透明度 */
 .row.out .file-meta {
-  color: rgba(255, 255, 255, 0.76);
+  color: color-mix(in oklch, var(--accent-ink) 72%, transparent);
 }
 
-/* 传输失败：用警示色与「正在传输」的文件卡片区分开，
-   否则用户看到的只是又一个文件条目，不会意识到它没发出去。
-   --err-ink 在深浅两套主题下都是「当前底色上的可读色」。 */
+/* 传输失败：整块换警示色，与「正在传输」的文件卡彻底区分开 ——
+   否则用户看到的只是又一个文件条目，不会意识到它没发出去。 */
 .file-message.failed,
 .file-message.failed .file-name,
-.file-message.failed .file-meta,
-.row.out .file-message.failed .file-meta {
-  color: var(--err-ink);
+.file-message.failed .file-meta {
+  color: var(--danger);
+}
+
+.file-message.failed .file__icon {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 /* 批次里有失败：只把这一行染红，文件名仍是正常墨色 ——
    整张卡片变红会让「文件夹本身没问题、只是少了一个文件」看起来像整批崩了。 */
 .file-meta.folder-failed {
-  color: var(--err-ink);
+  color: var(--danger);
 }
 
 /* 「取消全部」：整批只有这一个出口，因此是卡片上的实体按钮，
@@ -556,16 +769,17 @@ async function openFileLocation() {
   align-self: flex-start;
   padding: 3px 10px;
   border-radius: 999px;
-  background: var(--err-soft);
-  color: var(--err-ink);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-family: var(--font-body);
   font-size: var(--fs-xs);
-  transition:
-    background var(--dur-1) var(--ease),
-    color var(--dur-1) var(--ease);
+  transition: background var(--dur-1) var(--ease);
 }
 
+/* hover 只加浓底色，不换字色：白字落在浅色主题的深红上是达标的，
+   但落在深色主题的亮红上会糊，换字色属于「两套主题里必然坏一套」。 */
 .folder-cancel:hover {
-  color: var(--t1);
+  background: color-mix(in oklch, var(--danger) 28%, transparent);
 }
 
 .shot {
@@ -574,7 +788,11 @@ async function openFileLocation() {
   border-radius: var(--r-md);
   cursor: zoom-in;
   object-fit: contain;
-  background: rgba(0, 0, 0, 0.08);
+  transition: transform var(--dur-2) var(--ease);
+}
+
+.shot:hover {
+  transform: scale(1.02);
 }
 
 .shot-broken {
@@ -583,35 +801,37 @@ async function openFileLocation() {
   justify-content: center;
   max-width: 220px;
   border-radius: var(--r-md);
-  background: rgba(0, 0, 0, 0.06);
-  color: var(--paper-ink-soft);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 
-/* 自己的图片消息落在粉面上，纸面墨色在上面会发暗，换回白 */
-.row.out .shot-broken {
-  color: rgba(255, 255, 255, 0.82);
-}
-
+/* 时间 + 送达状态：气泡下方一行等宽小字 */
 .meta {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  margin-top: 2px;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.stamp {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  user-select: none;
 }
 
 .state {
-  opacity: 0.8;
+  opacity: 0.9;
 }
 
 .state.pending {
   animation: breathe 1.4s var(--ease) infinite;
 }
 
-/* 失败标记落在白纸上，用深红；语义色 #FB7185 是给深色底用的，在纸上读不出 */
 .state.failed {
-  color: #e11d48;
+  color: var(--danger);
   opacity: 1;
 }
 

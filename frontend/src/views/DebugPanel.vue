@@ -139,7 +139,6 @@ watch(
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
-  padding: 12px 20px;
 }
 
 .spacer {
@@ -147,17 +146,15 @@ watch(
 }
 
 /* 用「1px 间隙露出底色」画格线：比给每格加边框少一半规则，
-   而且在半透明底上不会出现边框叠加变深的问题 */
+   而且不会出现相邻边框叠加变深的问题 */
 .stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 1px;
   flex: 0 0 auto;
-  margin: 0 20px 12px;
-  border-radius: var(--r-lg);
+  border-radius: var(--r-md);
   overflow: hidden;
-  background: var(--line);
-  box-shadow: inset 0 0 0 1px var(--edge);
+  background: var(--divider);
 }
 
 .stat {
@@ -165,7 +162,7 @@ watch(
   flex-direction: column;
   gap: 1px;
   padding: 10px 12px;
-  background: var(--surface-sunken);
+  background: var(--bg-sunken);
 }
 
 .stat.wide {
@@ -173,24 +170,29 @@ watch(
 }
 
 .k {
-  font-size: var(--fs-xs);
-  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 
 .v {
+  font-family: var(--font-display);
   font-size: var(--fs-xl);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .stat.wide .v {
+  font-family: var(--font-mono);
   font-size: var(--fs-sm);
   font-weight: 400;
 }
 
 .u {
   font-size: 10px;
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 .seeds {
@@ -214,9 +216,9 @@ watch(
   overflow-y: auto;
   margin: 0 20px 12px;
   padding: 8px 10px;
-  border-radius: var(--r-md);
-  background: var(--surface-sunken);
-  box-shadow: inset 0 0 0 1px var(--edge);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  border: 1px solid var(--divider);
 }
 
 .srow {
@@ -225,13 +227,12 @@ watch(
   justify-content: space-between;
   gap: 12px;
   font-size: var(--fs-xs);
-  color: var(--t2);
+  color: var(--text-secondary);
 }
 
 .stream {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 6px 20px 18px;
 }
 
 .event {
@@ -244,11 +245,11 @@ watch(
 
 .t {
   flex: 0 0 auto;
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 .topic {
-  color: var(--t2);
+  color: var(--text-secondary);
   word-break: break-all;
 }
 </style>

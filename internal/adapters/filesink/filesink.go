@@ -14,7 +14,7 @@ import (
 
 // batchRoot 是一个批次分配到的落盘根目录。
 type batchRoot struct {
-	// dir 是绝对路径（可能因重名被改写成「照片 (1)」）。
+	// dir 是绝对路径（同名目录已存在时就是那个已存在的目录）。
 	dir string
 	// name 是发送端给出的首段名（未改名），只用于校验批次内首段是否一致；
 	// 重启认领回来的根没有它（见 AdoptRoot），首次使用时会补上。
@@ -26,12 +26,17 @@ type Sink struct {
 	dir string
 
 	mu sync.Mutex
-	// reserved 记录已分配的最终路径，避免同一批并发任务抢到同一个名字。
-	reserved map[string]bool
-	// roots 记录每个批次已分配的根目录（batchID → 根目录）。
+	// reserved 记录【此刻正有任务在写】的最终路径。
 	//
-	// 必须按 batchID 而不是文件夹名：两个对端各发一个「照片」，它们的根
-	// 必须是两个目录，否则两批文件会混进同一个文件夹。
+	// 语义是「在写」而不是「用过」：Commit/Abort 会把它清掉（见 release）。
+	// 用处有二：一是同一批的并发任务不抢同一个名字；二是「同名文件就地覆盖」
+	// 遇到并发的另一个写者时退到唯一名，避免两份内容互相覆盖。
+	reserved map[string]bool
+	// roots 记录每个批次分配到的根目录（batchID → 根目录）。
+	//
+	// 必须按 batchID 而不是文件夹名：两个批次各自只分配一次根，中途到达的
+	// 文件才不会各算各的。文件夹名相同的两个批次会【复用同一个目录】（见
+	// rootLocked）—— 那是刻意的：同名目录就是同一个目录。
 	roots map[string]batchRoot
 }
 
@@ -140,11 +145,46 @@ func (s *Sink) allocLocked(req ports.SinkRequest, segs []string) (sinkAlloc, err
 		}
 		return sinkAlloc{parent: parent, final: final}, nil
 	}
-	final, err := s.uniqueLocked(parent, last)
+	final, err := s.overwriteLocked(parent, last)
 	if err != nil {
 		return sinkAlloc{}, err
 	}
 	return sinkAlloc{parent: parent, final: final}, nil
+}
+
+// overwriteLocked 分配批次内文件的最终路径：同名同路径就地覆盖。
+//
+// 同名同路径意味着「同一份文件的再次到达」—— 重复下载、对方把同一个文件夹
+// 再发一次、上一次传失败后的重试。加「 (1)」后缀会让同一份内容在磁盘上越堆
+// 越多，且没有任何手段把它们合并回去（用户只能自己比对删除）。
+//
+// 唯一的例外是「这条路径此刻正有另一个任务在写」（reserved）：那是并发到达的
+// 两条任务，让它们各写各的（第二条退到唯一名）比两份内容互相覆盖更安全。
+// 占位在 Commit/Abort 时释放，因此「先后到达」的重复下载仍然覆盖原文件。
+func (s *Sink) overwriteLocked(parent, name string) (string, error) {
+	cand, err := fsutil.SecureJoin(parent, name)
+	if err != nil {
+		return "", err
+	}
+	if s.reserved[cand] {
+		return s.uniqueLocked(parent, name)
+	}
+	s.reserved[cand] = true
+	return cand, nil
+}
+
+// release 释放最终路径的占位（只在占用它的那次写入结束时调用）。
+//
+// 必须释放：占位的语义是「此刻有任务在写这条路径」，不是「这条路径曾被用过」。
+// 不释放的话，同一进程内的第二次下载会看到自己上一次留下的占位，于是又退回
+// 「c (1).txt」—— 「覆盖」就只在重启之后才成立，这种自相矛盾最难排查。
+func (s *Sink) release(final string) {
+	if final == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.reserved, final)
+	s.mu.Unlock()
 }
 
 // AdoptRoot 认领已分配过的批次根目录（重启恢复用）。
@@ -179,8 +219,14 @@ func (s *Sink) AdoptRoot(batchID, absPath string) {
 
 // rootLocked 取得（必要时分配）批次的根目录；需要持有 s.mu。
 //
-// 分配走的是与单文件相同的去重逻辑，因此「照片」已存在时整批退到
-// 「照片 (1)」—— 两份内容永不混合。
+// 同名目录【已存在就复用它】，而不是退到「照片 (1)」：
+//
+//	重复下载同一个共享、把同一个文件夹再发一次、上一次传失败后的重试 ——
+//	这些场景里用户要的都是「这份内容就在这个目录里」，不是磁盘上堆出
+//	照片 / 照片 (1) / 照片 (2)：那样既看不出哪份是新的，也没有任何合并手段。
+//
+// 代价是「同名同路径的文件会被覆盖」，而这正是同名同路径应有的语义
+// （见 overwriteLocked）。
 func (s *Sink) rootLocked(batchID, rootName string) (string, error) {
 	if got, ok := s.roots[batchID]; ok {
 		// 认领回来的根没记首段名（重启后第一次见到该批次）：以本次补上。
@@ -197,7 +243,7 @@ func (s *Sink) rootLocked(batchID, rootName string) (string, error) {
 		}
 		return got.dir, nil
 	}
-	root, err := s.uniqueLocked(s.dir, rootName)
+	root, err := s.mergeOrUniqueDirLocked(s.dir, rootName)
 	if err != nil {
 		return "", err
 	}
@@ -208,6 +254,32 @@ func (s *Sink) rootLocked(batchID, rootName string) (string, error) {
 	}
 	s.roots[batchID] = batchRoot{dir: root, name: rootName}
 	return root, nil
+}
+
+// mergeOrUniqueDirLocked 分配一个「可复用」的目录路径：同名目录已存在就用它。
+//
+// 只对目录如此。同名【文件】挡在路上时无法合并（更不能把它删掉换上目录），
+// 于是退到唯一名（照片 (1)），让这一批至少有地方可落。
+func (s *Sink) mergeOrUniqueDirLocked(baseDir, name string) (string, error) {
+	cand, err := fsutil.SecureJoin(baseDir, name)
+	if err != nil {
+		return "", err
+	}
+	st, statErr := os.Stat(cand)
+	switch {
+	case statErr == nil && st.IsDir():
+		s.reserved[cand] = true
+		return cand, nil
+	case statErr == nil:
+		return s.uniqueLocked(baseDir, name)
+	case os.IsNotExist(statErr):
+		// 还不存在：就用这个名字（调用方随后的 EnsureDir 会建出来），
+		// 并占住它，免得同名的单文件传输把这条路径当成一个可用的文件名。
+		s.reserved[cand] = true
+		return cand, nil
+	default:
+		return "", fmt.Errorf("filesink: stat %q: %w", cand, statErr)
+	}
 }
 
 // Dir 返回接收目录。
@@ -243,7 +315,7 @@ func (s *Sink) Create(jobID, rawName string) (ports.SinkHandle, error) {
 	return ports.SinkHandle{JobID: jobID, TempPath: tmp, FinalPath: final}, nil
 }
 
-// Commit 原子替换为最终文件。
+// Commit 原子替换为最终文件（同名文件在这次替换里被覆盖）。
 func (s *Sink) Commit(h ports.SinkHandle) (string, error) {
 	if h.TempPath == "" || h.FinalPath == "" {
 		return "", fmt.Errorf("filesink: invalid sink handle")
@@ -251,13 +323,16 @@ func (s *Sink) Commit(h ports.SinkHandle) (string, error) {
 	if err := fsutil.Replace(h.TempPath, h.FinalPath); err != nil {
 		return "", err
 	}
+	s.release(h.FinalPath)
 	return h.FinalPath, nil
 }
 
 // Abort 删除临时文件（不存在时不报错）。
 func (s *Sink) Abort(h ports.SinkHandle) error {
-	if h.TempPath == "" {
-		return nil
+	// 只有真正建过临时文件的句柄才占着最终路径。目录条目没有临时文件，
+	// 它的 final 就是那个目录本身 —— 释放它会把批次根目录的占位一起撤掉。
+	if h.TempPath != "" {
+		defer s.release(h.FinalPath)
 	}
 	if err := os.Remove(h.TempPath); err != nil && !os.IsNotExist(err) {
 		return err

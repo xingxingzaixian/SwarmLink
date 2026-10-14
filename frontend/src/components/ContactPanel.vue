@@ -181,7 +181,7 @@ function toggleMenu(): void {
   menuOpen.value = !menuOpen.value
 }
 
-function pick(kind: 'settings' | 'debug' | 'transfers'): void {
+function pick(kind: 'settings' | 'debug' | 'transfers' | 'share'): void {
   menuOpen.value = false
   ui.openPanel(kind)
 }
@@ -200,14 +200,42 @@ watch(menuOpen, (open) => {
 onBeforeUnmount(() => document.removeEventListener('click', onDocClick, true))
 
 const self = computed(() => peers.self)
+
+/**
+ * 状态条上的节点数：用 reachable（正在广播或已连接）而不是在线数。
+ *
+ * 与列表的「在线」分组同一口径 —— 两处用不同判据时，用户会看到
+ * 「右上写着 3 NODES 但列表里只有 1 个在线」，那种不一致最难解释。
+ */
+const reachableCount = computed(() => peers.peers.filter(reachable).length)
 </script>
 
 <template>
   <aside class="rail">
+    <!-- 品牌区：Logo 的脉冲环是「本机是一个活跃节点」的唯一视觉暗示。
+         整个界面只有这一处脉冲环（信号卡的律动是另一码事）。 -->
+    <div class="brand">
+      <div class="brand__logo">S</div>
+      <div>
+        <div class="brand__name">SwarmLink</div>
+        <div class="brand__sub micro">P2P Mesh Net</div>
+      </div>
+    </div>
+
+    <!-- 网络状态条：第一眼说明「这是个网络工具」。
+         文案随真实状态走 —— 一个节点都没有时还说 LIVE 就是撒谎。 -->
+    <div class="netstat">
+      <span class="netstat__left">
+        <span class="dot dot--static" :class="{ online: reachableCount > 0 }" />
+        {{ reachableCount > 0 ? 'NETWORK LIVE' : 'NETWORK IDLE' }}
+      </span>
+      <span class="netstat__right">{{ reachableCount }} NODES</span>
+    </div>
+
     <header class="rail-head">
       <label class="search">
         <Icon name="search" :size="14" />
-        <input v-model="query" type="text" placeholder="搜索好友、群聊或地址" spellcheck="false" />
+        <input v-model="query" type="text" placeholder="搜索会话 / 节点…" spellcheck="false" />
         <button
           v-if="query"
           class="icon-btn clear"
@@ -370,7 +398,7 @@ const self = computed(() => peers.self)
       <button
         class="icon-btn"
         :class="{ on: menuOpen }"
-        title="设置 / 调试 / 传输"
+        title="设置 / 共享 / 调试 / 传输"
         aria-label="打开功能菜单"
         @click="toggleMenu"
       >
@@ -381,6 +409,9 @@ const self = computed(() => peers.self)
     <div v-if="menuOpen" class="self-menu">
       <button class="menu-item" @click="pick('settings')">
         <Icon name="sliders" :size="15" />设置
+      </button>
+      <button class="menu-item" @click="pick('share')">
+        <Icon name="share" :size="15" />共享中心
       </button>
       <button class="menu-item" @click="pick('debug')">
         <Icon name="activity" :size="15" />调试面板
@@ -457,60 +488,60 @@ const self = computed(() => peers.self)
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--glass-rail);
-  backdrop-filter: blur(var(--blur)) saturate(110%);
-  -webkit-backdrop-filter: blur(var(--blur)) saturate(110%);
-  /* 外圈大而散的投影 + 顶边 1px 高光：前者让面板「离开」背景，
-     后者模拟玻璃厚度上的折射。缺任何一个都会变成「没画完的界面」 */
-  box-shadow: var(--shadow-glass), inset 0 1px 0 var(--edge);
+  background: var(--bg-panel);
+  border-right: 1px solid var(--divider);
 }
 
 /* ---------------------------------------------------------------- 顶部 */
 
 .rail-head {
   flex: 0 0 auto;
-  padding: 12px 12px 8px;
+  padding: 4px 16px 8px;
 }
 
 .search {
   display: flex;
   align-items: center;
-  gap: 7px;
-  height: 32px;
-  padding: 0 8px 0 10px;
-  border-radius: var(--r-md);
-  background: var(--surface-sunken);
-  box-shadow: inset 0 0 0 1px var(--line);
-  color: var(--t3);
-  transition: background var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider);
+  color: var(--text-muted);
+  transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease),
+    color var(--dur-2) var(--ease);
 }
 
 .search:focus-within {
-  background: var(--surface-strong);
-  color: var(--cyan);
-  box-shadow: inset 0 0 0 1px var(--line), 0 0 0 3px rgba(6, 182, 212, 0.32);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  color: var(--text-secondary);
 }
 
 .search input {
   flex: 1 1 auto;
-  height: 100%;
+  height: 34px;
   padding: 0;
   border: 0;
   background: none;
-  font-size: var(--fs-sm);
-  color: var(--t1);
+  font-size: var(--fs-md);
+  color: var(--text-primary);
 }
 
+/* 输入框在容器里是「裸」的：边框与光晕都由 .search 承担，
+   否则会出现双层边框 */
 .search input:hover,
 .search input:focus {
   background: none;
+  border-color: transparent;
   box-shadow: none;
 }
 
 .clear {
   width: 20px;
   height: 20px;
-  color: var(--t3);
+  border: 0;
+  color: var(--text-muted);
 }
 
 /* ---------------------------------------------------------------- 列表 */
@@ -518,17 +549,19 @@ const self = computed(() => peers.self)
 .rail-body {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0 8px 10px;
+  padding: 6px 10px;
 }
 
 .icon-btn.mini {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-xs);
 }
 
+/* 离线联系人：头像去色 + 整行降透明度。只降一点点 ——
+   降太多会让「离线」看起来像「已删除」。 */
 .list-row.offline :deep(.avatar) {
-  filter: grayscale(0.55);
-  opacity: 0.72;
+  filter: grayscale(0.6);
 }
 
 .row-meta {
@@ -540,30 +573,32 @@ const self = computed(() => peers.self)
 }
 
 .row-time {
+  font-family: var(--font-mono);
   font-size: 10.5px;
-  color: var(--t3);
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .hint {
   padding: 4px 12px 6px;
   font-size: var(--fs-sm);
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 /* ---------------------------------------------------------------- 本人 */
 
+/* 本机身份做成一张凹面小卡（原型 .me）而不是整条 chrome 栏：
+   它和上面的联系人不是同一类东西，视觉上分开才不会看成一伙。 */
 .self-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: var(--head-h);
-  padding: 0 12px 0 14px;
-  background: var(--glass-chrome);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 0 1px 0 var(--edge);
+  gap: 11px;
+  margin: 10px 14px;
+  padding: 11px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  border: 1px solid var(--divider);
 }
 
 .self-main {
@@ -572,25 +607,25 @@ const self = computed(() => peers.self)
 }
 
 .self-name {
+  font-family: var(--font-display);
   font-size: var(--fs-md);
   font-weight: 600;
 }
 
+/* 从触发它的那个按钮「长出来」，因此原点在左下角 */
 .self-menu {
   position: absolute;
-  left: 12px;
-  bottom: calc(var(--head-h) + 8px);
+  left: 14px;
+  bottom: 78px;
   z-index: 30;
-  min-width: 156px;
+  min-width: 168px;
   padding: 6px;
-  border-radius: var(--r-lg);
-  background: var(--glass-float);
-  backdrop-filter: blur(var(--blur-lg)) saturate(140%);
-  -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(140%);
-  box-shadow: var(--shadow-pop);
-  /* 从触发它的那个按钮「长出来」，因此原点在左下角 */
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider-strong);
+  box-shadow: var(--shadow-lg);
   transform-origin: bottom left;
-  animation: sl-pop-up var(--dur-2) var(--ease) both;
+  animation: sl-pop var(--dur-2) var(--ease) both;
 }
 
 .menu-item {
@@ -600,17 +635,18 @@ const self = computed(() => peers.self)
   width: 100%;
   height: 32px;
   padding: 0 10px;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-xs);
   font-size: var(--fs-md);
-  color: var(--t1);
-  transition: background var(--dur-1) var(--ease);
+  color: var(--text-primary);
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
 
 .menu-item:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
+  color: var(--accent);
 }
 
-/* ---------------------------------------------------------------- 建群 */
+/* ---------------------------------------------------------------- 建群 / 移除 */
 
 .form {
   display: flex;
@@ -624,7 +660,7 @@ const self = computed(() => peers.self)
   flex-direction: column;
   gap: 7px;
   font-size: var(--fs-sm);
-  color: var(--t2);
+  color: var(--text-secondary);
 }
 
 .picks {
@@ -642,26 +678,26 @@ const self = computed(() => peers.self)
   padding: 6px 8px;
   border-radius: var(--r-sm);
   font-size: var(--fs-md);
-  color: var(--t1);
+  color: var(--text-primary);
   cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
 }
 
 .pick:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 
 .pick input {
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
-  accent-color: var(--brand);
 }
 
 .err {
   padding: 8px 10px;
   border-radius: var(--r-sm);
-  background: var(--err-soft);
-  color: var(--err-ink);
+  background: var(--danger-soft);
+  color: var(--danger);
   font-size: var(--fs-sm);
 }
 

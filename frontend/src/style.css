@@ -1,220 +1,141 @@
 /* ============================================================================
-   SwarmLink 设计系统 —— Glassmorphism（深色饱和渐变版）
+   SwarmLink 设计系统 —— 信号 / 连接（视觉冲击版）
    ----------------------------------------------------------------------------
-   三栏布局不变：[联系人] │ [聊天] │ [资料 / 传输]
+   落地目标见 swarmlink-design-system.md，原型见 swarmlink-redesign.html。
 
-   配色来源（用户规格）：
-     渐变1  #7C3AED → #EC4899   紫 → 粉（梦幻）
-     渐变2  #2563EB → #06B6D4   蓝 → 青（科技感）
-     玻璃层 rgba(255,255,255,0.15~0.25) + 模糊
-     边框   rgba(255,255,255,0.2~0.3)
-     强调色 #EC4899 / #06B6D4
+   与上一版（Glassmorphism 深紫粉渐变）的关系是【替换】而不是调整：
+   毛玻璃、粉/青双强调色、颗粒与氛围层全部去掉，改为
+     - 单一强调色：电信号绿（accent），只出现在自己的气泡 / 发送键 / 激活态 /
+       在线点 / 信号卡上，视觉占比 ≤ 10%（60-30-10）；
+     - 明度分层：base → panel → elevated → hover → sunken 五档，
+       不再用「白色半透明 + 模糊」撑层次；
+     - 中栏网格点阵 + 顶部 mesh 光晕替代氛围层与颗粒；
+     - 展示字体 / 等宽微标承担「开发者向」的气质（字体自托管，见 fonts.css）。
 
-   ⚠ 一处必须偏离规格的地方（不是口味问题，是可读性问题）：
+   为什么 OKLCH 而不是 hex：明暗两套主题要平行派生，同一色相在浅底与深底
+   只改 L 与 C，色相不漂。上一版用 hex 时浅色主题的强调色是另外挑的粉，
+   两套主题的「品牌色」其实是两个颜色 —— 这里不会再发生。
 
-     「0.15~0.25 白 + 白字」在这两组渐变上直接不可用。按 WCAG 相对亮度公式，
-     白字落在「0.25 白 + #EC4899」上对比度约 3.5:1，落在 #06B6D4 上约 2.4:1，
-     而正文要求 4.5:1 —— 会变成「看起来很仙但读不下去」。
-
-     解法是【深色底 + 白霜】两层：
-       background: linear-gradient(白霜 0.16~0.26), rgba(18,10,44,0.44~0.52);
-     白霜与边框的数值仍在你给的区间内，观感也是白霜玻璃，
-     但底色被压暗后白字才立得住（实测正文 6.7:1、次要 4.8:1、弱化 4.2:1）。
-
-   三层结构：
-     L0 氛围  两组渐变 + 深色薄纱 + 颗粒（静态）
-     L1 玻璃  三栏面板，深色底 + 白霜 + 高光边
-     L2 内容  气泡 / 输入框 / 卡片
+   层级约定（改组件前先看这三行）：
+     L0 背景  body 的 mesh 光晕 + 中栏网格点阵
+     L1 面板  --bg-panel（左右栏）/ --bg-base（中栏）
+     L2 内容  气泡、输入框、卡片：--bg-elevated / --bg-sunken
    ========================================================================= */
 
 :root {
-  /* --- L0 背景 ---------------------------------------------------------------
-     粉与青【放在对角】，中间留给紫/蓝：
-     中栏文字最密，深色区才是白字达标的区域，构图要服务于对比度。 */
-  --g1-purple: #7c3aed;
-  --g1-pink: #ec4899;
-  --g2-blue: #2563eb;
-  --g2-cyan: #06b6d4;
-  --g-ink: #16307f;
-  --bg-ink: #0f0723; /* 兜底深底，也是窗口底色 */
+  /* ---- 字体 ---------------------------------------------------------------
+     三档分工固定：display 管标题与品牌，body 管一切正文，mono 管「机器说的话」
+     （节点 ID、IP、时间戳、微型标签）。栈里保留 CJK 字体：界面正文是中文，
+     latin 子集里没有字形，最终一定回落到它们。 */
+  --font-display: 'Space Grotesk', system-ui, 'PingFang SC', 'HarmonyOS Sans SC',
+    'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-body: 'Plus Jakarta Sans', system-ui, 'PingFang SC', 'HarmonyOS Sans SC',
+    'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
 
-  /* --- L1 玻璃（深色底 + 白霜两层） ------------------------------------------
-     深色底的 alpha 是这套观感的命门：
-       太低（<0.5）面板和背景亮度拉不开，看着就是「渐变上浮了几个框」；
-       太高（>0.85）色相彻底被吃掉，白做玻璃。
-     0.6 附近：面板明显比背景暗一档、色偏仍然看得见。 */
-  --glass-rail: linear-gradient(158deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.07) 62%),
-    rgba(12, 6, 32, 0.6);
-  --glass-chat: linear-gradient(158deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05) 62%),
-    rgba(12, 6, 32, 0.55);
-  --glass-side: linear-gradient(158deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.07) 62%),
-    rgba(12, 6, 32, 0.6);
-  --glass-chrome: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08)),
-    rgba(12, 6, 32, 0.5);
-  --glass-float: linear-gradient(158deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.1) 58%),
-    rgba(12, 6, 32, 0.86);
+  /* ---- 表面（五档明度分层，深色为默认） ---------------------------------- */
+  --bg-base: oklch(15% 0.018 255);
+  --bg-panel: oklch(19% 0.02 255);
+  --bg-elevated: oklch(24% 0.022 255);
+  --bg-hover: oklch(28% 0.022 255);
+  --bg-sunken: oklch(12% 0.015 255);
 
-  /* --- L2 内容层 -------------------------------------------------------------
-     paper  = 浅色「纸面」：留给需要长时精读的内容（收到的消息）
-     surface* = 深色凹槽：输入框、标签、列表卡片这类短文本 */
-  --paper: rgba(255, 255, 255, 0.93);
-  --paper-ink: #180f33;
-  /* 纸面上的次要文字（时间戳、文件元信息）。
-     这一档【不能】用 --t2/--t3：那两个 token 是「当前主题背景」上的色，
-     深色主题里是白色 —— 白字压在白纸上等于消失。
-     纸面在两套主题下都是白的，所以它的墨色也必须主题无关。 */
-  --paper-ink-soft: rgba(24, 15, 51, 0.62);
-  --surface: rgba(255, 255, 255, 0.1);
-  --surface-strong: rgba(255, 255, 255, 0.17);
-  --surface-sunken: rgba(255, 255, 255, 0.08);
+  /* ---- 文字（三档，够用就不再细分） -------------------------------------- */
+  --text-primary: oklch(96% 0.01 255);
+  --text-secondary: oklch(74% 0.015 255);
+  --text-muted: oklch(60% 0.015 255);
 
-  /* --- 交互态：白色叠白（深色底上唯一不会发脏的做法） ----------------------- */
-  --hover: rgba(255, 255, 255, 0.12);
-  --press: rgba(255, 255, 255, 0.2);
-  --selected: rgba(255, 255, 255, 0.18);
+  /* ---- 强调：电信号绿。整套界面只有这一个强调色 -------------------------- */
+  --accent: oklch(86% 0.19 140);
+  --accent-strong: oklch(78% 0.2 140);
+  --accent-soft: oklch(86% 0.19 140 / 0.14);
+  --accent-ink: oklch(20% 0.05 140);
+  --accent-ring: oklch(86% 0.19 140 / 0.5);
 
-  /* --- 线 / 边：规格给 0.2~0.3 ---------------------------------------------- */
-  --edge: rgba(255, 255, 255, 0.26);
-  --ring: rgba(14, 7, 34, 0.85);
-  --line: rgba(255, 255, 255, 0.14);
-  --line-soft: rgba(255, 255, 255, 0.08);
-  --line-strong: rgba(255, 255, 255, 0.24);
+  /* ---- 语义色 -------------------------------------------------------------
+     设计系统只点名了 danger，但界面里还有三种真实状态必须区分开：
+     传输等待中（warn）、传输失败（danger）、其余「好」的状态一律用 accent。
+     与其让组件各写各的橙色，不如在这里定死。 */
+  --warm: oklch(80% 0.15 60);
+  --warn: oklch(80% 0.15 60);
+  --warn-soft: oklch(80% 0.15 60 / 0.15);
+  --danger: oklch(66% 0.2 25);
+  --danger-soft: oklch(66% 0.2 25 / 0.15);
 
-  /* --- 模糊 ---------------------------------------------------------------- */
-  --blur: 34px;
-  --blur-lg: 48px;
+  /* ---- 线 ------------------------------------------------------------------
+     界面边界靠明度分层，线只做最后一档补充，因此都很淡。 */
+  --divider: oklch(100% 0 0 / 0.09);
+  --divider-strong: oklch(100% 0 0 / 0.17);
+  --grid: oklch(100% 0 0 / 0.022);
 
-  /* --- 文字：背景是深色饱和渐变，因此用白，不用深灰 -------------------------
-     三档都做过对比度核算：正文 ~6.7:1 / 次要 ~4.8:1 / 弱化 ~4.2:1。
-     弱化档只用于时间戳这类非关键元信息。 */
-  --t1: #ffffff;
-  --t2: rgba(255, 255, 255, 0.78);
-  --t3: rgba(255, 255, 255, 0.72);
-  --t-on-brand: #06202a; /* 落在青色面上的深字 */
+  /* ---- 阴影 ---------------------------------------------------------------
+     深色界面里投影要「更黑更散」，否则等于没画。 */
+  --shadow-lg: 0 18px 50px -12px oklch(0% 0 0 / 0.55);
+  --shadow-glow: 0 0 0 1px var(--accent-ring), 0 10px 34px -8px oklch(86% 0.19 140 / 0.28);
 
-  /* --- 强调色：粉做身份（选中/未读/活动），青做行动（主按钮/进度） ---------- */
-  --brand: #ec4899;
-  --brand-deep: #db2777;
-  --brand-soft: rgba(236, 72, 153, 0.22);
-  --brand-ring: rgba(236, 72, 153, 0.45);
-  --brand-ink: #ffd0e5;
-
-  --cyan: #06b6d4;
-  --cyan-deep: #0891b2;
-  --cyan-soft: rgba(6, 182, 212, 0.2);
-
-  /* --- 语义色：在深色底上要提亮，否则会「糊成一团暗色」 -------------------- */
-  --ok: #34d399;
-  --ok-soft: rgba(52, 211, 153, 0.18);
-  --warn: #fbbf24;
-  --warn-soft: rgba(251, 191, 36, 0.18);
-  --err: #fb7185;
-  --err-soft: rgba(251, 113, 133, 0.2);
-
-  /* 语义色【文字】档：深底用亮字，浅底用深字。
-     之前这些亮字是直接写死在 .tag.ok / .banner 里的，
-     换到浅色主题就变成「淡薄荷压在淡绿上」——整条看不见。 */
-  --ok-ink: #a7f3d0;
-  --warn-ink: #fde68a;
-  --err-ink: #fecdd3;
-
-  /* --- 圆角 ---------------------------------------------------------------- */
-  --r-xs: 4px;
-  --r-sm: 6px;
-  --r-md: 8px;
-  --r-lg: 10px;
-  --r-xl: 14px;
-  --r-2xl: 20px;
-
-  /* --- 阴影：深色界面的投影要更黑更散，否则等于没画 ------------------------ */
-  --shadow-glass: 0 20px 44px -26px rgba(4, 0, 18, 0.62);
-  --shadow-pop: 0 16px 40px -12px rgba(4, 0, 18, 0.64), inset 0 1px 0 rgba(255, 255, 255, 0.22);
-  --shadow-modal: 0 40px 96px -30px rgba(2, 0, 12, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.24);
-
-  /* --- 动效 ---------------------------------------------------------------- */
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* ---- 动效 ---------------------------------------------------------------
+     统一 expo-out：快进缓出，收尾利落。不用 bounce —— 真实物体停下是减速，
+     不是弹。 */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-1: 0.12s;
   --dur-2: 0.18s;
-  --dur-3: 0.22s;
+  --dur-3: 0.26s;
 
-  /* --- 排版 ---------------------------------------------------------------- */
-  --font: system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI',
-    'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei',
-    sans-serif;
-  --mono: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', SFMono-Regular, Menlo,
-    Consolas, monospace;
+  /* ---- 圆角（三档 + 一个给微型控件） ------------------------------------- */
+  --r-xs: 6px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
 
+  /* ---- 排版尺寸（固定阶，不用流体：这是产品界面不是落地页） -------------- */
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 14px;
-  --fs-xl: 16px;
-  --fs-2xl: 20px;
+  --fs-xl: 17px;
+  --fs-2xl: 21px;
 
-  /* --- 尺寸 ---------------------------------------------------------------- */
-  --rail-w: 292px;
-  --side-w: 300px;
+  /* ---- 布局尺寸 ----------------------------------------------------------- */
+  --rail-w: 290px;
+  --side-w: 330px;
   --head-h: 64px;
+
+  color-scheme: dark;
 }
 
 html[data-theme='light'] {
-  /* body 的兜底色必须跟着主题走。
-     它铺在 .ambient 之下：浅色主题里若仍留着深色 :root 的 #0f0723，
-     任何「氛围层尚未铺满」的瞬间（启动、重排、层被裁掉）都会闪一下深色。
-     这正是「先深后浅」最容易出现的来源之一。
-     （原先此处定义的 --amb-base 全项目无人引用，已删除。） */
-  --bg-ink: #eef4fb;
-  --g1-purple: #c4b5fd;
-  --g1-pink: #fbcfe8;
-  --g2-blue: #bfdbfe;
-  --g2-cyan: #a5f3fc;
-  --g-ink: #c7d2fe;
+  --bg-base: oklch(97% 0.006 255);
+  --bg-panel: oklch(100% 0 0);
+  --bg-elevated: oklch(100% 0 0);
+  --bg-hover: oklch(94% 0.008 255);
+  --bg-sunken: oklch(91% 0.01 255);
 
-  --glass-rail: rgba(255, 255, 255, 0.56);
-  --glass-chat: rgba(255, 255, 255, 0.5);
-  --glass-side: rgba(255, 255, 255, 0.56);
-  --glass-chrome: rgba(255, 255, 255, 0.54);
-  --glass-float: rgba(255, 255, 255, 0.8);
+  --text-primary: oklch(22% 0.025 255);
+  --text-secondary: oklch(45% 0.02 255);
+  --text-muted: oklch(55% 0.018 255);
 
-  --surface: rgba(255, 255, 255, 0.6);
-  --surface-strong: rgba(255, 255, 255, 0.9);
-  --surface-sunken: rgba(255, 255, 255, 0.5);
-  --hover: rgba(255, 255, 255, 0.5);
-  --press: rgba(255, 255, 255, 0.75);
-  --selected: rgba(255, 255, 255, 0.78);
+  /* 浅底上绿要更实才够对比：白字落在 86% 亮度的绿上直接不可读。
+     这一档同时把 --accent-ink 翻成白 —— 组件不需要任何特判。 */
+  --accent: oklch(56% 0.17 140);
+  --accent-strong: oklch(48% 0.18 140);
+  --accent-soft: oklch(56% 0.17 140 / 0.12);
+  --accent-ink: oklch(99% 0 0);
+  --accent-ring: oklch(56% 0.17 140 / 0.45);
 
-  --edge: rgba(255, 255, 255, 0.75);
-  --ring: rgba(255, 255, 255, 0.92);
-  --line: rgba(148, 163, 184, 0.24);
-  --line-soft: rgba(148, 163, 184, 0.15);
-  --line-strong: rgba(148, 163, 184, 0.36);
+  --warm: oklch(60% 0.14 60);
+  --warn: oklch(60% 0.14 60);
+  --warn-soft: oklch(60% 0.14 60 / 0.14);
+  --danger: oklch(52% 0.2 25);
+  --danger-soft: oklch(52% 0.2 25 / 0.12);
 
-  --t1: #14162a;
-  --t2: #515a70;
-  --t3: #8a93a6;
-  --t-on-brand: #06202a;
+  --divider: oklch(20% 0.02 255 / 0.1);
+  --divider-strong: oklch(20% 0.02 255 / 0.18);
+  --grid: oklch(20% 0 0 / 0.03);
 
-  --brand-soft: rgba(236, 72, 153, 0.14);
-  --brand-ink: #b3276f;
-  --cyan-soft: rgba(6, 182, 212, 0.14);
+  --shadow-lg: 0 18px 50px -14px oklch(40% 0.05 255 / 0.22);
+  --shadow-glow: 0 0 0 1px var(--accent-ring), 0 12px 30px -8px oklch(56% 0.17 140 / 0.22);
 
-  --ok: #16a97a;
-  --warn: #d9942f;
-  --err: #e5484d;
-
-  /* 比深色主题那组再压深一档：标签只有 10px，
-     浅底上要高对比才不至于「看不清」 */
-  --ok-ink: #0a6144;
-  --warn-ink: #7a4e0d;
-  --err-ink: #992a2e;
-
-  --ok-soft: rgba(22, 169, 122, 0.14);
-  --warn-soft: rgba(217, 148, 47, 0.16);
-  --err-soft: rgba(229, 72, 77, 0.13);
-
-  --shadow-glass: 0 18px 40px -24px rgba(23, 38, 66, 0.22);
-  --shadow-pop: 0 12px 32px -10px rgba(23, 38, 66, 0.24);
-  --shadow-modal: 0 32px 72px -24px rgba(23, 38, 66, 0.28);
+  color-scheme: light;
 }
 
 /* ---------------------------------------------------------------- 重置 */
@@ -233,15 +154,60 @@ body,
 }
 
 body {
-  background: var(--bg-ink);
-  color: var(--t1);
-  font-family: var(--font);
-  font-size: var(--fs-md);
-  line-height: 1.55;
+  /* 顶部两团 mesh 光晕：左上是强调色的余晖，右上是暖橙的极淡一抹。
+     只铺在顶部 —— 铺到中部会把文字区的对比度拉下来，而对比度是不能赌的。 */
+  background:
+    radial-gradient(1100px 560px at 8% -12%, var(--accent-soft), transparent 58%),
+    radial-gradient(820px 480px at 102% -4%, var(--warn-soft), transparent 55%),
+    var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--fs-lg);
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   cursor: default;
   overflow: hidden;
+  /* 主题切换要顺滑：只有颜色过渡，不动尺寸（动尺寸会触发重排） */
+  transition: background-color 0.4s var(--ease), color 0.4s var(--ease);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+/* 键盘焦点环：深色界面里绝不能省，否则 Tab 完全找不到位置。
+   鼠标点击不显示（:focus-visible 的语义就是「键盘来的」）。 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--divider-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* .scroll 是「可滚动区域」的标记类：滚动条样式已全局统一，
+   这里只负责把滚动容器的溢出行为与最小宽度约束写在一处。 */
+.scroll {
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .selectable,
@@ -251,36 +217,41 @@ textarea {
   user-select: text;
 }
 
-.scroll {
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-  transition: scrollbar-color var(--dur-3) var(--ease);
+/* ---------------------------------------------------------------- 排版工具 */
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
 }
 
-.scroll:hover {
-  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+/* 微型标签：全大写 + 字距拉开的等宽小字。
+   设计系统里它出现在七八个地方（分组标题、状态条、信号卡 label、品牌副标、
+   日期分隔），因此必须只写一遍 —— 否则字距迟早各写各的。 */
+.micro {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
 }
 
-.scroll::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+.muted {
+  color: var(--text-secondary);
 }
 
-.scroll::-webkit-scrollbar-track {
-  background: transparent;
+.faint {
+  color: var(--text-muted);
 }
 
-.scroll::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 999px;
-  border: 2px solid transparent;
-  background-clip: content-box;
+.nowrap {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.scroll:hover::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.3);
-  background-clip: content-box;
+.divider {
+  height: 1px;
+  background: var(--divider);
 }
 
 /* ---------------------------------------------------------------- 表单 */
@@ -288,7 +259,7 @@ textarea {
 button {
   font-family: inherit;
   font-size: var(--fs-sm);
-  color: var(--t1);
+  color: var(--text-primary);
   background: none;
   border: 0;
   padding: 0;
@@ -304,36 +275,33 @@ textarea,
 select {
   font-family: inherit;
   font-size: var(--fs-md);
-  color: var(--t1);
+  color: var(--text-primary);
   width: 100%;
-  padding: 7px 10px;
-  border: 1px solid transparent;
+  padding: 8px 11px;
+  border: 1px solid var(--divider);
   border-radius: var(--r-sm);
-  background: var(--surface-sunken);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
-    box-shadow var(--dur-1) var(--ease);
+  background: var(--bg-elevated);
+  transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
 
+/* 占位符也要过 4.5:1 —— 用 --text-muted 而不是更淡的自定义灰 */
 input::placeholder,
 textarea::placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--text-muted);
 }
 
 input:hover,
 textarea:hover,
 select:hover {
-  background: rgba(255, 255, 255, 0.13);
+  border-color: var(--divider-strong);
 }
 
 input:focus,
 textarea:focus,
 select:focus {
   outline: none;
-  background: var(--surface-strong);
-  border-color: var(--cyan);
-  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.32);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 input[type='checkbox'],
@@ -345,21 +313,19 @@ input[type='radio'] {
   border: 0;
   border-radius: 3px;
   background: none;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  accent-color: var(--cyan);
+  accent-color: var(--accent);
   cursor: pointer;
 }
 
 input[type='checkbox']:hover,
 input[type='radio']:hover {
-  background: none;
+  border-color: transparent;
 }
 
 select {
   appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--t2) 50%),
-    linear-gradient(135deg, var(--t2) 50%, transparent 50%);
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
+    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
   background-position: right 14px top 55%, right 9px top 55%;
   background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
@@ -367,11 +333,11 @@ select {
   cursor: pointer;
 }
 
-/* 下拉展开后的原生 option 在深色主题里必须显式给底色，
-   否则 Windows 上会出现「黑底黑字」 */
+/* 下拉展开后的原生 option 不继承 CSS 变量（由系统绘制），
+   必须显式给底色，否则 Windows 上是黑底黑字 */
 select option {
-  background: #1c1140;
-  color: var(--t1);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
 }
 
 textarea {
@@ -404,38 +370,35 @@ textarea {
   opacity: 0.42;
 }
 
-/* 主按钮走【青 + 深字】而不是粉 + 白字：
-   白字在 #EC4899 上只有 3.5:1，深字在 #06B6D4 上有 6.2:1。
-   规格说强调色二选一，这里按「哪个可用」来分派。 */
+/* 主按钮 = 强调色的实心块（渐变是为了给平涂一点方向感）。
+   字色用 --accent-ink：深绿在亮绿上 8:1 以上，浅色主题里它自动变白。 */
 .btn-primary {
-  background: var(--cyan);
-  color: var(--t-on-brand);
-  box-shadow: 0 6px 18px -8px rgba(6, 182, 212, 0.75),
-    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--accent-ink);
+  font-weight: 600;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--cyan-deep);
+  box-shadow: var(--shadow-glow);
 }
 
 .btn-ghost {
-  border: 1px solid var(--edge);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--t1);
+  border: 1px solid var(--divider-strong);
+  color: var(--text-primary);
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.16);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .btn-soft {
-  background: var(--surface);
-  color: var(--t1);
-  box-shadow: inset 0 0 0 1px var(--line);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
 }
 
 .btn-soft:hover:not(:disabled) {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 
 .btn-block {
@@ -446,59 +409,32 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   border-radius: var(--r-sm);
-  color: var(--t2);
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
 
 .icon-btn:hover:not(:disabled) {
-  background: var(--hover);
-  color: var(--t1);
+  background: var(--bg-elevated);
+  border-color: var(--divider);
+  color: var(--accent);
+  transform: translateY(-1px);
 }
 
 .icon-btn.on {
-  background: var(--brand-soft);
-  color: #fff;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .icon-btn:disabled {
   opacity: 0.35;
 }
 
-/* 键盘导航的焦点环：深色界面里绝不能省 —— 不然 Tab 完全找不到位置 */
-:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 2px;
-}
-
-/* ---------------------------------------------------------------- 通用 */
-
-.mono {
-  font-family: var(--mono);
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-}
-
-.muted {
-  color: var(--t2);
-}
-
-.faint {
-  color: var(--t3);
-}
-
-.nowrap {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.divider {
-  height: 1px;
-  background: var(--line-soft);
-}
+/* ---------------------------------------------------------------- 标签 / 圆点 */
 
 .tag {
   display: inline-flex;
@@ -506,33 +442,33 @@ textarea {
   gap: 4px;
   padding: 1px 7px;
   border-radius: 999px;
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 500;
   line-height: 16px;
   white-space: nowrap;
-  background: rgba(255, 255, 255, 0.14);
-  color: var(--t1);
-  box-shadow: inset 0 0 0 1px var(--line);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .tag.ok {
-  background: var(--ok-soft);
-  color: var(--ok-ink);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .tag.warn {
   background: var(--warn-soft);
-  color: var(--warn-ink);
+  color: var(--warn);
 }
 
 .tag.err {
-  background: var(--err-soft);
-  color: var(--err-ink);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .tag.brand {
-  background: var(--brand-soft);
-  color: var(--brand-ink);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .dot {
@@ -540,100 +476,130 @@ textarea {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--t3);
+  background: var(--text-muted);
 }
 
-.dot.online {
-  background: var(--ok);
-}
-
+.dot.online,
 .dot.connected {
-  background: var(--cyan);
+  background: var(--accent);
 }
 
 .dot.offline {
-  background: rgba(255, 255, 255, 0.35);
+  background: var(--text-muted);
 }
+
+/* 静态状态点：只留实心圆点，不要扩散环。
+   必须显式 display + 关掉 ::after —— 原型里这个坑踩过一次：
+   ::after 是绝对定位的，父元素若算成 position:static，
+   它的包含块会变成视口，那个「扩散环」会撑满整屏。 */
+.dot--static {
+  display: inline-block;
+}
+
+.dot--static::after {
+  display: none;
+}
+
+/* 未读角标：用强调色实心块。单一强调色体系里它是少数几个「必须抢眼」的元素。 */
+.badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 分组计数：accent-soft 底的低调胶囊（与 .badge 的「抢眼」分工不同） */
+.count {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+/* ---------------------------------------------------------------- 空态 / 横幅 */
 
 .empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 40px 24px;
+  gap: 10px;
+  padding: 28px 20px;
   text-align: center;
-  color: var(--t3);
+  color: var(--text-secondary);
   font-size: var(--fs-sm);
 }
 
 .empty-title {
-  color: var(--t1);
+  color: var(--text-primary);
   font-size: var(--fs-md);
+  font-weight: 500;
 }
 
 .banner {
   padding: 8px 14px;
   font-size: var(--fs-sm);
   background: var(--warn-soft);
-  color: var(--warn-ink);
-  border-bottom: 1px solid rgba(251, 191, 36, 0.25);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  color: var(--warn);
+  border-bottom: 1px solid var(--divider);
 }
 
 .banner.err {
-  background: var(--err-soft);
-  color: var(--err-ink);
-  border-bottom-color: rgba(251, 113, 133, 0.25);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
+/* ---------------------------------------------------------------- 列表 */
+
+/* 分组标题（原型 .list__group）：等宽大写微标 + 右侧计数 */
 .section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: 30px;
-  padding: 0 10px 0 12px;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--t3);
+  padding: 16px 10px 8px;
+  color: var(--text-muted);
   user-select: none;
 }
 
+/* 列表行（原型 .conv）：左 3px 透明边框预留选中指示位，
+   hover 位移 3px 让人感觉「这一行抬起来了」。 */
 .list-row {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
+  gap: 11px;
+  padding: 10px 11px;
   border-radius: var(--r-md);
+  border-left: 3px solid transparent;
   cursor: pointer;
-  transition: background var(--dur-1) var(--ease);
+  transition: background var(--dur-2) var(--ease), transform var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
 }
 
 .list-row:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
+  transform: translateX(3px);
 }
 
 .list-row.active {
-  background: var(--selected);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
 }
 
-/* 选中态再加一道粉色侧标：半透明玻璃上的色差本来就小，
-   只靠「白一点」区分选中与 hover 会分不清 */
-.list-row.active::before {
-  content: '';
-  position: absolute;
-  left: 3px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--brand);
+.list-row.offline {
+  opacity: 0.62;
 }
 
 .list-row-main {
@@ -644,38 +610,372 @@ textarea {
 .list-row-title {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: var(--fs-md);
-  font-weight: 500;
-  color: var(--t1);
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text-primary);
 }
 
 .list-row-sub {
   font-size: var(--fs-sm);
-  color: var(--t3);
+  color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* 未读角标：#E11D48 而不是纯红 —— 在白字下有 4.7:1，
-   纯红（#F43F5E / #FF3B30）都过不了 */
-.badge {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: #e11d48;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 18px;
+/* ---------------------------------------------------------------- 品牌区 */
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 20px 16px;
+}
+
+.brand__logo {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: linear-gradient(135deg, var(--accent), var(--warm));
+  display: grid;
+  place-items: center;
+  color: var(--accent-ink);
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+/* 脉冲环：Logo 的「呼吸」。它是这台机器作为活跃节点的唯一视觉暗示，
+   因此只在品牌区用一次 —— 到处脉冲等于没有重点。 */
+.brand__logo::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 16px;
+  border: 1.5px solid var(--accent-ring);
+  animation: pulse-ring 2.8s var(--ease) infinite;
+}
+
+.brand__name {
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1.2;
+}
+
+.brand__sub {
+  color: var(--accent);
+  margin-top: 1px;
+}
+
+/* ---------------------------------------------------------------- 网络状态条 */
+
+/* 第一眼就说明「这是个网络工具」的那一条。左 = 状态微标，右 = 节点数。 */
+.netstat {
+  margin: 0 16px 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--divider-strong);
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.netstat__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  letter-spacing: 1px;
+}
+
+.netstat__right {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* ---------------------------------------------------------------- 标签页 */
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--divider);
+}
+
+.tab {
+  flex: 1;
+  padding: 16px 0;
   text-align: center;
-  font-variant-numeric: tabular-nums;
-  box-shadow: 0 3px 10px -3px rgba(225, 29, 72, 0.9);
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  position: relative;
+  transition: color var(--dur-1) var(--ease);
+}
+
+.tab:hover {
+  color: var(--text-primary);
+}
+
+.tab.active {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* 激活下划线两端各留 28px：满宽下划线看起来像分隔线，不像选中 */
+.tab.active::after {
+  content: '';
+  position: absolute;
+  left: 28px;
+  right: 28px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* ---------------------------------------------------------------- 键值组 */
+
+.section {
+  margin-top: 26px;
+}
+
+.section__title {
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: var(--r-sm);
+  transition: background var(--dur-1) var(--ease);
+}
+
+.kv:hover {
+  background: var(--bg-elevated);
+}
+
+.kv__k {
+  font-size: var(--fs-md);
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.kv__v {
+  font-size: var(--fs-md);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-align: right;
+}
+
+.kv__v.on {
+  color: var(--accent);
+}
+
+/* 复制图标默认隐身，hover 才现出：一列小图标会把这栏变成工具栏 */
+.kv__copy {
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+
+.kv:hover .kv__copy,
+.kv__copy:focus-visible {
+  opacity: 1;
+}
+
+.kv__copy:hover {
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- 信号卡 */
+
+/* 连接质量卡：凹面 + 均衡器。它是右栏的视觉锚点，
+   也是「这台机器正连着谁、连得好不好」的唯一量化表达。 */
+.signal-card {
+  margin-top: 26px;
+  padding: 16px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  border: 1px solid var(--divider);
+}
+
+.signal-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.signal-card__label {
+  color: var(--text-muted);
+}
+
+.signal-card__val {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.signal {
+  display: flex;
+  gap: 5px;
+  align-items: flex-end;
+  height: 34px;
+}
+
+.signal span {
+  width: 6px;
+  border-radius: 3px;
+  background: var(--accent);
+  transform-origin: bottom;
+  animation: eq 1.5s var(--ease) infinite;
+}
+
+.signal span:nth-child(1) {
+  height: 38%;
+  animation-delay: 0s;
+}
+
+.signal span:nth-child(2) {
+  height: 62%;
+  animation-delay: 0.15s;
+}
+
+.signal span:nth-child(3) {
+  height: 84%;
+  animation-delay: 0.3s;
+}
+
+.signal span:nth-child(4) {
+  height: 100%;
+  animation-delay: 0.45s;
+}
+
+.signal span:nth-child(5) {
+  height: 72%;
+  animation-delay: 0.6s;
+}
+
+/* 没有会话时：条压平、颜色退回中性，动效停掉。
+   静止的灰条比「跳着绿条但写着离线」诚实得多。 */
+.signal.idle span {
+  background: var(--text-muted);
+  animation: none;
+  transform: scaleY(0.28);
+  opacity: 0.5;
+}
+
+/* ---------------------------------------------------------------- 日期分隔 */
+
+.day-sep {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 4px 0 20px;
+}
+
+.day-sep::before,
+.day-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--divider);
+}
+
+.day-sep span {
+  color: var(--text-secondary);
+  border: 1px solid var(--divider-strong);
+  padding: 4px 14px;
+  border-radius: 999px;
+}
+
+/* ---------------------------------------------------------------- 轻提示 */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 30px;
+  z-index: 400;
+  transform: translateX(-50%);
+  max-width: 60vw;
+  padding: 11px 20px;
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider-strong);
+  box-shadow: var(--shadow-lg);
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  pointer-events: none;
 }
 
 /* ---------------------------------------------------------------- 动效 */
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.92);
+    opacity: 0.85;
+  }
+  70% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-ring);
+  }
+  70% {
+    box-shadow: 0 0 0 9px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.5);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
 
 @keyframes sl-fade {
   from {
@@ -697,17 +997,6 @@ textarea {
   }
 }
 
-@keyframes sl-pop-up {
-  from {
-    opacity: 0;
-    transform: translateY(4px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
 .anim-fade {
   animation: sl-fade var(--dur-3) var(--ease) both;
 }
@@ -716,11 +1005,21 @@ textarea {
   animation: sl-pop var(--dur-3) var(--ease) both;
 }
 
+/* 前庭安全：关掉全部位移与循环动效，但保留「显形」。
+   注意不是 animation: none —— 那会让依赖 both 停留在首帧的元素（消息、弹层）
+   永远停在 opacity:0，界面直接空掉。 */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .anim-fade,
+  .anim-pop {
+    animation: sl-fade 0.01ms both;
   }
 }

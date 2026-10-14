@@ -24,6 +24,13 @@ export interface Peer {
    * 与 online 高度相关但不等价 —— 会话可能被空闲回收，而 state 仍为 online。
    */
   connected: boolean
+  /**
+   * 最近一次心跳测得的往返延迟（毫秒）。**0 表示没有数据**：
+   * 没有会话，或会话刚建立、心跳还没跑完一轮。
+   *
+   * 界面必须把 0 显示成「测量中」—— 把「没测到」显示成「0ms」是编造数据。
+   */
+  rttMs: number
 }
 
 export interface Message {
@@ -38,6 +45,14 @@ export interface Message {
   state: 'pending' | 'sent' | 'delivered' | 'failed' | string
   sentAt: number
   recvAt?: number
+  /**
+   * 群消息的送达统计（单聊为 0/缺省）。
+   *
+   * pendingCount > 0 表示还有成员没确认送达（离线或尚未连接），
+   * 气泡据此显示「N 人未送达」。消息全员送达后后端会清掉统计，这里回到 0。
+   */
+  memberCount?: number
+  pendingCount?: number
 }
 
 export interface Conversation {
@@ -115,11 +130,86 @@ export interface FolderSummary {
   skipped: number
 }
 
+/** 共享可见性（与 dto.go 的 ShareVisibilityDTO 一一对应）。 */
+export interface ShareVisibility {
+  /** all | users | group */
+  type: string
+  /** users 时是 node_id 列表；group 时是群 id 列表。 */
+  allowed?: string[]
+}
+
+/**
+ * 一条共享（与 dto.go 的 ShareDTO 一一对应）。
+ *
+ * 本机发布的与他人发布的共用这一种形状：界面渲染的是同一张卡片，
+ * 差别只有「能不能下载 / 能不能取消」两个按钮位。
+ */
+export interface Share {
+  shareId: string
+  name: string
+  ownerId: string
+  ownerName: string
+  fileCount: number
+  totalSize: number
+  visibility: ShareVisibility
+  /** 后端算好的可见性文案（「全部」「指定人(2)」「仅群组」）。 */
+  visibilityText: string
+  /** true = 本机发布的。 */
+  mine: boolean
+  /** 仅本机共享有值：本地根路径。 */
+  rootPath?: string
+  /** 仅他人共享有意义：发布者此刻是否可达。 */
+  online: boolean
+  /**
+   * 「现在点下载会成功吗」——**由后端算好**。
+   *
+   * 它同时取决于 mine / online / 可见性。前端不要自己组合这三个字段：
+   * 那样等于把一条判定规则复制到第二个地方，两处迟早不一致。
+   */
+  downloadable: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+/** 共享里的一条文件。 */
+export interface ShareItem {
+  /** 相对共享根的路径（斜杠分隔）。下载请求按它标识文件。 */
+  path: string
+  name: string
+  size: number
+  /** 空目录占位项（零字节，下载时只建目录）。 */
+  isDir?: boolean
+  mtime?: number
+}
+
+/** 一次共享下载的受理结果（进度走 transfer:* 事件）。 */
+export interface ShareDownload {
+  /** 批次标识：界面用它把所有相关任务聚合成一张卡片、也用它整批取消。 */
+  batchId: string
+  accepted: number
+  /** 被共享方跳过的条目及原因（文件已删除、路径非法等）。 */
+  rejected?: string[]
+}
+
 export interface GroupMember {
   nodeId: string
   displayName: string
   role: string
   state: string
+  /**
+   * 是否在群 —— **权威判据**。
+   *
+   * 由后端按「票号」算好（`admitSeq > kickSeq && admitSeq > leftSeq`）。
+   * 前端不要用 `state` 自行推导：state 只是派生缓存，
+   * 一旦与票号不同步，就会出现「后端说已退出、界面仍显示在群」。
+   */
+  active: boolean
+  /** 票号：群主最近一次「发票」的编号。 */
+  admitSeq: number
+  /** 群主撕票号（被踢）。 */
+  kickSeq: number
+  /** 本人撕票号（主动退出），自签。 */
+  leftSeq: number
 }
 
 export interface Group {
@@ -127,6 +217,10 @@ export interface Group {
   name: string
   ownerId: string
   epoch: number
+  /** 群主的群级发票计数器（票号来源），仅用于展示与排障。 */
+  mintSeq: number
+  /** 群状态：active | dissolved。解散后禁用输入并展示横幅。 */
+  state: string
   isOwner: boolean
   members: GroupMember[]
   createdAt: number
@@ -281,6 +375,11 @@ export interface SwarmApi {
    * 传输列表里会立刻出现一批「排队中」的任务。
    */
   sendFolder(peerId: string, path: string): Promise<FolderSummary>
+  /**
+   * 把同一个文件夹发给多个对端（群聊用）：全批共享一个 batch_id，
+   * 聊天框只出一张卡片、进度按「文件数」而不是「文件数 × 成员数」算。
+   */
+  sendFolderTo(peerIds: string[], path: string): Promise<FolderSummary>
   transfers(): Promise<TransferJob[]>
   /**
    * 一个批次的全部任务（文件夹卡片的聚合进度用）。
@@ -317,11 +416,77 @@ export interface SwarmApi {
   groupList(): Promise<Group[]>
   groupCreate(name: string, memberIds: string[]): Promise<Group>
   groupAddMember(groupId: string, memberId: string): Promise<Group>
+  /** 群主移除成员（epoch+1 并广播）。 */
+  groupRemoveMember(groupId: string, memberId: string): Promise<Group>
+  /** 退出群（本人）：本地立即生效，不依赖群主在线。 */
+  groupLeave(groupId: string): Promise<Group>
+  /** 群主改名（epoch+1 并广播）。 */
+  groupRename(groupId: string, name: string): Promise<Group>
+  /** 群主解散群（epoch+1 并广播；成员侧停止收发）。 */
+  groupDissolve(groupId: string): Promise<Group>
   groupSendMessage(groupId: string, text: string): Promise<Message>
   groupHistory(groupId: string, limit: number, before: number): Promise<Message[]>
   groupSendImage(groupId: string, path: string): Promise<Message>
   groupSendImageBytes(groupId: string, name: string, dataB64: string): Promise<Message>
   groupSendFile(groupId: string, jobId: string, fileName: string): Promise<Message>
+  /** 群发文件夹卡片（文件本身由前端逐个在线成员 P2P 发起）。 */
+  groupSendFolder(
+    groupId: string,
+    batchId: string,
+    folderName: string,
+    fileCount: number,
+    totalSize: number,
+    skipped: number
+  ): Promise<Message>
+
+  // 文件共享（FR-14）
+  /**
+   * 共享清单：本机发布的在前，他人发布的在后。
+   *
+   * 一次返回两组而不是分两个方法：界面同一屏要展示它们，分两次调用会
+   * 出现两批数据来自不同时刻的经典问题（「我发布的没了」那种一闪）。
+   */
+  shareList(): Promise<Share[]>
+  /**
+   * 发布一条共享。
+   *
+   * 可见性拆成 (visType, allowed) 两个参数：两者的取值有强耦合规则
+   * （all 忽略 allowed、group 只允许一个），拆开后调用点一眼能看出这条规则。
+   */
+  sharePublish(
+    rootPath: string,
+    name: string,
+    visType: string,
+    allowed: string[]
+  ): Promise<Share>
+  shareUnpublish(shareId: string): Promise<void>
+  /**
+   * 修改一条本机共享的可见性。
+   *
+   * 不换 share_id（别人列表里的条目不会闪、历史下载的批次仍对得上），
+   * 后端会立刻重新广播摘要 —— 否则「改成指定人」在对方列表里要等下一轮
+   * 周期通告（最长 45s）才生效。
+   */
+  shareSetVisibility(
+    shareId: string,
+    visType: string,
+    allowed: string[]
+  ): Promise<Share>
+  /** 重新扫描共享根目录（磁盘内容变了之后用）。 */
+  shareRefresh(shareId: string): Promise<Share>
+  /**
+   * 浏览一条共享的文件清单（自己的或他人的）。
+   *
+   * 他人的清单是现拉现取的，因此共享方不在线时这里会 reject ——
+   * 界面必须把失败原因原样展示（「共享方不在线」是用户唯一能行动的线索）。
+   */
+  shareBrowse(shareId: string): Promise<ShareItem[]>
+  /**
+   * 下载共享里的指定文件（异步：返回即代表共享方已受理）。
+   *
+   * 返回的 batchId 会出现在随后相关任务的 transfer:* 事件里。
+   */
+  shareDownload(shareId: string, paths: string[]): Promise<ShareDownload>
 }
 
 /** 后端推送的事件名（与 internal/adapters/wails/eventbridge.go 保持一致）。 */
@@ -337,6 +502,12 @@ export const EV = {
   transferState: 'transfer:state',
   netError: 'net:error',
   configChanged: 'config:changed',
+  /**
+   * 本机共享清单变化（载荷 { shareId, action }）。
+   *
+   * 他人共享的变化不走它：那是目录条目的变化，已经由 peer:updated 承担。
+   */
+  shareUpdated: 'share:updated',
   debug: 'debug:event',
   /** 拖入窗口的文件路径（由桌面外壳转发，非领域事件）。 */
   fileDropped: 'file:dropped',

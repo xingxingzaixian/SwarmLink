@@ -34,7 +34,7 @@ func newTestGroupApp(t *testing.T) (*GroupApp, *mem.Messages) {
 		t.Fatalf("建群: %v", err)
 	}
 
-	gapp := NewGroupApp(self, nil, groups, store, noConns{}, mem.NewPeers(clk), eventbus.New(), clk, nil)
+	gapp := NewGroupApp(self, nil, groups, store, mem.NewGroupDeliveries(), noConns{}, mem.NewPeers(clk), eventbus.New(), clk, nil)
 	return gapp, store
 }
 

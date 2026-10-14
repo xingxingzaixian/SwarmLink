@@ -20,6 +20,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
 )
 
@@ -560,6 +561,24 @@ func (s *Peers) MarkOffline(id identity.NodeID, at time.Time) error {
 	return nil
 }
 
+// ResetLiveness 清零上次运行残留的在线状态（语义见 ports.PeerDirectory）。
+func (s *Peers) ResetLiveness() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, p := range s.items {
+		if p.State != peer.StateOnline {
+			continue
+		}
+		// last_seen 保持原值：TTL 兜底据此判断该条目是否已过期。
+		// 这里绝不能写 now，否则「失联很久」会被伪装成「刚刚见过」。
+		p.State = peer.StateDiscovered
+		s.items[id] = p
+		n++
+	}
+	return n, nil
+}
+
 // SetSuppressed 设置/清除「本地已移除」标记（语义见 ports.PeerDirectory）。
 func (s *Peers) SetSuppressed(id identity.NodeID, suppressed bool, at time.Time) error {
 	s.mu.Lock()
@@ -603,6 +622,137 @@ func (s *Peers) Len() int {
 }
 
 // ---------------------------------------------------------------------------
+// GroupDeliveries：实现 ports.GroupDeliveryRepo
+// ---------------------------------------------------------------------------
+
+// GroupDeliveries 是群消息「按成员」投递跟踪的内存实现。
+//
+// 与 sqlite 实现是【对等实现】：两者必须给出同样的语义，否则
+// 「单进程测试跑 mem、生产跑 sqlite」会在离线补投上分叉。
+type GroupDeliveries struct {
+	mu sync.RWMutex
+	// acked[msgID][memberID] = 送达时间；成员已在 map 中但时间为零值 = 未送达。
+	acked map[string]map[identity.NodeID]time.Time
+	group map[string]string // msgID -> groupID
+}
+
+var _ ports.GroupDeliveryRepo = (*GroupDeliveries)(nil)
+
+// NewGroupDeliveries 创建投递跟踪仓储。
+func NewGroupDeliveries() *GroupDeliveries {
+	return &GroupDeliveries{
+		acked: make(map[string]map[identity.NodeID]time.Time),
+		group: make(map[string]string),
+	}
+}
+
+// EnsureDeliveries 登记全体目标成员（幂等；已存在的成员保持原状）。
+func (s *GroupDeliveries) EnsureDeliveries(msgID, groupID string, members []identity.NodeID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set, ok := s.acked[msgID]
+	if !ok {
+		set = make(map[identity.NodeID]time.Time)
+		s.acked[msgID] = set
+		s.group[msgID] = groupID
+	}
+	for _, m := range members {
+		if m.IsZero() {
+			continue
+		}
+		if _, exists := set[m]; !exists {
+			set[m] = time.Time{} // 未送达
+		}
+	}
+	return nil
+}
+
+// AckDelivery 标记某成员已送达（幂等）。
+func (s *GroupDeliveries) AckDelivery(msgID string, memberID identity.NodeID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set, ok := s.acked[msgID]
+	if !ok {
+		return nil
+	}
+	if at, exists := set[memberID]; exists && at.IsZero() {
+		set[memberID] = time.Now()
+	}
+	return nil
+}
+
+// PendingMembers 返回尚未送达的成员。
+func (s *GroupDeliveries) PendingMembers(msgID string) ([]identity.NodeID, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	set := s.acked[msgID]
+	out := make([]identity.NodeID, 0, len(set))
+	for id, at := range set {
+		if at.IsZero() {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// StatsByConv 返回会话内每条群消息的送达统计。
+func (s *GroupDeliveries) StatsByConv(convID string) (map[string]ports.DeliveryStat, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]ports.DeliveryStat)
+	for msgID, set := range s.acked {
+		if s.group[msgID] != convID {
+			continue
+		}
+		stat := ports.DeliveryStat{Total: len(set)}
+		for _, at := range set {
+			if !at.IsZero() {
+				stat.Acked++
+			}
+		}
+		out[msgID] = stat
+	}
+	return out, nil
+}
+
+// DeleteByMsg 清掉一条消息的全部投递记录。
+func (s *GroupDeliveries) DeleteByMsg(msgID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.acked, msgID)
+	delete(s.group, msgID)
+	return nil
+}
+
+// DeleteByGroup 清掉某群的全部投递记录。
+func (s *GroupDeliveries) DeleteByGroup(groupID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for msgID, gid := range s.group {
+		if gid == groupID {
+			delete(s.acked, msgID)
+			delete(s.group, msgID)
+		}
+	}
+	return nil
+}
+
+// DeleteGroupMember 清掉某群某成员的全部投递记录。
+func (s *GroupDeliveries) DeleteGroupMember(groupID string, memberID identity.NodeID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for msgID, gid := range s.group {
+		if gid != groupID {
+			continue
+		}
+		if set, ok := s.acked[msgID]; ok {
+			delete(set, memberID)
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Groups：实现 ports.GroupRepo
 // ---------------------------------------------------------------------------
 
@@ -621,7 +771,13 @@ func NewGroups() *Groups { return &Groups{items: make(map[string]group.Group)} }
 func (s *Groups) Upsert(g group.Group) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 与 sqlite 实现对齐（那边由列的 DEFAULT 'active' 承担零值归一）：
+	//   - 群级状态零值归一为 active；
+	//   - 成员的 State 缓存按票号刷新。
+	// 少做后者会让「mem 跑测试、sqlite 跑生产」在成员状态上分叉。
+	g.State = g.State.StateOrActive()
 	g.Members = append([]group.Member(nil), g.Members...)
+	g.SyncDerivedState()
 	s.items[g.ID] = g
 	return nil
 }
@@ -648,4 +804,77 @@ func (s *Groups) List() []group.Group {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Shares：实现 ports.ShareRepo
+// ---------------------------------------------------------------------------
+
+// Shares 是文件共享的内存实现（与 sqlite 实现互为替身）。
+type Shares struct {
+	mu    sync.RWMutex
+	items map[string]share.Share
+}
+
+var _ ports.ShareRepo = (*Shares)(nil)
+
+// NewShares 创建共享仓储。
+func NewShares() *Shares { return &Shares{items: make(map[string]share.Share)} }
+
+// Upsert 整份写入一条共享（清单整份替换，语义同 sqlite 实现）。
+func (s *Shares) Upsert(in share.Share) error {
+	// 深拷贝清单：调用方持有原切片，共享后再改它会让仓储里的内容跟着变
+	// （sqlite 侧是序列化落盘，天然没有这个问题 —— 两侧必须一致）。
+	cp := in
+	cp.Visibility = in.Visibility.Normalize()
+	cp.Items = append([]share.Item(nil), in.Items...)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.items[in.ID]; ok && !old.CreatedAt.IsZero() {
+		cp.CreatedAt = old.CreatedAt
+	}
+	s.items[in.ID] = cp
+	return nil
+}
+
+// Get 读取一条共享。
+func (s *Shares) Get(shareID string) (share.Share, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.items[shareID]
+	if !ok {
+		return share.Share{}, false
+	}
+	v.Items = append([]share.Item(nil), v.Items...)
+	return v, true
+}
+
+// List 按创建时间升序返回全部共享。
+func (s *Shares) List() []share.Share {
+	s.mu.RLock()
+	out := make([]share.Share, 0, len(s.items))
+	for _, v := range s.items {
+		v.Items = append([]share.Item(nil), v.Items...)
+		out = append(out, v)
+	}
+	s.mu.RUnlock()
+
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		// 第二排序键必须有：CreatedAt 相同（同一毫秒建的）时顺序会由 map
+		// 迭代顺序决定，界面每次刷新都换一个次序，且与 sqlite 实现不同。
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// Delete 删除一条共享（幂等）。
+func (s *Shares) Delete(shareID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, shareID)
+	return nil
 }

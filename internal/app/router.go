@@ -18,6 +18,7 @@ type Router struct {
 	Transfer  *TransferApp
 	Discovery *DiscoveryApp
 	Peers     *PeerApp
+	Share     *ShareApp
 	Log       *slog.Logger
 }
 
@@ -28,9 +29,13 @@ func NewRouter(
 	tr *TransferApp,
 	disc *DiscoveryApp,
 	peers *PeerApp,
+	sh *ShareApp,
 	lg *slog.Logger,
 ) *Router {
-	return &Router{Chat: chat, Group: group, Transfer: tr, Discovery: disc, Peers: peers, Log: lg}
+	return &Router{
+		Chat: chat, Group: group, Transfer: tr, Discovery: disc,
+		Peers: peers, Share: sh, Log: lg,
+	}
 }
 
 // Handle 实现 tcp.FrameHandler。
@@ -46,6 +51,8 @@ func (r *Router) Handle(sess ports.Session, f protocol.Frame) {
 
 	case protocol.TypeGroupMsg:
 		r.dispatch(sess, f, handleOf(r.Group, (*GroupApp).HandleGroupMsg))
+	case protocol.TypeGroupLeave:
+		r.dispatch(sess, f, handleOf(r.Group, (*GroupApp).HandleGroupLeave))
 	case protocol.TypeGroupMeta:
 		r.dispatch(sess, f, handleOf(r.Group, (*GroupApp).HandleGroupMeta))
 	case protocol.TypeGroupMembersReq:
@@ -70,6 +77,15 @@ func (r *Router) Handle(sess ports.Session, f protocol.Frame) {
 		r.dispatch(sess, f, handleOf(r.Transfer, (*TransferApp).HandleFileDone))
 	case protocol.TypeFileDoneAck:
 		r.dispatch(sess, f, handleOf(r.Transfer, (*TransferApp).HandleFileDoneAck))
+
+	case protocol.TypeShareIndexReq:
+		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandleIndexReq))
+	case protocol.TypeShareIndexResp:
+		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandleIndexResp))
+	case protocol.TypeSharePullReq:
+		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandlePullReq))
+	case protocol.TypeSharePullResp:
+		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandlePullResp))
 
 	default:
 		// 未知 Type：载荷已按 Length 读完，直接丢弃并计数，不得断连。

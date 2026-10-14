@@ -206,14 +206,14 @@ function doneBytes(j: TransferJob): number {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 12px 16px;
 }
 
 .sum {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--t2);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: var(--fs-sm);
 }
 
@@ -228,10 +228,10 @@ function doneBytes(j: TransferJob): number {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 8px;
+  padding: 7px 8px;
   border-radius: var(--r-sm);
   font-size: var(--fs-xs);
-  color: var(--t2);
+  color: var(--text-secondary);
 }
 
 .top {
@@ -255,13 +255,15 @@ function doneBytes(j: TransferJob): number {
 }
 
 .row + .row {
-  border-top: 1px solid var(--edge);
+  border-top: 1px solid var(--divider);
 }
 
 .row.err {
-  color: var(--err-ink);
+  color: var(--danger);
 }
 
+/* 方向徽标：上传 = 中性（往外发是自己主动的事），
+   下载 = 强调色（收到东西是「好」的结果）。 */
 .dir {
   display: flex;
   align-items: center;
@@ -269,17 +271,17 @@ function doneBytes(j: TransferJob): number {
   flex: 0 0 auto;
   width: 20px;
   height: 20px;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-xs);
 }
 
 .dir.up {
-  background: var(--brand-soft);
-  color: var(--brand-ink);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
 }
 
 .dir.down {
-  background: var(--ok-soft);
-  color: var(--ok-ink);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .name {
@@ -287,7 +289,7 @@ function doneBytes(j: TransferJob): number {
   min-width: 0;
   font-size: var(--fs-sm);
   font-weight: 500;
-  color: var(--t1);
+  color: var(--text-primary);
 }
 
 .info {
@@ -296,7 +298,7 @@ function doneBytes(j: TransferJob): number {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 .pct {
@@ -304,18 +306,11 @@ function doneBytes(j: TransferJob): number {
   text-align: right;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
-  color: var(--t1);
+  color: var(--text-primary);
 }
 
 .pct.dim {
-  color: var(--t3);
-}
-
-.tag {
-  flex: 0 0 auto;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: var(--fs-xs);
+  color: var(--text-muted);
 }
 
 .reveal {
@@ -326,17 +321,17 @@ function doneBytes(j: TransferJob): number {
   width: 20px;
   height: 20px;
   padding: 0;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-xs);
   background: transparent;
-  color: var(--t2);
+  color: var(--text-secondary);
   transition:
     background var(--dur-1) var(--ease),
     color var(--dur-1) var(--ease);
 }
 
 .reveal:hover {
-  background: var(--hover);
-  color: var(--t1);
+  background: var(--bg-hover);
+  color: var(--accent);
 }
 
 /* 占位：与按钮等宽，保证各行末尾对齐。 */

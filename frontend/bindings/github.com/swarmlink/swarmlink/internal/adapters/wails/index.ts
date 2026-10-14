@@ -6,6 +6,7 @@ import * as GroupService from "./groupservice.js";
 import * as NotifyService from "./notifyservice.js";
 import * as PeerService from "./peerservice.js";
 import * as SettingsService from "./settingsservice.js";
+import * as ShareService from "./shareservice.js";
 import * as TransferService from "./transferservice.js";
 export {
     ChatService,
@@ -13,6 +14,7 @@ export {
     NotifyService,
     PeerService,
     SettingsService,
+    ShareService,
     TransferService
 };
 
@@ -28,5 +30,9 @@ export type {
     SelfCheckDTO,
     SelfDTO,
     SettingsDTO,
+    ShareDTO,
+    ShareDownloadDTO,
+    ShareItemDTO,
+    ShareVisibilityDTO,
     TransferDTO
 } from "./models.js";

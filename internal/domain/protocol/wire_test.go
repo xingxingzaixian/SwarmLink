@@ -175,8 +175,12 @@ func TestErrorPayloadAndGroupWireRoundTrip(t *testing.T) {
 	}
 
 	meta := GroupMeta{
-		GroupID: "g1", Name: "team", OwnerID: "0011", Epoch: 3, StateSig: "AQID",
-		Members: []GroupMemberWire{{NodeID: "aa", DisplayName: "bob", Role: "member", State: "active", JoinedAt: 1}},
+		GroupID: "g1", Name: "team", OwnerID: "0011", Epoch: 3, RosterSig: "AQID",
+		MintSeq: 13, RosterDigest: "RE9HRVNU",
+		Members: []GroupMemberWire{{
+			NodeID: "aa", DisplayName: "bob", Role: "member", State: "active", JoinedAt: 1,
+			AdmitSeq: 13, KickSeq: 0, LeftSeq: 9, LeftSig: "U0lH",
+		}},
 	}
 	raw, err = EncodeJSON(meta)
 	if err != nil {
@@ -188,5 +192,26 @@ func TestErrorPayloadAndGroupWireRoundTrip(t *testing.T) {
 	}
 	if back.GroupID != "g1" || back.Epoch != 3 || len(back.Members) != 1 || back.Members[0].NodeID != "aa" {
 		t.Fatalf("group meta mismatch: %+v", back)
+	}
+	// 票号与两块签名必须原样过线：少带一个，接收端就会把「退出」或「被踢」判错。
+	if back.MintSeq != 13 || back.RosterDigest != "RE9HRVNU" {
+		t.Errorf("群级票号未往返：mint=%d digest=%q", back.MintSeq, back.RosterDigest)
+	}
+	m := back.Members[0]
+	if m.AdmitSeq != 13 || m.KickSeq != 0 || m.LeftSeq != 9 || m.LeftSig != "U0lH" {
+		t.Errorf("成员票号未往返：%+v", m)
+	}
+
+	lv := GroupLeave{GroupID: "g1", NodeID: "aa", LeftSeq: 9, Sig: "U0lH"}
+	raw, err = EncodeJSON(lv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var backLeave GroupLeave
+	if err := DecodeJSON(raw, &backLeave); err != nil {
+		t.Fatal(err)
+	}
+	if backLeave != lv {
+		t.Fatalf("group leave mismatch: %+v", backLeave)
 	}
 }

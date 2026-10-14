@@ -151,12 +151,33 @@ func TestCreateInRestoresTree(t *testing.T) {
 	}
 }
 
-// 目标目录已存在同名文件夹：整批退到「照片 (1)」，两份内容不混合。
-func TestCreateInRenamesExistingBatchRoot(t *testing.T) {
+// 目标目录已存在同名文件夹：直接【复用】那个目录，不改名成「照片 (1)」。
+func TestCreateInReusesExistingBatchRoot(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "照片"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// 目录里已有的文件必须原样保留：是合并，不是另起一份。
+	write(t, filepath.Join(dir, "照片", "keep.txt"), "keep")
+	s, _ := New(dir)
+
+	h, err := s.CreateIn(ports.SinkRequest{JobID: "j1", BatchID: "b1", RelPath: "照片/a.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "照片", "a.jpg"); h.FinalPath != want {
+		t.Errorf("final = %q，期望复用已有目录 %q", h.FinalPath, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "照片", "keep.txt")); err != nil || string(b) != "keep" {
+		t.Errorf("目录里原有的文件被动了：%v %q", err, b)
+	}
+}
+
+// 同名【文件】挡在根目录的位置（无法合并成目录）：只能退到唯一名，
+// 否则这一批根本没有地方可落。
+func TestCreateInRootBlockedByFileFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "照片"), "i am a file")
 	s, _ := New(dir)
 
 	h, err := s.CreateIn(ports.SinkRequest{JobID: "j1", BatchID: "b1", RelPath: "照片/a.jpg"})
@@ -164,12 +185,15 @@ func TestCreateInRenamesExistingBatchRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := filepath.Join(dir, "照片 (1)", "a.jpg"); h.FinalPath != want {
-		t.Errorf("final = %q，期望改名为 %q", h.FinalPath, want)
+		t.Errorf("final = %q，期望退到 %q", h.FinalPath, want)
 	}
 }
 
-// 不同批次用同一个文件夹名：必须各分配各的根，不能共用一个。
-func TestCreateInDifferentBatchesGetSeparateRoots(t *testing.T) {
+// 不同批次用同一个文件夹名：落到【同一个目录】里。
+//
+// 「同名目录就是同一个目录」：再开一个「照片 (1)」会把同一份内容分成两份
+// （重复下载同一个共享时最刺眼 —— 下三个文件就得到三个目录）。
+func TestCreateInBatchesShareExistingRoot(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := New(dir)
 
@@ -177,15 +201,88 @@ func TestCreateInDifferentBatchesGetSeparateRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h2, err := s.CreateIn(ports.SinkRequest{JobID: "j2", BatchID: "b2", RelPath: "照片/b.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "照片")
+	for _, h := range []ports.SinkHandle{h1, h2} {
+		if filepath.Dir(h.FinalPath) != want {
+			t.Errorf("落点 = %q，期望同在 %q 下", h.FinalPath, want)
+		}
+	}
+}
+
+// 同名同路径的文件是「同一份文件的再次到达」：就地覆盖，不留 (1) 副本。
+func TestCreateInOverwritesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "照片"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "照片", "a.jpg"), "old")
+	s, _ := New(dir)
+
+	h, err := s.CreateIn(ports.SinkRequest{JobID: "j2", BatchID: "b2", RelPath: "照片/a.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "照片", "a.jpg"); h.FinalPath != want {
+		t.Fatalf("final = %q，期望就地覆盖 %q", h.FinalPath, want)
+	}
+	if err := os.WriteFile(h.TempPath, []byte("new-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(h); err != nil {
+		t.Fatal(err)
+	}
+
+	if b, err := os.ReadFile(h.FinalPath); err != nil || string(b) != "new-content" {
+		t.Fatalf("文件内容 = %q（err=%v），期望被覆盖为 new-content", b, err)
+	}
+	ents, err := os.ReadDir(filepath.Join(dir, "照片"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if e.Name() != "a.jpg" {
+			t.Errorf("目录里多出了 %s（重复下载不该产生副本）", e.Name())
+		}
+	}
+}
+
+// 覆盖语义的第二半：同一条路径【此刻正被另一个任务写】时退到唯一名，
+// 免得两份并发的内容互相把对方覆盖掉；占位在 Commit 后释放，于是
+// 「先后到达」的重复下载又回到覆盖。
+//
+// 这两条必须一起成立：只做后者会让覆盖在「同一进程内的第二次下载」失效
+// （占位从没释放过），只做前者会留下并发互相覆盖的窗口。
+func TestCreateInMergesSequentialButNotConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := New(dir)
+
+	h1, err := s.CreateIn(ports.SinkRequest{JobID: "j1", BatchID: "b1", RelPath: "照片/a.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 并发到达的同名文件：让开一步（h1 还在写这条路径）。
 	h2, err := s.CreateIn(ports.SinkRequest{JobID: "j2", BatchID: "b2", RelPath: "照片/a.jpg"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h1.FinalPath == h2.FinalPath {
-		t.Fatalf("两个批次不该共用根目录：%s", h1.FinalPath)
+	if want := filepath.Join(dir, "照片", "a (1).jpg"); h2.FinalPath != want {
+		t.Errorf("并发落点 = %q，期望 %q", h2.FinalPath, want)
 	}
-	if filepath.Dir(h2.FinalPath) != filepath.Join(dir, "照片 (1)") {
-		t.Errorf("第二批根目录 = %q，期望 %q", filepath.Dir(h2.FinalPath), filepath.Join(dir, "照片 (1)"))
+
+	// h1 写完 → 占位释放 → 再来的同名文件回到覆盖语义。
+	if _, err := s.Commit(h1); err != nil {
+		t.Fatal(err)
+	}
+	h3, err := s.CreateIn(ports.SinkRequest{JobID: "j3", BatchID: "b3", RelPath: "照片/a.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "照片", "a.jpg"); h3.FinalPath != want {
+		t.Errorf("顺序落点 = %q，期望覆盖原文件 %q", h3.FinalPath, want)
 	}
 }
 

@@ -11,6 +11,9 @@ import type {
   Self,
   SelfCheck,
   Settings,
+  Share,
+  ShareDownload,
+  ShareItem,
   SwarmApi,
   TransferJob
 } from './types'
@@ -381,13 +384,17 @@ export function createMockApi(): SwarmApi {
   function simulateFolder(
     peerId: string,
     folderName: string,
-    entries: { name: string; size: number; isDir?: boolean }[]
+    entries: { name: string; size: number; isDir?: boolean }[],
+    batchIdOverride?: string
   ): FolderSummary {
-    const batchId = `mock-batch-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+    // 群聊发文件夹时多个成员共享一个批次（见 sendFolderTo），
+    // 因此 jobId 必须带上 peerId，否则成员之间会互相覆盖。
+    const batchId =
+      batchIdOverride ?? `mock-batch-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
     const startedAt = Date.now()
 
     const specs = entries.map((e, i) => ({
-      jobId: `${batchId}-${i}`,
+      jobId: `${batchId}-${peerId.slice(0, 6)}-${i}`,
       relPath: `${folderName}/${e.name}`,
       size: e.size,
       isDir: !!e.isDir
@@ -459,22 +466,191 @@ export function createMockApi(): SwarmApi {
     }
   }
 
+  // 造一个「有人已退出」的群，好让面板的三种成员状态都能被走查到。
   const groups: Group[] = [
     {
       groupId: GROUP,
       name: '联调小组',
       ownerId: ALICE,
       epoch: 3,
+      mintSeq: 5,
+      state: 'active',
       isOwner: false,
       members: [
-        { nodeId: ALICE, displayName: 'alice', role: 'owner', state: 'active' },
-        { nodeId: self.nodeId, displayName: self.displayName, role: 'member', state: 'active' },
-        { nodeId: BOB, displayName: 'bob', role: 'member', state: 'active' },
-        { nodeId: CAROL, displayName: 'carol', role: 'member', state: 'inactive' }
+        { nodeId: ALICE, displayName: 'alice', role: 'owner', state: 'active', active: true, admitSeq: 1, kickSeq: 0, leftSeq: 0 },
+        { nodeId: self.nodeId, displayName: self.displayName, role: 'member', state: 'active', active: true, admitSeq: 3, kickSeq: 0, leftSeq: 0 },
+        { nodeId: BOB, displayName: 'bob', role: 'member', state: 'active', active: true, admitSeq: 4, kickSeq: 0, leftSeq: 0 },
+        // carol 主动退出过：leftSeq == admitSeq ⇒ active=false
+        { nodeId: CAROL, displayName: 'carol', role: 'member', state: 'left', active: false, admitSeq: 5, kickSeq: 0, leftSeq: 5 }
       ],
       createdAt: now - 86_400_000
     }
   ]
+
+  /**
+   * 共享（FR-14）。
+   *
+   * 三种形态都预置，因为它们各自触发一条不同的界面分支：
+   *   - 我发布的（有「刷新索引 / 取消共享」）；
+   *   - 他人发布且在线（可浏览 + 可下载）；
+   *   - 他人发布但离线（浏览会失败，必须看到「共享方不在线」）。
+   *
+   * 没有原生文件对话框的环境里，发布向导点不出来 —— 不预置就永远走查不到。
+   */
+  const MY_SHARE = 'mock-share-mine'
+  const ALICE_SHARE = 'mock-share-alice'
+  const BOB_SHARE = 'mock-share-bob'
+
+  const MY_ITEMS: ShareItem[] = [
+    { path: '2026/W01.docx', name: 'W01.docx', size: 48 * 1024, mtime: 1_696_828_800 },
+    { path: '2026/W02.docx', name: 'W02.docx', size: 52 * 1024, mtime: 1_696_828_800 },
+    { path: '模板/说明.txt', name: '说明.txt', size: 2048, mtime: 1_696_828_800 },
+    { path: '模板/空目录', name: '空目录', size: 0, isDir: true }
+  ]
+
+  const ALICE_ITEMS: ShareItem[] = [
+    { path: 'build/SwarmLink.exe', name: 'SwarmLink.exe', size: 24 * 1024 * 1024 },
+    { path: 'build/README.md', name: 'README.md', size: 6 * 1024 },
+    { path: 'build/checksums.txt', name: 'checksums.txt', size: 512 }
+  ]
+
+  const shares: Share[] = [
+    {
+      shareId: MY_SHARE,
+      name: '周报模板',
+      ownerId: self.nodeId,
+      ownerName: self.displayName,
+      fileCount: MY_ITEMS.length,
+      totalSize: MY_ITEMS.reduce((sum, i) => sum + i.size, 0),
+      visibility: { type: 'users', allowed: [ALICE] },
+      visibilityText: '指定人(1)',
+      mine: true,
+      rootPath: 'D:\\共享\\周报模板',
+      online: true,
+      downloadable: false,
+      createdAt: now - 3600_000,
+      updatedAt: now - 3600_000
+    },
+    {
+      shareId: ALICE_SHARE,
+      name: '测试包',
+      ownerId: ALICE,
+      ownerName: 'alice',
+      fileCount: ALICE_ITEMS.length,
+      totalSize: ALICE_ITEMS.reduce((sum, i) => sum + i.size, 0),
+      visibility: { type: 'all' },
+      visibilityText: '全部',
+      mine: false,
+      online: true,
+      downloadable: true,
+      createdAt: 0,
+      updatedAt: 0
+    },
+    {
+      shareId: BOB_SHARE,
+      name: '日志归档',
+      ownerId: BOB,
+      ownerName: 'bob',
+      fileCount: 12,
+      totalSize: 180 * 1024 * 1024,
+      visibility: { type: 'users', allowed: [self.nodeId] },
+      visibilityText: '指定人(1)',
+      mine: false,
+      online: false,
+      downloadable: false,
+      createdAt: 0,
+      updatedAt: 0
+    }
+  ]
+
+  /** 各条共享的文件清单（发布新共享时往里塞一份）。 */
+  const shareItems = new Map<string, ShareItem[]>([
+    [MY_SHARE, MY_ITEMS],
+    [ALICE_SHARE, ALICE_ITEMS]
+  ])
+
+  /** 取某条共享的清单（bob 那条故意没有 —— 它离线，浏览就该失败）。 */
+  function itemsOf(shareId: string): ShareItem[] {
+    return (shareItems.get(shareId) ?? []).map((i) => ({ ...i }))
+  }
+
+  /** 可见性文案：与后端 share.Visibility.String() 的取值保持一致。 */
+  function visText(visType: string, allowed: number): string {
+    if (visType === 'all') return '全部'
+    if (visType === 'group') return '仅群组'
+    return `指定人(${allowed})`
+  }
+
+  /**
+   * 模拟一次共享下载：为每个文件建一条【接收方向】的任务，再逐个跑完。
+   *
+   * 与真实后端对齐的两点必须照做，否则走查看到的是另一种界面：
+   *   1. 任务落库时是 idle + batch_queued（立刻出现在传输列表里）；
+   *   2. 同一对端串行，且空目录条目直接完成（没有内容可传）。
+   */
+  function simulateShareDownload(peerId: string, rootName: string, items: ShareItem[]): ShareDownload {
+    const batchId = `mock-batch-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+    const specs = items.map((it, i) => ({
+      jobId: `${batchId}-${i}`,
+      relPath: `${rootName}/${it.path}`,
+      size: it.size,
+      isDir: !!it.isDir
+    }))
+
+    for (const s of specs) {
+      jobs.unshift({
+        jobId: s.jobId,
+        peerId,
+        fileName: baseName(s.relPath),
+        fileSize: s.size,
+        direction: 'recv',
+        localPath: '',
+        status: 'queued',
+        waitReason: 'batch_queued',
+        batchId,
+        relPath: s.relPath,
+        isDir: s.isDir,
+        completed: 0,
+        totalChunks: s.isDir ? 0 : Math.ceil(s.size / (512 * 1024)),
+        percent: 0,
+        updatedAt: Date.now()
+      })
+    }
+
+    void (async () => {
+      for (const s of specs) {
+        const job = jobs.find((j) => j.jobId === s.jobId)
+        if (!job) continue
+        if (job.status === 'cancelled') return
+        if (!s.isDir && s.size > 0) {
+          job.status = 'transferring'
+          job.waitReason = undefined
+          for (let percent = 25; percent <= 100; percent += 25) {
+            await sleep(220)
+            if (job.status === 'cancelled') return
+            job.percent = percent
+            job.updatedAt = Date.now()
+            emit(EV.transferProgress, {
+              jobId: s.jobId,
+              peerId,
+              percent,
+              speed: 5 * 1024 * 1024 + Math.random() * 4 * 1024 * 1024,
+              status: percent >= 100 ? 'verifying' : 'transferring'
+            })
+          }
+        }
+        job.percent = 100
+        job.status = 'done'
+        job.waitReason = undefined
+        job.completed = job.totalChunks
+        job.localPath = `${settings.downloadDir}/${s.relPath}`
+        job.updatedAt = Date.now()
+        emit(EV.transferDone, { jobId: s.jobId, peerId, path: job.localPath })
+      }
+    })()
+
+    return { batchId, accepted: specs.length, rejected: [] }
+  }
 
   return {
     async getSettings() {
@@ -645,6 +821,24 @@ export function createMockApi(): SwarmApi {
         { name: 'readme.txt', size: 4 * 1024 }
       ])
     },
+    async sendFolderTo(peerIds, path): Promise<FolderSummary> {
+      const name = baseName(path)
+      if (!name) throw new Error('请选择文件夹')
+      if (!peerIds.length) throw new Error('没有可发送的成员')
+      // 全批共享一个 batch_id：卡片进度按「文件夹里有几个文件」算，而不是乘成员数。
+      const batchId = `mock-batch-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+      const entries = [
+        { name: '2024/01/a.jpg', size: 3 * 1024 * 1024 },
+        { name: '2024/02/a.jpg', size: 3 * 1024 * 1024 },
+        { name: '空目录', size: 0, isDir: true },
+        { name: '报告.pdf', size: 12 * 1024 * 1024 },
+        { name: 'readme.txt', size: 4 * 1024 }
+      ]
+      let last: FolderSummary | null = null
+      for (const pid of peerIds) last = simulateFolder(pid, name, entries, batchId)
+      // peerIds 非空，循环至少跑一次。
+      return last as FolderSummary
+    },
     async transfers() {
       return [...jobs]
     },
@@ -705,6 +899,93 @@ export function createMockApi(): SwarmApi {
       const i = peers.findIndex((p) => p.nodeId === nodeId)
       if (i >= 0) peers.splice(i, 1)
     },
+    async shareList(): Promise<Share[]> {
+      return shares.map((s) => ({ ...s }))
+    },
+    async sharePublish(rootPath, name, visType, allowed): Promise<Share> {
+      if (!rootPath.trim()) throw new Error('请选择要共享的目录或文件')
+      if (!name.trim()) throw new Error('共享名不能为空')
+      if (visType === 'users' && !allowed.length) {
+        throw new Error('share: 可见性为「指定人」时必须至少选择一个人')
+      }
+      const shareName = name.trim()
+      // 预览模式读不到真实目录，因此造一份形状真实的小清单：
+      // 关键是「文件数 / 总大小」由清单算出，界面上的卡片才会与真机一致。
+      const items: ShareItem[] =
+        visType === 'group'
+          ? [{ path: '联调记录/readme.txt', name: 'readme.txt', size: 4096 }]
+          : MY_ITEMS.map((i) => ({ ...i }))
+      const created: Share = {
+        shareId: `mock-share-${Date.now()}`,
+        name: shareName,
+        ownerId: self.nodeId,
+        ownerName: self.displayName,
+        fileCount: items.length,
+        totalSize: items.reduce((sum, i) => sum + i.size, 0),
+        visibility: { type: visType, allowed: visType === 'all' ? [] : [...allowed] },
+        visibilityText: visText(visType, allowed.length),
+        mine: true,
+        rootPath,
+        online: true,
+        downloadable: false,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      }
+      shares.unshift(created)
+      shareItems.set(created.shareId, items)
+      // 真实后端会发 share:updated（本机共享清单变化），走查时这条链路也要通。
+      emit(EV.shareUpdated, { shareId: created.shareId, action: 'published' })
+      return { ...created }
+    },
+    async shareUnpublish(shareId) {
+      const i = shares.findIndex((s) => s.shareId === shareId)
+      if (i >= 0) shares.splice(i, 1)
+      shareItems.delete(shareId)
+      emit(EV.shareUpdated, { shareId, action: 'unpublished' })
+    },
+    async shareSetVisibility(shareId, visType, allowed): Promise<Share> {
+      const s = shares.find((x) => x.shareId === shareId)
+      if (!s) throw new Error('share: 找不到这条共享')
+      // 两条取值规则与后端一致：空名单会让共享变成「谁都不许看」，
+      // 「仅群组」多于一个群则无从判定 —— 都必须在界面这一侧就被拒。
+      if (visType === 'users' && !allowed.length) {
+        throw new Error('share: 可见性为「指定人」时必须至少选择一个人')
+      }
+      if (visType === 'group' && allowed.length !== 1) {
+        throw new Error('share: 可见性为「仅群组」时必须且只能指定一个群')
+      }
+      s.visibility = { type: visType, allowed: visType === 'all' ? [] : [...allowed] }
+      s.visibilityText = visText(visType, allowed.length)
+      s.updatedAt = Date.now()
+      emit(EV.shareUpdated, { shareId, action: 'visibility' })
+      return { ...s }
+    },
+    async shareRefresh(shareId): Promise<Share> {
+      const s = shares.find((x) => x.shareId === shareId)
+      if (!s) throw new Error('share: not found')
+      // 「刷新索引」的真实效果是清单可能变多或变少；预览里只更新时间戳，
+      // 因为凭空改文件数会让界面上的数字与清单自相矛盾。
+      s.updatedAt = Date.now()
+      emit(EV.shareUpdated, { shareId, action: 'refreshed' })
+      return { ...s }
+    },
+    async shareBrowse(shareId): Promise<ShareItem[]> {
+      const s = shares.find((x) => x.shareId === shareId)
+      if (!s || !s.online) {
+        // bob 离线：浏览必须失败，界面才能走查到「共享方不在线」这条提示。
+        throw new Error(`share: 共享方不在线（${s?.ownerName ?? '未知用户'}）`)
+      }
+      return itemsOf(shareId)
+    },
+    async shareDownload(shareId, paths): Promise<ShareDownload> {
+      const s = shares.find((x) => x.shareId === shareId)
+      if (!s) throw new Error('share: 找不到这条共享')
+      if (!s.downloadable) throw new Error(`share: 共享方不在线（${s.ownerName}）`)
+      const picked = itemsOf(shareId).filter((i) => paths.includes(i.path))
+      if (!picked.length) throw new Error('共享方没有受理任何文件（清单可能已过期，请刷新后重试）')
+      return simulateShareDownload(s.ownerId, s.name, picked)
+    },
+
     async diagnostics() {
       // 两个计数现算：mock 里删过节点之后，创建时的快照会与列表对不上
       return {
@@ -723,20 +1004,97 @@ export function createMockApi(): SwarmApi {
         name,
         ownerId: self.nodeId,
         epoch: 1,
+        // 群主自己是 1 号票；每加一个成员递增 —— 与后端「群级票号」同构。
+        mintSeq: 1,
+        state: 'active',
         isOwner: true,
-        members: memberIds.map((id) => ({
-          nodeId: id,
-          displayName: peers.find((p) => p.nodeId === id)?.displayName ?? id.slice(0, 8),
-          role: 'member',
-          state: 'active'
-        })),
+        members: [
+          {
+            nodeId: self.nodeId,
+            displayName: self.displayName,
+            role: 'owner',
+            state: 'active',
+            active: true,
+            admitSeq: 1,
+            kickSeq: 0,
+            leftSeq: 0
+          },
+          ...memberIds.map((id, i) => ({
+            nodeId: id,
+            displayName: peers.find((p) => p.nodeId === id)?.displayName ?? id.slice(0, 8),
+            role: 'member',
+            state: 'active',
+            active: true,
+            admitSeq: i + 2,
+            kickSeq: 0,
+            leftSeq: 0
+          }))
+        ],
         createdAt: Date.now()
       }
+      g.mintSeq = g.members.length
       groups.push(g)
       return g
     },
-    async groupAddMember(groupId) {
+    async groupAddMember(groupId, memberId) {
       const g = groups.find((x) => x.groupId === groupId) ?? groups[0]
+      // 发票：票号取自群级计数器，因此【必然】大于该成员此前的任何票号 ——
+      // 被踢/已退出的人重新拉回必定生效（这正是群级票号的意义）。
+      const seq = ++g.mintSeq
+      const m = g.members.find((x) => x.nodeId === memberId)
+      if (m) {
+        m.admitSeq = seq
+        m.active = true
+        m.state = 'active'
+      } else {
+        g.members.push({
+          nodeId: memberId,
+          displayName: peers.find((p) => p.nodeId === memberId)?.displayName ?? memberId.slice(0, 8),
+          role: 'member',
+          state: 'active',
+          active: true,
+          admitSeq: seq,
+          kickSeq: 0,
+          leftSeq: 0
+        })
+      }
+      g.epoch += 1
+      return { ...g }
+    },
+    async groupRemoveMember(groupId, memberId) {
+      const g = groups.find((x) => x.groupId === groupId) ?? groups[0]
+      const m = g.members.find((x) => x.nodeId === memberId)
+      if (m) {
+        // 撕票：撕票号【等于】票号 ⇒ active=false。写成「减一」或「动 state」
+        // 都不是这个模型，预览态也会跟着长歪。
+        m.kickSeq = m.admitSeq
+        m.active = false
+        m.state = 'kicked'
+      }
+      g.epoch += 1
+      return { ...g }
+    },
+    async groupLeave(groupId) {
+      const g = groups.find((x) => x.groupId === groupId) ?? groups[0]
+      const m = g.members.find((x) => x.nodeId === self.nodeId)
+      if (m) {
+        m.leftSeq = m.admitSeq
+        m.active = false
+        m.state = 'left'
+      }
+      // 刻意【不】动 epoch：退出不经群主，名册块没变 —— 与后端一致。
+      return { ...g }
+    },
+    async groupRename(groupId, name) {
+      const g = groups.find((x) => x.groupId === groupId) ?? groups[0]
+      g.name = name
+      g.epoch += 1
+      return { ...g }
+    },
+    async groupDissolve(groupId) {
+      const g = groups.find((x) => x.groupId === groupId) ?? groups[0]
+      g.state = 'dissolved'
+      g.epoch += 1
       return { ...g }
     },
     async groupSendMessage(groupId, text) {
@@ -748,6 +1106,9 @@ export function createMockApi(): SwarmApi {
         content: text,
         msgType: 'text',
         state: 'pending',
+        // 预览态带一个未送达计数，用来走查「N 人未送达」；送达事件到达后清零。
+        memberCount: 3,
+        pendingCount: 1,
         sentAt: Date.now()
       }
       push(groupId, m)
@@ -786,6 +1147,29 @@ export function createMockApi(): SwarmApi {
       push(groupId, m)
       window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
       return m
+    },
+    async groupSendFolder(groupId, batchId, folderName, fileCount, totalSize, skipped) {
+      const m: Message = {
+        msgId: `mock-g-folder-${Date.now()}`,
+        convId: groupId,
+        senderId: self.nodeId,
+        direction: 'out',
+        content: JSON.stringify({
+          batch_id: batchId,
+          folder_name: folderName,
+          file_count: fileCount,
+          total_size: totalSize,
+          skipped
+        }),
+        msgType: 'folder',
+        state: 'pending',
+        memberCount: 3,
+        pendingCount: 1,
+        sentAt: Date.now()
+      }
+      push(groupId, m)
+      window.setTimeout(() => emit(EV.chatDelivered, { msgId: m.msgId }), 300)
+      return m
     }
   }
 }
@@ -807,6 +1191,8 @@ function mkPeer(
     source: 'broadcast',
     lastSeen: Date.now(),
     online,
-    connected
+    connected,
+    // 演示数据：只有真有会话才谈得上延迟。0 = 没数据（界面显示「测量中」）。
+    rttMs: connected ? 12 : 0
   }
 }

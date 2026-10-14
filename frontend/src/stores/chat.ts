@@ -284,24 +284,31 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 发送文件夹消息：一条聚合卡片，只让两端聊天框知道「有一个文件夹在路上」。
    *
-   * 只支持单聊：群聊的文件传输入口本就禁用（设计文档 4.1），
-   * 若这里静默按「群聊」发出去，卡片会出现、文件却永远不会来。
+   * 单聊与群聊都支持：群聊的卡片同样只是「一张说明」，文件字节由调用方
+   * 对每个在线成员各自发起点对点传输（见 useFileSend 的群分支）。
    *
    * 与文本/文件发送共用 upsert/bump，因此同样会等到 chat:delivered 回来。
    */
   async function sendFolder(conv: Conversation, summary: FolderSummary): Promise<void> {
-    if (conv.kind === 'group') {
-      throw new Error('群聊暂不支持文件夹传输')
-    }
     const api = await getApi()
-    const m = await api.sendFolderMessage(
-      conv.peerId ?? '',
-      summary.batchId,
-      summary.folderName,
-      summary.fileCount,
-      summary.totalSize,
-      summary.skipped
-    )
+    const m =
+      conv.kind === 'group'
+        ? await api.groupSendFolder(
+            conv.convId,
+            summary.batchId,
+            summary.folderName,
+            summary.fileCount,
+            summary.totalSize,
+            summary.skipped
+          )
+        : await api.sendFolderMessage(
+            conv.peerId ?? '',
+            summary.batchId,
+            summary.folderName,
+            summary.fileCount,
+            summary.totalSize,
+            summary.skipped
+          )
     upsert(conv.convId, m)
     previews.value = { ...previews.value, [conv.convId]: m }
     bump(conv.convId, m.sentAt)
@@ -316,7 +323,9 @@ export const useChatStore = defineStore('chat', () => {
     for (const [convId, list] of Object.entries(messagesByConv.value)) {
       const i = list.findIndex((m) => m.msgId === msgId)
       if (i >= 0) {
-        list[i] = { ...list[i], state: 'delivered' }
+        // 群消息的 delivered 语义是「全员送达」（后端只在全员确认后才发这条事件），
+        // 因此这里顺带把未送达计数清零，避免「已送达」与「N 人未送达」自相矛盾。
+        list[i] = { ...list[i], state: 'delivered', pendingCount: 0 }
         messagesByConv.value = { ...messagesByConv.value, [convId]: [...list] }
         return
       }

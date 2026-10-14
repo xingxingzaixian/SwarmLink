@@ -9,8 +9,10 @@
 package wails
 
 import (
+	"github.com/swarmlink/swarmlink/internal/app"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
 )
 
@@ -27,6 +29,13 @@ type MessageDTO struct {
 	State     string `json:"state"`
 	SentAt    int64  `json:"sentAt"`
 	RecvAt    int64  `json:"recvAt,omitempty"`
+
+	// 群消息的送达统计（单聊恒为 0，omitempty 让单聊的 JSON 保持不变）。
+	//
+	// PendingCount>0 表示还有成员没确认送达（离线或尚未连接），界面据此显示
+	// 「N 人未送达」。消息一旦全员送达，投递记录被清理，这里回到 0。
+	MemberCount  int `json:"memberCount,omitempty"`
+	PendingCount int `json:"pendingCount,omitempty"`
 }
 
 // ToMessageDTO 转换领域消息。
@@ -71,10 +80,17 @@ type PeerDTO struct {
 	LastSeen    int64  `json:"lastSeen"`
 	Online      bool   `json:"online"`
 	Connected   bool   `json:"connected"`
+
+	// RTTMs 是最近一次心跳测得的往返延迟（毫秒）。0 表示【没有数据】：
+	// 当前没有会话，或会话刚建立、心跳还没跑完一轮。
+	//
+	// 界面必须把「0」显示成「测量中」而不是「0ms」—— 后者是神仙延迟，
+	// 拿没数据冒充 0 是编造。
+	RTTMs int64 `json:"rttMs"`
 }
 
-// ToPeerDTO 转换领域节点；connected 由连接层提供。
-func ToPeerDTO(p peer.Peer, connected bool) PeerDTO {
+// ToPeerDTO 转换领域节点；connected 与 rttMs 均由连接层提供（rttMs 无数据时传 0）。
+func ToPeerDTO(p peer.Peer, connected bool, rttMs int64) PeerDTO {
 	short := p.NodeID.String()
 	if len(short) > 8 {
 		short = short[:8]
@@ -94,6 +110,7 @@ func ToPeerDTO(p peer.Peer, connected bool) PeerDTO {
 		LastSeen:    p.LastSeen.UnixMilli(),
 		Online:      p.State == peer.StateOnline,
 		Connected:   connected,
+		RTTMs:       rttMs,
 	}
 }
 
@@ -156,20 +173,145 @@ type FolderDTO struct {
 	Skipped    int    `json:"skipped"`
 }
 
+// ---------------------------------------------------------------------------
+// 文件共享（FR-14）
+// ---------------------------------------------------------------------------
+
+// ShareVisibilityDTO 是共享可见性。
+type ShareVisibilityDTO struct {
+	// Type 取值：all | users | group。
+	Type string `json:"type"`
+	// Allowed 是 node_id（users）或群 id（group）列表。
+	Allowed []string `json:"allowed,omitempty"`
+}
+
+// ShareDTO 是共享列表项：本机发布的与他人发布的共用一种形状。
+//
+// 为什么共用一个 DTO 而不是两份：界面上的两个分组渲染的是同一张卡片，
+// 差异只有「能不能下载 / 能不能取消」两个按钮位 —— 拆成两个类型会立刻
+// 出现「改了一边忘了另一边」的不对称。
+type ShareDTO struct {
+	ShareID   string `json:"shareId"`
+	Name      string `json:"name"`
+	OwnerID   string `json:"ownerId"`
+	OwnerName string `json:"ownerName"`
+	FileCount int    `json:"fileCount"`
+	TotalSize int64  `json:"totalSize"`
+
+	Visibility ShareVisibilityDTO `json:"visibility"`
+	// VisibilityText 是给人看的可见性文案（后端算，保证两处一致）。
+	VisibilityText string `json:"visibilityText"`
+
+	// Mine=true 表示这是【本机发布】的共享。
+	Mine bool `json:"mine"`
+	// RootPath 仅本机共享有值（本地根路径，界面「打开所在文件夹」用）。
+	RootPath string `json:"rootPath,omitempty"`
+
+	// Online 仅他人共享有意义：发布者此刻在目录里在线且地址可用。
+	Online bool `json:"online"`
+	// Downloadable 是后端算好的「现在点下载会成功吗」。
+	//
+	// 必须由后端给结论：它同时取决于 Mine / Online / 可见性，让前端把三个
+	// 字段组合一遍就等于把一条判定规则复制到第二个地方，而两者迟早不一致。
+	Downloadable bool `json:"downloadable"`
+
+	CreatedAt int64 `json:"createdAt"`
+	UpdatedAt int64 `json:"updatedAt"`
+}
+
+// ToShareDTO 把本机共享转成 DTO。
+func ToShareDTO(s share.Share) ShareDTO {
+	return ShareDTO{
+		ShareID:        s.ID,
+		Name:           s.Name,
+		OwnerID:        s.Owner,
+		OwnerName:      s.OwnerName,
+		FileCount:      len(s.Items),
+		TotalSize:      s.TotalSize,
+		Visibility:     ToShareVisibilityDTO(s.Visibility),
+		VisibilityText: s.Visibility.String(),
+		Mine:           true,
+		RootPath:       s.RootPath,
+		Online:         true, // 自己的共享当然「在线」
+		Downloadable:   false,
+		CreatedAt:      s.CreatedAt.UnixMilli(),
+		UpdatedAt:      s.UpdatedAt.UnixMilli(),
+	}
+}
+
+// ToRemoteShareDTO 把他人共享转成 DTO。
+func ToRemoteShareDTO(s app.RemoteShare) ShareDTO {
+	return ShareDTO{
+		ShareID:        s.ShareID,
+		Name:           s.Name,
+		OwnerID:        s.OwnerID,
+		OwnerName:      s.OwnerName,
+		FileCount:      s.FileCount,
+		TotalSize:      s.TotalSize,
+		Visibility:     ToShareVisibilityDTO(s.Visibility),
+		VisibilityText: s.Visibility.String(),
+		Mine:           false,
+		Online:         s.Online,
+		Downloadable:   s.Online,
+	}
+}
+
+// ToShareVisibilityDTO 转可见性。
+func ToShareVisibilityDTO(v share.Visibility) ShareVisibilityDTO {
+	vis := v.Normalize()
+	return ShareVisibilityDTO{Type: string(vis.Type), Allowed: vis.Allowed}
+}
+
+// ShareItemDTO 是共享里的一条文件。
+type ShareItemDTO struct {
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	IsDir bool   `json:"isDir,omitempty"`
+	MTime int64  `json:"mtime,omitempty"`
+}
+
+// ToShareItemDTO 转换条目。
+func ToShareItemDTO(it share.Item) ShareItemDTO {
+	return ShareItemDTO{Path: it.Path, Name: it.Name, Size: it.Size, IsDir: it.IsDir, MTime: it.MTime}
+}
+
+// ShareDownloadDTO 是一次共享下载的受理结果（进度走传输事件）。
+type ShareDownloadDTO struct {
+	BatchID  string   `json:"batchId"`
+	Accepted int      `json:"accepted"`
+	Rejected []string `json:"rejected,omitempty"`
+}
+
 // GroupMemberDTO 是群成员项。
+//
+// 票号一起暴露出去，是因为「谁还在群里」在前端也有一份判断需要与后端一致：
+// 只给 state 会让前端被迫用派生缓存做判据，而缓存与票号一旦不同步，
+// 就会出现「后端说已退出、前端仍显示在群」这种对不上的现象。
 type GroupMemberDTO struct {
 	NodeID      string `json:"nodeId"`
 	DisplayName string `json:"displayName"`
 	Role        string `json:"role"`
 	State       string `json:"state"`
+
+	// Active 是权威判据（后端按票号算好），前端不要自己用 state 推。
+	Active   bool  `json:"active"`
+	AdmitSeq int64 `json:"admitSeq"`
+	KickSeq  int64 `json:"kickSeq"`
+	LeftSeq  int64 `json:"leftSeq"`
 }
 
 // GroupDTO 是群项。
 type GroupDTO struct {
-	GroupID   string           `json:"groupId"`
-	Name      string           `json:"name"`
-	OwnerID   string           `json:"ownerId"`
-	Epoch     int64            `json:"epoch"`
+	GroupID string `json:"groupId"`
+	Name    string `json:"name"`
+	OwnerID string `json:"ownerId"`
+	Epoch   int64  `json:"epoch"`
+	// MintSeq 是群主的群级发票计数器（票号来源）。只用于展示/排障：
+	// 「为什么某人的 admit_seq 是 13」要靠它解释。
+	MintSeq int64 `json:"mintSeq"`
+	// State 是群状态（active / dissolved）。解散后前端禁用输入并展示横幅。
+	State     string           `json:"state"`
 	IsOwner   bool             `json:"isOwner"`
 	Members   []GroupMemberDTO `json:"members"`
 	CreatedAt int64            `json:"createdAt"`

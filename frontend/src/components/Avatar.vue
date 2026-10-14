@@ -7,8 +7,10 @@
  * 颜色由 node_id 哈希决定：同一个节点在任何位置（列表 / 气泡 / 资料卡）
  * 永远是同一个颜色，用户会自然地把它当成身份标识。
  *
- * 调色板是【手选】的 8 组同明度渐变，不是随机 HSL ——
- * 随机 HSL 会产出脏黄、荧光绿这类破坏浅色主题的颜色。
+ * 调色板是【手选】的 8 组同明度渐变，用 OKLCH 定义。两条硬约束：
+ *   - 器内【没有绿色】：强调色是电信号绿，绿色头像会被误读成「在线」，
+ *     而在线与否由右下角的点表达，两者不能撞语义；
+ *   - 各组明度相同（L 差 ≤ 2%）：明度不齐时，深色那几组上的白字会先糊掉。
  */
 import { computed } from 'vue'
 
@@ -22,21 +24,21 @@ const props = withDefaults(
     shape?: 'circle' | 'square'
     /** null 表示不显示在线点。 */
     online?: boolean | null
-    /** 选中态：给头像加一圈品牌色描边。 */
+    /** 选中态：给头像加一圈强调色描边（列表里的选中项 / 资料卡大头像）。 */
     active?: boolean
   }>(),
   { seed: '', name: '', size: 38, shape: 'circle', online: null, active: false }
 )
 
 const PALETTE: [string, string][] = [
-  ['#5b8def', '#3667d6'],
-  ['#19b8f0', '#0b91cc'],
-  ['#8a7cf5', '#6455e0'],
-  ['#2ec4a6', '#159a80'],
-  ['#f0a04b', '#d47c22'],
-  ['#ef7396', '#d2486f'],
-  ['#8fbf4a', '#6b9a2c'],
-  ['#7d8ea8', '#5c6d87']
+  ['oklch(64% 0.15 255)', 'oklch(55% 0.16 258)'], // 蓝
+  ['oklch(62% 0.15 275)', 'oklch(53% 0.16 278)'], // 靛
+  ['oklch(64% 0.15 300)', 'oklch(55% 0.16 303)'], // 紫
+  ['oklch(66% 0.16 340)', 'oklch(56% 0.17 343)'], // 品红
+  ['oklch(65% 0.16 15)', 'oklch(55% 0.17 18)'], // 玫红
+  ['oklch(72% 0.14 70)', 'oklch(62% 0.15 72)'], // 琥珀
+  ['oklch(64% 0.12 195)', 'oklch(54% 0.13 198)'], // 青
+  ['oklch(62% 0.03 255)', 'oklch(52% 0.03 255)'] // 石板
 ]
 
 /** djb2：够短，且对 node_id 这类 hex 串分布良好。 */
@@ -60,7 +62,7 @@ const radius = computed(() =>
   props.shape === 'circle' ? '50%' : `${Math.max(6, Math.round(props.size * 0.28))}px`
 )
 
-const dotSize = computed(() => Math.max(8, Math.round(props.size * 0.28)))
+const dotSize = computed(() => Math.max(9, Math.round(props.size * 0.28)))
 </script>
 
 <template>
@@ -83,7 +85,7 @@ const dotSize = computed(() => Math.max(8, Math.round(props.size * 0.28)))
       :style="{
         width: dotSize + 'px',
         height: dotSize + 'px',
-        borderWidth: Math.max(1.5, dotSize * 0.2) + 'px'
+        borderWidth: Math.max(2, dotSize * 0.22) + 'px'
       }"
     />
   </div>
@@ -96,37 +98,51 @@ const dotSize = computed(() => Math.max(8, Math.round(props.size * 0.28)))
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 50%;
   color: #fff;
+  font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: 0.01em;
   user-select: none;
-  /* 渐变上的白字要压一点内阴影才不显薄 */
-  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.08);
+  /* 静默的一圈边：渐变直接贴在面板色上时边缘会「发毛」，
+     但**不用强调色** —— 一列联系人都镶绿边会把 ≤10% 的强调色预算烧光，
+     那圈绿留给选中项（.ring）与资料卡大头像。 */
+  box-shadow: 0 0 0 2px var(--divider);
 }
 
-/* 选中描边用粉（身份色）。底色写成半透明深色而不是某个具体面板色：
-   头像会出现在玻璃栏、弹层、列表行上，写死底色就会到处露馅 */
+/* 选中描边用强调色。底色不写死面板色：头像会出现在面板、弹层、列表行上，
+   写死就会到处露馅。 */
 .avatar.ring {
-  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.08),
-    0 0 0 2px var(--ring), 0 0 0 4px var(--brand);
+  box-shadow: 0 0 0 2px var(--divider), 0 0 0 4px var(--accent-ring);
 }
 
-/* 在线点的「环」= 头像底色的缺口。
-   深色界面上要用深环；用白环会变成一个刺眼的光圈。 */
+/* 在线点：右下角的缺口环 + 向外扩散的脉冲。
+   环色用 --bg-panel：头像主要出现在左右栏面板上。 */
 .state {
   position: absolute;
   right: -1px;
   bottom: -1px;
   border-style: solid;
-  border-color: var(--ring);
+  border-color: var(--bg-panel);
   border-radius: 50%;
 }
 
 .state.on {
-  background: var(--ok);
+  background: var(--accent);
+}
+
+/* 扩散环用伪元素，不能直接放在 .state 上 ——
+   box-shadow 与上面的 border 会互相打架。 */
+.state.on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 2s var(--ease) infinite;
 }
 
 .state.off {
-  background: #c6ccd6;
+  background: var(--text-muted);
 }
 </style>

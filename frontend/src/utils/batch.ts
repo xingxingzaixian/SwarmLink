@@ -51,20 +51,37 @@ export function folderProgress(jobs: TransferJob[], batchId: string): FolderProg
   const out = emptyProgress()
   if (!batchId) return out
 
-  let pending = 0
+  // 先按【文件】分组：群聊发文件夹时同一个文件会存在多份任务（每个成员一份），
+  // 但用户看到的「这个文件夹有几个文件」只该数一次 —— 一个文件算完成，
+  // 是它发给了所有成员且都成功。单聊场景每个 rel_path 只有一条任务，
+  // 聚合结果与逐条统计完全一致（rel_path 为空时用 jobId 兜底，保证不误合并）。
+  const byFile = new Map<string, TransferJob[]>()
   for (const j of jobs) {
     if (j.batchId !== batchId) continue
+    // 已传字节按【每条任务】累加：这是真实的字节吞吐，不去重。
+    out.transferred += transferredBytes(j.fileSize, j.percent, j.status === 'done')
+    const key = j.relPath || j.jobId
+    const bucket = byFile.get(key)
+    if (bucket) bucket.push(j)
+    else byFile.set(key, [j])
+  }
+
+  for (const bucket of byFile.values()) {
     out.total++
     // 终态判据复用 format.ts 里那一份（transferStatus().final）：界面文案与
     // 「算不算结束」必须同源，否则会出现「标着已完成、却还留在进行中列表里」。
-    if (!transferStatus(j.status).final) pending++
-    if (j.status === 'done') out.done++
-    if (j.status === 'failed') out.failed++
-    if (j.status === 'cancelled') out.cancelled++
-    out.transferred += transferredBytes(j.fileSize, j.percent, j.status === 'done')
+    const allFinal = bucket.every((j) => transferStatus(j.status).final)
+    if (!allFinal) continue
+    if (bucket.every((j) => j.status === 'done')) {
+      out.done++
+    } else if (bucket.some((j) => j.status === 'failed')) {
+      out.failed++
+    } else {
+      out.cancelled++
+    }
   }
 
-  out.allFinished = out.total > 0 && pending === 0
+  out.allFinished = out.total > 0 && out.done + out.failed + out.cancelled === out.total
   out.hasFailure = out.failed > 0
   return out
 }

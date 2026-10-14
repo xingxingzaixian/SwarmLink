@@ -85,8 +85,9 @@ async function saveAs(): Promise<void> {
   max-width: 100%;
   max-height: 62vh;
   object-fit: contain;
-  border-radius: var(--r-lg);
-  box-shadow: 0 18px 44px -26px rgba(2, 0, 12, 0.95);
+  border-radius: var(--r-md);
+  border: 1px solid var(--divider);
+  box-shadow: var(--shadow-lg);
 }
 
 .broken {

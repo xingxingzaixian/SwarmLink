@@ -12,6 +12,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import Avatar from '../components/Avatar.vue'
 import ChatBubble from '../components/ChatBubble.vue'
 import EmojiPicker from '../components/EmojiPicker.vue'
+import GroupInfoPanel from '../components/GroupInfoPanel.vue'
 import Icon from '../components/Icon.vue'
 import ImageLightbox from '../components/ImageLightbox.vue'
 import type { Message } from '../api/types'
@@ -22,6 +23,7 @@ import { usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { canClear, canRestore } from '../utils/clearView'
 import { dateLabel } from '../utils/format'
+import { previewText } from '../utils/message'
 
 const chat = useChatStore()
 const peers = usePeersStore()
@@ -46,23 +48,132 @@ const peer = computed(() => (chat.activePeerId ? peers.byId(chat.activePeerId) :
 const title = computed(() => conv.value?.title ?? '')
 
 /**
- * 副标题刻意区分「节点在线」与「连接可用」（ADR-009）。
+ * 状态行刻意区分「节点在线」与「连接可用」（ADR-009）。
+ *
  * 这两件事在本项目里可以不一致，合并成一个绿灯会让用户看到
  * 「在线却要等一秒才发出去」而不知为何。
+ *
+ * 拆成三段而不是拼成一个字符串：地址要单独走等宽字体，而「亮/灭」
+ * 只由连通状态决定 —— 拼在一起就只能整行一个颜色，群聊那行还会整行变绿。
  */
-const subtitle = computed(() => {
+const statusText = computed(() => {
   const c = conv.value
-  if (!c) return ''
+  if (!c) return '无中心内网 P2P 聊天与文件分享'
   if (c.kind === 'group') {
     const g = groups.groups.find((x) => x.groupId === c.convId)
     if (!g) return '群聊'
-    return `群聊 · ${groups.activeCount(g)}/${g.members.length} 在线 · 离线成员不接收消息`
+    return `群聊 · ${groups.activeCount(g)}/${groups.memberCount(g)} 在线 · 离线成员不接收消息`
   }
   const p = peers.byId(c.peerId ?? '')
   if (!p) return '等待节点信息…'
-  const conn = p.connected ? '连接可用' : p.online ? '在线（未连接，发送时按需拨号）' : '离线'
-  return `${conn} · ${p.lastAddr || p.subnet || '地址未知'}`
+  return p.connected ? '连接可用' : p.online ? '在线（未连接，发送时按需拨号）' : '离线'
 })
+
+/** 状态行的「亮」与否：决定那行字是信号绿还是中性灰。 */
+const statusLive = computed(() => {
+  const c = conv.value
+  if (!c) return false
+  if (c.kind === 'group') {
+    const g = groups.groups.find((x) => x.groupId === c.convId)
+    return !!g && groups.activeCount(g) > 0
+  }
+  const p = peers.byId(c.peerId ?? '')
+  return !!p && (p.connected || p.online)
+})
+
+/** 状态行右半：可拨号地址（等宽）。群聊没有单一地址，返回空串。 */
+const statusAddr = computed(() => {
+  const c = conv.value
+  if (!c || c.kind === 'group') return ''
+  const p = peers.byId(c.peerId ?? '')
+  return p?.lastAddr || p?.subnet || ''
+})
+
+// ---------------------------------------------------------------- 群信息
+const infoOpen = ref(false)
+
+/** 当前群（群会话时有值；单聊为 undefined）。 */
+const activeGroup = computed(() =>
+  isGroup.value ? groups.byId(conv.value?.convId ?? '') : undefined
+)
+
+/** 群已解散：禁用输入并展示横幅。取不到群时按未解散处理，避免误禁用。 */
+const groupDissolved = computed(() => activeGroup.value?.state === 'dissolved')
+
+function openInfo(): void {
+  if (activeGroup.value) infoOpen.value = true
+}
+
+// ---------------------------------------------------------------- @提及
+//
+// 只在群会话里工作。做法是「从光标前的文本推断」而不是维护一份输入状态机：
+// @ 是用户随时可能手打的普通字符，维护状态机反而会在退格/粘贴时出错。
+const mentionQuery = ref<string | null>(null)
+
+const mentionCandidates = computed(() => {
+  if (mentionQuery.value === null || !activeGroup.value) return []
+  const q = mentionQuery.value.toLowerCase()
+  const selfId = peers.self?.nodeId ?? ''
+  return activeGroup.value.members
+    // 只能在群成员里 @：判据用 active（票号），否则会 @ 到已退出的人。
+    .filter((m) => m.active && m.nodeId !== selfId)
+    .map((m) => ({ nodeId: m.nodeId, name: m.displayName || m.nodeId.slice(0, 8) }))
+    .filter((m) => !q || m.name.toLowerCase().includes(q))
+})
+
+/** 依据光标位置刷新 @前缀（没有在提人时置 null）。 */
+function refreshMention(): void {
+  const el = draftEl.value
+  if (!el || !isGroup.value) {
+    mentionQuery.value = null
+    return
+  }
+  const caret = el.selectionStart ?? draft.value.length
+  const before = draft.value.slice(0, caret)
+  const at = before.lastIndexOf('@')
+  if (at < 0) {
+    mentionQuery.value = null
+    return
+  }
+  const frag = before.slice(at + 1)
+  // 片段里出现空白或又一个 @，说明这个 @ 已经结束（或不是提及）
+  if (/[\s@]/.test(frag)) {
+    mentionQuery.value = null
+    return
+  }
+  mentionQuery.value = frag
+}
+
+/** 选中某成员：把光标前的 @片段替换成 `@名字 `。 */
+async function pickMention(name: string): Promise<void> {
+  const el = draftEl.value
+  const caret = el?.selectionStart ?? draft.value.length
+  const before = draft.value.slice(0, caret)
+  const at = before.lastIndexOf('@')
+  if (at < 0) return
+  const insert = `@${name} `
+  draft.value = before.slice(0, at) + insert + draft.value.slice(caret)
+  mentionQuery.value = null
+  await nextTick()
+  el?.focus()
+  const pos = at + insert.length
+  el?.setSelectionRange(pos, pos)
+  void autoGrow()
+}
+
+// ---------------------------------------------------------------- 引用回复
+//
+// 引用走【纯文本约定】而不是新的消息信封：以 `> ` 开头的行就是引用块。
+// 这样托盘悬停预览（只取首行）拿到的是「> 张三：原文」这样一句人话，
+// 而不是一段裸 JSON —— 后者正是这个项目里反复出现过的提示事故。
+async function quoteMessage(m: Message): Promise<void> {
+  const who = m.direction === 'out' ? '我' : peers.nameOf(m.senderId)
+  const line = `> ${who}：${previewText(m)}`
+  draft.value = `${line}\n${draft.value}`
+  await nextTick()
+  void autoGrow()
+  draftEl.value?.focus()
+}
 
 // ---------------------------------------------------------------- 消息分组
 
@@ -178,6 +289,23 @@ function onKeydown(e: KeyboardEvent): void {
   // 输入法组合态下的 Enter 是「确认候选词」，不是「发送」。
   // 少了这个判断，中文用户每选一次词就会把半成品发出去。
   if (e.isComposing) return
+
+  // @提及下拉打开时：Enter 选中第一个候选，Esc 关掉它 —— 都不能落到「发送」上，
+  // 否则用户想选人却把半截 @ 发了出去。
+  if (mentionCandidates.value.length) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const first = mentionCandidates.value[0]
+      if (first) void pickMention(first.name)
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      mentionQuery.value = null
+      return
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     void submit()
@@ -316,22 +444,66 @@ async function restoreView(): Promise<void> {
         <Avatar
           :seed="isGroup ? conv.convId : peer?.nodeId || conv.convId"
           :name="title"
-          :size="36"
+          :size="40"
           :shape="isGroup ? 'square' : 'circle'"
           :online="isGroup ? null : peer ? peer.connected || peer.online : null"
         />
-        <div class="head-main">
-          <div class="head-title nowrap">{{ title }}</div>
-          <div class="head-sub nowrap">{{ subtitle }}</div>
+        <div class="head-main" :class="{ clickable: isGroup }" @click="openInfo">
+          <div class="head-title nowrap">
+            {{ title }}
+            <span v-if="isGroup" class="head-hint">查看群信息</span>
+          </div>
+          <div class="head-sub nowrap" :class="{ live: statusLive }">
+            <span class="dot dot--static" />
+            <span class="nowrap">{{ statusText }}</span>
+            <span v-if="statusAddr" class="ip mono nowrap">{{ statusAddr }}</span>
+          </div>
         </div>
       </template>
       <div v-else class="head-main">
-        <div class="head-title faint">SwarmLink</div>
-        <div class="head-sub">无中心内网 P2P 聊天与文件分享</div>
+        <div class="head-title">SwarmLink</div>
+        <div class="head-sub">
+          <span class="dot dot--static" />
+          <span>{{ statusText }}</span>
+        </div>
+      </div>
+      <div class="head-actions">
+        <button
+          v-if="isGroup"
+          class="icon-btn"
+          title="群信息 / 成员管理"
+          aria-label="群信息"
+          @click="openInfo"
+        >
+          <Icon name="info" :size="18" />
+        </button>
+        <!-- 共享中心入口：与其他全局功能（设置/调试/传输）不同，这个是【日常会用】
+             的功能，藏在头像菜单里等于没有 —— 因此常驻顶栏，与主题切换并排。
+             带文字而不是纯图标：共享/上传类的图标在中文语境里认不出是「共享文件」，
+             而「认不出」正是它原来没人发现的原因。 -->
+        <button
+          class="btn btn-soft share-entry"
+          :class="{ on: ui.panel === 'share' }"
+          title="共享中心：发布目录给可见范围内的人，或下载他人的共享"
+          aria-label="打开共享中心"
+          @click="ui.openPanel('share')"
+        >
+          <Icon name="share" :size="15" />
+          <span>共享中心</span>
+        </button>
+        <button
+          class="icon-btn"
+          :title="ui.theme === 'light' ? '切换到深色主题' : '切换到浅色主题'"
+          :aria-label="ui.theme === 'light' ? '切换到深色主题' : '切换到浅色主题'"
+          @click="ui.toggleTheme()"
+        >
+          <Icon :name="ui.theme === 'light' ? 'moon' : 'sun'" :size="18" />
+        </button>
       </div>
     </header>
 
     <div v-if="chat.error" class="banner err">{{ chat.error }}</div>
+    <div v-if="groupDissolved" class="banner warn">该群已由群主解散，不能再发送消息。</div>
 
     <div ref="scroller" class="stream scroll" @scroll="onScroll">
       <div v-if="!conv" class="empty welcome">
@@ -368,7 +540,9 @@ async function restoreView(): Promise<void> {
       </div>
 
       <template v-for="it in items" :key="it.key">
-        <div v-if="it.kind === 'day'" class="day">{{ dateLabel(it.at) }}</div>
+        <div v-if="it.kind === 'day'" class="day-sep">
+          <span class="micro">{{ dateLabel(it.at) }}</span>
+        </div>
         <ChatBubble
           v-else
           :message="it.m"
@@ -379,6 +553,7 @@ async function restoreView(): Promise<void> {
           :sender-name="peers.nameOf(it.m.senderId)"
           :sender-seed="it.m.senderId"
           @zoom="(m) => (zoomed = m)"
+          @quote="quoteMessage"
         />
       </template>
     </div>
@@ -387,8 +562,8 @@ async function restoreView(): Promise<void> {
       <div class="tools">
         <button
           class="icon-btn"
-          :disabled="!conv || isGroup || sending"
-          :title="isGroup ? 'v1.0 仅支持单文件点对点发送' : '发送文件'"
+          :disabled="!conv || sending || groupDissolved"
+          :title="groupDissolved ? '群已解散' : '发送文件'"
           aria-label="发送文件"
           @click="attach"
         >
@@ -397,8 +572,8 @@ async function restoreView(): Promise<void> {
 
         <button
           class="icon-btn"
-          :disabled="!conv || isGroup || sending"
-          :title="isGroup ? '群聊暂不支持文件夹传输' : '发送文件夹'"
+          :disabled="!conv || sending || groupDissolved"
+          :title="groupDissolved ? '群已解散' : '发送文件夹'"
           aria-label="发送文件夹"
           @click="attachFolder"
         >
@@ -407,8 +582,8 @@ async function restoreView(): Promise<void> {
 
         <button
           class="icon-btn"
-          :disabled="!conv"
-          title="发送图片"
+          :disabled="!conv || groupDissolved"
+          :title="groupDissolved ? '群已解散' : '发送图片'"
           aria-label="发送图片"
           @click="attachImage"
         >
@@ -455,25 +630,50 @@ async function restoreView(): Promise<void> {
         </button>
 
         <span class="spacer" />
-        <span class="hint">Enter 发送 · Shift + Enter 换行</span>
       </div>
 
       <div class="entry">
+        <!-- @提及候选：贴着输入框上沿弹出，不占据正文空间 -->
+        <div v-if="mentionCandidates.length" class="mention-pop">
+          <button
+            v-for="m in mentionCandidates"
+            :key="m.nodeId"
+            class="mention-item"
+            @click="pickMention(m.name)"
+          >
+            <Avatar :seed="m.nodeId" :name="m.name" :size="22" :online="null" />
+            <span class="nowrap">{{ m.name }}</span>
+          </button>
+        </div>
+
         <textarea
           ref="draftEl"
           v-model="draft"
           class="scroll"
-          :disabled="!conv"
+          :disabled="!conv || groupDissolved"
           rows="1"
-          :placeholder="conv ? '输入消息…' : '先选择一个会话'"
+          :placeholder="
+            !conv
+              ? '先选择一个会话'
+              : groupDissolved
+                ? '该群已解散'
+                : '输入消息…（Enter 发送，Shift+Enter 换行）'
+          "
           @keydown="onKeydown"
+          @input="refreshMention"
+          @click="refreshMention"
           @paste="onPaste"
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
         />
-        <button class="send" :disabled="!conv || !draft.trim()" @click="submit">
-          <Icon name="send" :size="15" />
-          发送
+        <button
+          class="send"
+          :disabled="!conv || groupDissolved || !draft.trim()"
+          title="发送"
+          aria-label="发送"
+          @click="submit"
+        >
+          <Icon name="send" :size="18" />
         </button>
       </div>
 
@@ -492,6 +692,13 @@ async function restoreView(): Promise<void> {
 
     <ImageLightbox v-if="zoomed" :message="zoomed" @close="zoomed = null" />
 
+    <!-- 群信息面板（成员管理 / 改名 / 解散） -->
+    <GroupInfoPanel
+      v-if="infoOpen && activeGroup"
+      :group="activeGroup"
+      @close="infoOpen = false"
+    />
+
     <!-- 拖放高亮：file-drop-target-active 由 Wails 运行时在拖入时加上 -->
     <div class="drop-overlay">
       <div class="drop-card">
@@ -504,37 +711,49 @@ async function restoreView(): Promise<void> {
 </template>
 
 <style scoped>
-/* 中栏是整块玻璃里【最透】的一层：它夹在左右两栏之间，
-   让氛围色从中间透出来最多，三栏的色偏差异才拉得开 */
 .pane-chat {
   position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: var(--glass-chat);
-  backdrop-filter: blur(var(--blur)) saturate(110%);
-  -webkit-backdrop-filter: blur(var(--blur)) saturate(110%);
-  /* 额外向左投一道窄阴影：三栏都是半透明玻璃，只靠 1px 亮缝不足以分开，
-     这道「遮挡阴影」让中栏看起来压在左栏之上（渲染顺序天然支持）。
-     深色界面要用近黑而不是藏青 —— 藏青投影在深底上等于没画。 */
-  box-shadow: var(--shadow-glass), inset 0 1px 0 var(--edge),
-    -16px 0 30px -26px rgba(2, 0, 12, 0.85);
+  background-color: var(--bg-base);
+  /* 网格点阵：这版设计里「网络拓扑」的底纹。
+     只铺中栏 —— 左右栏是实心面板，铺上去只会发脏。 */
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 26px 26px;
+  background-position: center;
 }
 
 /* ---------------------------------------------------------------- 顶栏 */
 
 .chat-head {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 13px;
   flex: 0 0 auto;
   height: var(--head-h);
-  padding: 0 16px;
-  background: var(--glass-chrome);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 0 -1px 0 var(--edge);
+  padding: 0 20px;
+  /* 半透明 + 模糊：底下的网格点阵透过来一点点，滚动时不会「一块实心板压过去」 */
+  background: color-mix(in oklch, var(--bg-base) 80%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--divider);
+}
+
+/* 头部下方 130px 的强调线：整屏唯一一处「带方向」的装饰，
+   把视线引向左边的头像与标题 */
+.chat-head::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 130px;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent);
 }
 
 .head-main {
@@ -542,15 +761,79 @@ async function restoreView(): Promise<void> {
   min-width: 0;
 }
 
+/* 群会话时整块标题可点开群信息：用指针 + hover 提示「点得动」，
+   否则用户永远发现不了这个入口。 */
+.head-main.clickable {
+  cursor: pointer;
+}
+
+.head-main.clickable:hover .head-title {
+  color: var(--accent);
+}
+
+.head-hint {
+  margin-left: 8px;
+  font-family: var(--font-body);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease);
+}
+
+.head-main.clickable:hover .head-hint {
+  opacity: 1;
+}
+
 .head-title {
-  font-size: var(--fs-lg);
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
+/* 状态行：绿点 + 状态词 + 等宽地址。
+   只有「真的连上了」才整行变绿（.live），否则中性灰 ——
+   群聊那行永远不该是绿的，它的成分太杂。 */
 .head-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.head-sub.live {
+  color: var(--accent);
+}
+
+.head-sub .ip {
+  color: var(--text-muted);
   font-size: var(--fs-xs);
-  color: var(--t3);
+}
+
+/* 状态点跟着那行字的颜色走：连上时整行（含点）是绿的，否则是灰的。
+   用 currentColor 而不是再写一份 .dot.online —— 一处改动两处同步。 */
+.head-sub .dot {
+  background: currentColor;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 共享中心入口：高度与旁边的图标按钮对齐（.btn 默认 30px，这里统一成 34px）。 */
+.share-entry {
+  height: 34px;
+  padding: 0 11px;
+}
+
+.share-entry.on {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* ---------------------------------------------------------------- 消息区 */
@@ -558,15 +841,7 @@ async function restoreView(): Promise<void> {
 .stream {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 16px 20px 20px;
-}
-
-.day {
-  margin: 14px 0 10px;
-  text-align: center;
-  font-size: var(--fs-xs);
-  color: var(--t3);
-  user-select: none;
+  padding: 22px 26px;
 }
 
 .welcome {
@@ -578,19 +853,16 @@ async function restoreView(): Promise<void> {
 
 .composer {
   flex: 0 0 auto;
-  padding: 8px 14px 12px;
-  background: var(--glass-chrome);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 0 1px 0 var(--edge);
+  padding: 14px 20px 18px;
+  border-top: 1px solid var(--divider);
+  background: var(--bg-base);
 }
 
 .tools {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 30px;
-  margin-bottom: 4px;
+  gap: 4px;
+  margin-bottom: 10px;
 }
 
 .spacer {
@@ -609,68 +881,105 @@ async function restoreView(): Promise<void> {
   z-index: 20;
 }
 
-.hint {
-  font-size: var(--fs-xs);
-  color: var(--t3);
-  user-select: none;
-}
-
+/* 输入容器：边框与光晕都落在容器上（里面的 textarea 是裸的），
+   否则会出现双层边框、且 focus 时只有文字框发光 */
 .entry {
+  position: relative; /* @提及候选框相对它定位 */
   display: flex;
   align-items: flex-end;
   gap: 10px;
+  padding: 9px 11px;
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--divider-strong);
+  border-radius: var(--r-md);
+  transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
 
-/* 输入框是深色凹槽：白字必须落在足够暗的底上，
-   这里【不能】沿用「白霜玻璃」那一套，否则输入时根本看不清自己在打什么 */
+/* ---------------------------------------------------------------- @提及 */
+.mention-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 5px;
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--divider-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
+  font-size: var(--fs-md);
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.mention-item:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.entry:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .entry textarea {
   flex: 1 1 auto;
-  min-height: 34px;
+  min-height: 24px;
   max-height: 148px;
-  padding: 7px 10px;
-  background: var(--surface);
-  box-shadow: inset 0 0 0 1px var(--line);
-  border-radius: var(--r-md);
-  font-size: var(--fs-md);
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+  font-size: var(--fs-lg);
   overflow-y: auto;
 }
 
-.entry textarea:hover {
-  background: var(--hover);
+.entry textarea:hover,
+.entry textarea:focus {
+  background: none;
+  border-color: transparent;
+  box-shadow: none;
 }
 
+/* 发送键：42×42 的渐变方块。整屏只有它与自己的气泡用这条渐变。 */
 .send {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
   flex: 0 0 auto;
-  height: 34px;
-  padding: 0 15px;
-  border-radius: var(--r-md);
-  /* 与 .btn-primary 统一用青色「行动色」：粉是身份色（选中/未读），
-     两者各管一件事，界面才不会到处都在喊 */
-  background: var(--cyan);
-  color: var(--t-on-brand);
-  font-size: var(--fs-md);
-  font-weight: 500;
-  transition: background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: var(--accent-ink);
+  transition: transform var(--dur-1) var(--ease), box-shadow var(--dur-2) var(--ease),
+    opacity var(--dur-1) var(--ease);
 }
 
 .send:hover:not(:disabled) {
-  background: var(--cyan-deep);
+  transform: scale(1.06);
+  box-shadow: var(--shadow-glow);
 }
 
 .send:active:not(:disabled) {
-  transform: scale(0.975);
+  transform: scale(0.94);
 }
 
-/* 用整体透明度表达「禁用」，而不是把字色写死成半透明白 ——
-   后者在浅色主题上就是白字压白底，整个按钮消失 */
+/* 用整体透明度表达「禁用」，而不是把底色写死 ——
+   写死底色在浅色主题上就是白字压白底，整个按钮消失 */
 .send:disabled {
-  background: var(--surface);
-  color: var(--t1);
-  box-shadow: inset 0 0 0 1px var(--line);
-  opacity: 0.42;
+  opacity: 0.38;
   cursor: not-allowed;
 }
 
@@ -680,13 +989,12 @@ async function restoreView(): Promise<void> {
   gap: 8px;
   margin-top: 8px;
   padding: 8px;
-  border-radius: var(--r-md);
-  background: var(--surface-sunken);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
 }
 
 .fallback input {
   flex: 1 1 auto;
-  background: var(--surface-strong);
 }
 
 .fallback .btn {
@@ -702,13 +1010,13 @@ async function restoreView(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 2px dashed var(--brand);
-  border-radius: var(--r-xl);
+  border: 2px dashed var(--accent);
+  border-radius: var(--r-lg);
   /* 拖放遮罩要彻底压住底下的内容：这里是唯一允许「浓」的地方。
-     用深色而不是白色 —— 白色遮罩会把白字标题直接吃掉。 */
-  background: rgba(12, 5, 30, 0.74);
-  backdrop-filter: blur(var(--blur)) saturate(140%);
-  -webkit-backdrop-filter: blur(var(--blur)) saturate(140%);
+     color-mix 让它在两套主题下都成立，不必再写一个 light 分支。 */
+  background: color-mix(in oklch, var(--bg-base) 88%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-2) var(--ease);
@@ -724,17 +1032,14 @@ async function restoreView(): Promise<void> {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  color: var(--brand-ink);
+  color: var(--accent);
   font-size: var(--fs-sm);
 }
 
 .drop-title {
+  font-family: var(--font-display);
   font-size: var(--fs-lg);
   font-weight: 600;
-  color: var(--t1);
-}
-
-html[data-theme='light'] .drop-overlay {
-  background: rgba(255, 255, 255, 0.82);
+  color: var(--text-primary);
 }
 </style>

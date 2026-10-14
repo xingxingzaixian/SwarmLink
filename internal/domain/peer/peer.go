@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 )
 
 // State 是 Peer 生命周期状态（架构书 3.6）。
@@ -69,6 +70,18 @@ type Peer struct {
 	Subnet   string
 	State    State
 	Source   string
+
+	// Shares 是该节点声明的共享摘要（FR-14）。
+	//
+	// 为什么放在目录条目上而不是单开一张远端共享表：共享的可发现性与
+	// 「我听说过谁」是同一件事，随 ANNOUNCE 与目录交换一起传播天然正确；
+	// 单开一张表就得再造一条同步路径，而两条路径迟早会分叉。
+	//
+	// 语义边界（务必看清）：这里的摘要是【对方声明 + 第三方转述】，
+	// 不参与 ANNOUNCE 签名（见 Announcement.Shares），因此只能用于
+	// 展示与「去哪儿问」。真正的访问控制一律由共享方在收到
+	// SHARE_INDEX_REQ / SHARE_PULL_REQ 时校验（ShareApp.HandleIndexReq）。
+	Shares []share.Summary
 }
 
 // Expired 判断条目是否超过 TTL。
@@ -94,6 +107,19 @@ type Announcement struct {
 	// 它由本地网络栈给出，不是对端声明，因此不参与签名，
 	// 也不会被对端伪造 —— 目录里的可拨号地址必须以它为准。
 	ObservedIP string
+
+	// Shares 是本次通告携带的共享摘要（可为空）。
+	//
+	// 【刻意不参与签名】（SigningBytes）。理由与 DisplayName 相同：
+	// 摘要会随目录交换被第三方转述（那条路径本来就没有签名），
+	// 而把它塞进签名域会让新旧版本的 SigningBytes 字节序列不同 ——
+	// 旧端 identity.Verify 失败后会【丢弃新端的全部 ANNOUNCE】，
+	// 那是「升级一个节点，安静地孤立它」这种最难排查的故障。
+	//
+	// 代价是摘要可被链路上的人篡改。接受它的前提是：摘要只用于
+	// 「有哪些共享可看」的展示，任何一次真实访问都要向共享方
+	// 单独发起请求，由共享方校验可见性（见 Peer.Shares 的说明）。
+	Shares []share.Summary
 
 	// Leaving 表示这是一条「我要下线了」的通告（BYE），而不是「我在线」。
 	//

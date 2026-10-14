@@ -63,12 +63,8 @@ onMounted(load)
         共 {{ transfers.jobs.length }} 个任务<template v-if="done">，{{ done }} 个已完成</template>
       </span>
       <span class="spacer" />
-      <button
-        class="btn btn-soft"
-        :disabled="clearing || !finished"
-        :title="finished ? `清除 ${finished} 条已结束的记录（进行中的不受影响）` : '没有已结束的记录'"
-        @click="clearFinished"
-      >
+      <button class="btn btn-soft" :disabled="clearing || !finished"
+        :title="finished ? `清除 ${finished} 条已结束的记录（进行中的不受影响）` : '没有已结束的记录'" @click="clearFinished">
         <Icon name="trash" :size="14" />{{ clearing ? '清除中…' : '清空已结束' }}
       </button>
       <button class="btn btn-soft" :disabled="loading" @click="load">
@@ -92,7 +88,6 @@ onMounted(load)
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 20px 0;
   font-size: var(--fs-sm);
 }
 
@@ -104,9 +99,5 @@ onMounted(load)
   margin: 10px 20px 0;
   border-radius: var(--r-md);
   border-bottom: 0;
-}
-
-.transfers :deep(.wrap) {
-  padding: 12px 20px 18px;
 }
 </style>

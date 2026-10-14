@@ -20,8 +20,11 @@ const (
 	TopicTransferDone       = "transfer.done"
 	TopicTransferError      = "transfer.error"
 	TopicTransferFileFailed = "transfer.file_failed"
-	TopicNetError           = "net.error"
-	TopicConfigChanged      = "config.changed"
+	// TopicShareUpdated 是本机共享清单发生变化（发布 / 取消 / 刷新索引）。
+	// 他人共享的变化不走它：那是目录条目的变化，已经由 peer.discovered 承担。
+	TopicShareUpdated  = "share.updated"
+	TopicNetError      = "net.error"
+	TopicConfigChanged = "config.changed"
 )
 
 // TransferFileFailed 文件传输失败事件

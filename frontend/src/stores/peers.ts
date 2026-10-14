@@ -105,7 +105,9 @@ export const usePeersStore = defineStore('peers', () => {
         source: '',
         lastSeen: Date.now(),
         online: patch.state === 'online',
-        connected: false
+        connected: false,
+        // 事件里不一定带 rttMs（announce 那条路径就不带），缺省按「无数据」
+        rttMs: patch.rttMs ?? 0
       })
       return
     }

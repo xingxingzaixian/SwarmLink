@@ -20,6 +20,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
 )
 
@@ -74,6 +75,23 @@ type PeerDirectory interface {
 	Get(id identity.NodeID) (peer.Peer, bool)
 	List(filter PeerFilter) []peer.Peer
 	MarkOffline(id identity.NodeID, at time.Time) error
+	// ResetLiveness 清零【上次运行残留】的在线状态：把所有 state='online' 的条目降级
+	// 为 'discovered'，返回被降级的条目数。这是一次性启动清理，由组合根在装配后、
+	// 服务对外提供能力之前调用一次。
+	//
+	// 为什么必须由存储层批量完成、而不是让上层逐条 Upsert：后者会顺带刷新 last_seen，
+	// 把「已失联」误判成「刚刚见过」。契约（两个仓储实现必须逐条一致）：
+	//   - 只动 online：discovered / offline / blocked 一律不动（blocked 是粘性状态）；
+	//   - **保留 last_seen**：TTL 兜底据此判断该条目是否已过期 —— 这是它与
+	//     MarkOffline / SetSuppressed 刻意不同的地方；
+	//   - 幂等：没有 online 条目时返回 (0, nil)，node_id 不存在不影响结果。
+	//
+	// 为什么需要它：进程刚启动时不可能存在任何已握手的 TCP 会话，因此目录里的 online
+	// 一律不可信。典型来源是「本机上次退出时对端在线，之后自己离线、对端也离线，那条
+	// offline 事件永远到不了本机」—— 不清零就会复现「重启后已经离线的对端仍显示在线」
+	// （ADR-009 的代价）。降级后对端若真在线，其 announce 会刷新 last_seen；若已离线，
+	// last_seen 早已过期，下一次 Sweep 即标记 offline。
+	ResetLiveness() (int, error)
 	// SetSuppressed 设置/清除「本地已移除」标记。
 	//
 	// 实现必须逐条满足下面的契约：两个仓储（sqlite / mem）互为替身，
@@ -186,6 +204,36 @@ type TransferRepo interface {
 }
 
 // ---------------------------------------------------------------------------
+// 文件共享仓储（FR-14）
+// ---------------------------------------------------------------------------
+
+// ErrShareNotFound 表示共享不存在。
+//
+// 做成哨兵错误而不是让两个实现各写一句话：调用方要区分「这条共享已被取消」
+// （用户可行动：重新发布）与「存储故障」（重试），而两个实现互为替身，
+// 判据分叉会让「测试跑 mem、生产跑 sqlite」出现不同的用户提示。
+var ErrShareNotFound = errors.New("share: not found")
+
+// ShareRepo 是【本机发布的共享】的持久化端口。
+//
+// 只管本地发布的共享；他人共享随节点目录传播（peer.Peer.Shares），
+// 不落这张表 —— 共享方离线时他人的共享本就该消失（PRD RK-08），
+// 持久化它反而会造出「列表里有、点开报错」的僵尸条目。
+//
+// 两个实现（sqlite / mem）必须给出同样的语义：
+//   - Upsert 覆盖同 ID 的整条记录【含文件清单】（清单是整份替换，
+//     不是增量合并 —— 一次「刷新索引」必须能删掉已经不存在的文件）；
+//   - Get 未命中一律返回 (零值, false)，不返回 ErrShareNotFound；
+//   - List 按创建时间升序（给界面一个稳定的次序）；
+//   - Delete 幂等：不存在时返回 nil。
+type ShareRepo interface {
+	Upsert(s share.Share) error
+	Get(shareID string) (share.Share, bool)
+	List() []share.Share
+	Delete(shareID string) error
+}
+
+// ---------------------------------------------------------------------------
 // outbox（G4：崩溃后可恢复重发）
 // ---------------------------------------------------------------------------
 
@@ -247,6 +295,50 @@ type GroupRepo interface {
 	Upsert(g group.Group) error
 	Get(groupID string) (group.Group, bool)
 	List() []group.Group
+}
+
+// DeliveryStat 是一条群消息的送达统计。
+type DeliveryStat struct {
+	Acked int
+	Total int
+}
+
+// Pending 返回尚未送达的人数。
+func (d DeliveryStat) Pending() int {
+	if d.Total <= d.Acked {
+		return 0
+	}
+	return d.Total - d.Acked
+}
+
+// GroupDeliveryRepo 跟踪群消息的「按成员」送达情况。
+//
+// 存在理由：群消息过去用「单条 outbox + 任一成员 ACK 即出队」——
+// 群里第一个回 ACK 的人就让它停止重发，离线成员永远收不到。改成按成员
+// 登记后，离线成员上线时才知道「还差谁」，也才能显示「N 人未送达」。
+//
+// 两个实现（sqlite / mem）必须给出同样的语义，否则「测试跑 mem、生产跑 sqlite」
+// 会在离线补投上分叉。
+type GroupDeliveryRepo interface {
+	// EnsureDeliveries 为一条群消息登记全体目标成员的投递记录（幂等；已存在的行不动，
+	// 以免把已送达的标记覆盖回未送达）。
+	EnsureDeliveries(msgID, groupID string, members []identity.NodeID) error
+	// AckDelivery 标记某成员已送达（幂等；成员不在记录里则忽略）。
+	AckDelivery(msgID string, memberID identity.NodeID) error
+	// PendingMembers 返回尚未送达的成员。
+	PendingMembers(msgID string) ([]identity.NodeID, error)
+	// StatsByConv 返回会话内每条群消息的送达统计（key = msg_id）。
+	StatsByConv(convID string) (map[string]DeliveryStat, error)
+	// DeleteByMsg 清掉一条消息的全部投递记录（消息完成/清理时用）。
+	DeleteByMsg(msgID string) error
+	// DeleteByGroup 清掉某群的全部投递记录（解散时停止一切补投）。
+	DeleteByGroup(groupID string) error
+	// DeleteGroupMember 清掉某群某成员的全部投递记录（成员被移出群时用）。
+	//
+	// 必须做：留着的话，一个已被移出的成员会永远挂在「未送达」里 ——
+	// 消息既不会重发给他（fanout 只发给 active 成员），也就永远凑不齐「全员送达」，
+	// 于是这条消息会一直留在 outbox 里空转、界面上一直显示「还有人没收到」。
+	DeleteGroupMember(groupID string, memberID identity.NodeID) error
 }
 
 // ---------------------------------------------------------------------------
@@ -326,11 +418,17 @@ type SinkHandle struct {
 // —— 那是已经上线并测过的路径，参数一改，所有实现与替身都要跟着动。
 type SinkRequest struct {
 	JobID string
-	// BatchID 是批次标识，同时决定落盘的根目录：同一个批次只分配一次根
-	// （「照片」已存在则整批退到「照片 (1)」），因此【必须全局唯一】，
-	// 不能是文件夹名。
+	// BatchID 是批次标识，同时决定落盘的根目录：同一个批次只分配一次根，
+	// 避免一批文件散落在两个目录里，因此【必须全局唯一】，不能是文件夹名。
+	//
+	// 【同名目录就是同一个目录】：根目录已存在时直接复用它（重复下载同一个
+	// 共享、对方把同一个文件夹再发一次、失败后重试都落到同一处），
+	// 而不是另建「照片 (1)」。
 	BatchID string
 	// RelPath 是相对文件夹根的路径（含根名，如 `照片/2024/a.jpg`）。
+	//
+	// 同名同路径的再次到达是【同一份文件的再次到达】：实现应当就地覆盖，
+	// 而不是加「 (1)」后缀 —— 后缀会让同一份内容越堆越多，且无法再合并。
 	RelPath string
 	// IsDir 表示这是一个空目录条目：只建目录、不建临时文件。
 	IsDir bool
@@ -339,6 +437,9 @@ type SinkRequest struct {
 // FileSink 把 G3 的路径清洗收敛到一个实现里。
 type FileSink interface {
 	// Create 返回临时文件句柄 + 最终路径；实现内做全部清洗。
+	//
+	// 单文件（不带目录树）【保留同名去重】：「 (1)」是它防止覆盖用户已有
+	// 文件的手段，那里没有「同一个目录」这个判据可用。
 	Create(jobID, rawName string) (SinkHandle, error)
 	// CreateIn 按相对路径把文件写进批次目录树里。
 	//
@@ -348,8 +449,9 @@ type FileSink interface {
 	CreateIn(req SinkRequest) (SinkHandle, error)
 	// AdoptRoot 认领一个已经分配过的批次根目录（重启恢复用）。
 	//
-	// 不认领的后果：进程重启后续传会重新分配出「照片 (1)」，把一个文件夹
-	// 拆成两份，用户看到的是「文件少了一半」。
+	// 不认领的后果：根目录当初可能是「退到唯一名」的结果（同名文件挡路），
+	// 进程重启后重新解析可能得到另一个目录，把一个文件夹拆成两份，
+	// 用户看到的是「文件少了一半」。
 	AdoptRoot(batchID, absPath string)
 	// Commit 原子替换为最终文件。
 	Commit(h SinkHandle) (finalPath string, err error)

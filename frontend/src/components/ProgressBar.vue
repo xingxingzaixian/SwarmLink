@@ -16,18 +16,19 @@ const clamped = computed(() => Math.max(0, Math.min(100, props.percent || 0)))
 const tone = computed(() => {
   switch (props.status) {
     case 'done':
-      return 'var(--ok)'
+      // 成功一律用强调色：这套设计里只有「绿 = 好」一种正向语义
+      return 'var(--accent)'
     case 'failed':
-      return 'var(--err)'
+      return 'var(--danger)'
     case 'verifying':
       return 'var(--warn)'
     case 'paused':
-      return 'var(--t3)'
+      return 'var(--text-muted)'
     case 'cancelled':
-      return 'var(--line-strong)'
+      return 'var(--divider-strong)'
     default:
-      // 进行中用青色（app 的「行动色」），和主按钮同色系
-      return 'var(--cyan)'
+      // 进行中：强调色（与发送键、自己的气泡同色系）
+      return 'var(--accent)'
   }
 })
 
@@ -60,8 +61,8 @@ const striped = computed(
 <style scoped>
 .track {
   width: 100%;
-  background: rgba(255, 255, 255, 0.16);
-  box-shadow: inset 0 0 0 1px var(--line);
+  background: var(--bg-sunken);
+  border: 1px solid var(--divider);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -72,15 +73,16 @@ const striped = computed(
   transition: width 0.2s var(--ease), background-color var(--dur-2) var(--ease);
 }
 
-/* 斜纹沿 X 轴缓慢平移：表达「在动」，但不制造错误的进度预期 */
+/* 斜纹沿 X 轴缓慢平移：表达「在动」，但不制造错误的进度预期。
+   条纹用强调色墨色而不是白 —— 白条纹落在浅色主题的亮底上会消失。 */
 .striped {
   background-image: linear-gradient(
     100deg,
-    rgba(255, 255, 255, 0.34) 25%,
+    color-mix(in oklch, var(--accent-ink) 26%, transparent) 25%,
     transparent 25%,
     transparent 50%,
-    rgba(255, 255, 255, 0.34) 50%,
-    rgba(255, 255, 255, 0.34) 75%,
+    color-mix(in oklch, var(--accent-ink) 26%, transparent) 50%,
+    color-mix(in oklch, var(--accent-ink) 26%, transparent) 75%,
     transparent 75%
   );
   background-size: 14px 14px;

@@ -74,10 +74,26 @@ const (
 	TypeGroupMembersReq byte = 0x31
 	TypeGroupMembersRes byte = 0x32
 	TypeGroupMsg        byte = 0x33
+	// TypeGroupLeave 是【本人签名】的退出增量。
+	//
+	// 为什么不复用 GROUP_META：meta 是【群主签名】的全量名册，退出是【本人签名】的
+	// 单点增量。两者权威不同、合并维度不同，混在一帧里会让「谁能改这一帧」再次
+	// 说不清 —— 而那正是本次要修的病根（见 ADR-012 Decision §6）。
+	TypeGroupLeave byte = 0x34
 
 	// 0x40–0x4F 安全（v1.1 加密通道预留）
 	TypeKeyExchange    byte = 0x40
 	TypeKeyExchangeAck byte = 0x41
+
+	// 0x50–0x5F 文件共享（FR-14）
+	//
+	// 共享的【发现】不走这里 —— 摘要随 ANNOUNCE / PEER_LIST 传播（见
+	// peer.Announcement.Shares）。这一段只承载「真的要读或要拿」的两件事：
+	// 拉文件清单、请对方把文件推过来。
+	TypeShareIndexReq  byte = 0x50
+	TypeShareIndexResp byte = 0x51
+	TypeSharePullReq   byte = 0x52
+	TypeSharePullResp  byte = 0x53
 )
 
 // ---------------------------------------------------------------------------
@@ -153,10 +169,20 @@ func TypeName(t byte) string {
 		return "GROUP_MEMBERS_RESP"
 	case TypeGroupMsg:
 		return "GROUP_MSG"
+	case TypeGroupLeave:
+		return "GROUP_LEAVE"
 	case TypeKeyExchange:
 		return "KEY_EXCHANGE"
 	case TypeKeyExchangeAck:
 		return "KEY_EXCHANGE_ACK"
+	case TypeShareIndexReq:
+		return "SHARE_INDEX_REQ"
+	case TypeShareIndexResp:
+		return "SHARE_INDEX_RESP"
+	case TypeSharePullReq:
+		return "SHARE_PULL_REQ"
+	case TypeSharePullResp:
+		return "SHARE_PULL_RESP"
 	default:
 		return "UNKNOWN"
 	}

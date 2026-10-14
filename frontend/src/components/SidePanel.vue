@@ -67,37 +67,30 @@ watch(
 
 <template>
   <section class="side">
-    <header class="side-head">
-      <div class="seg" role="tablist">
-        <button
-          role="tab"
-          :aria-selected="mode === 'info'"
-          :class="{ on: mode === 'info' }"
-          @click="ui.focusInfo()"
-        >
-          资料
-        </button>
-        <button
-          v-if="canTransfer"
-          role="tab"
-          :aria-selected="mode === 'transfer'"
-          :class="{ on: mode === 'transfer' }"
-          @click="ui.focusTransfer()"
-        >
-          传输
-          <span v-if="running" class="count">{{ running }}</span>
-        </button>
-      </div>
-      <span class="spacer" />
+    <!-- 两个等宽标签页（下划线指示选中）。主题开关不在这里 ——
+         它属于「整个窗口」而不属于右栏，已挪到聊天区顶栏。 -->
+    <div class="tabs" role="tablist">
       <button
-        class="icon-btn"
-        :title="ui.theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'"
-        aria-label="切换主题"
-        @click="ui.toggleTheme()"
+        class="tab"
+        role="tab"
+        :aria-selected="mode === 'info'"
+        :class="{ active: mode === 'info' }"
+        @click="ui.focusInfo()"
       >
-        <Icon :name="ui.theme === 'dark' ? 'sun' : 'moon'" :size="16" />
+        资料
       </button>
-    </header>
+      <button
+        v-if="canTransfer"
+        class="tab"
+        role="tab"
+        :aria-selected="mode === 'transfer'"
+        :class="{ active: mode === 'transfer' }"
+        @click="ui.focusTransfer()"
+      >
+        传输
+        <span v-if="running" class="count">{{ running }}</span>
+      </button>
+    </div>
 
     <div class="side-body scroll">
       <div v-if="!conv" class="empty">
@@ -132,76 +125,20 @@ watch(
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--glass-side);
-  backdrop-filter: blur(var(--blur)) saturate(110%);
-  -webkit-backdrop-filter: blur(var(--blur)) saturate(110%);
-  box-shadow: var(--shadow-glass), inset 0 1px 0 var(--edge),
-    -16px 0 30px -26px rgba(2, 0, 12, 0.85);
+  background: var(--bg-panel);
+  border-left: 1px solid var(--divider);
 }
 
-.side-head .spacer {
-  flex: 1 1 auto;
-}
-
-.side-head {
-  display: flex;
-  align-items: center;
-  flex: 0 0 auto;
-  height: var(--head-h);
-  padding: 0 14px;
-  background: var(--glass-chrome);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 0 -1px 0 var(--edge);
-}
-
-/* 分段控件：浅底 + 白卡片表示选中，比两个 tab 下划线更适合窄栏。
-   轨道必须靠【一点灰】描边才成立 —— 纯白描边在白色玻璃上等于没画，
-   未选中的那一项会看起来像浮在外面的孤立文字。 */
-.seg {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--r-md);
-  background: var(--surface-sunken);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.seg button {
+/* 标签页的按钮形态：全局 .tab 是按 div 写的，这里补齐按钮语义所需的复位
+   （宽度靠 flex:1，点击区整块，键盘可 Tab） */
+.tab {
+  border: 0;
+  background: none;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 12px;
-  border-radius: var(--r-sm);
-  font-size: var(--fs-sm);
-  color: var(--t2);
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
-}
-
-.seg button:hover {
-  color: var(--t1);
-}
-
-.seg button.on {
-  background: var(--surface-strong);
-  color: var(--t1);
-  font-weight: 600;
-  box-shadow: 0 2px 8px -4px rgba(4, 0, 18, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.22);
-}
-
-.count {
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--brand);
-  color: #fff;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 16px;
-  text-align: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .side-body {
@@ -212,9 +149,6 @@ watch(
 .side-foot {
   flex: 0 0 auto;
   padding: 10px 14px;
-  background: var(--glass-chrome);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 0 1px 0 var(--edge);
+  border-top: 1px solid var(--divider);
 }
 </style>

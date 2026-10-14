@@ -13,6 +13,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/domain/protocol"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
 
@@ -213,6 +214,9 @@ func (d *DiscoveryApp) HandlePeerListResp(sess ports.Session, f protocol.Frame) 
 			LastSeen:    now,
 			State:       peer.StateDiscovered,
 			Source:      peer.SourceSeed,
+			// 转述来的摘要照单全收（与其它字段同一条路径）：
+			// 它只用于展示「去哪儿问」，真伪由共享方在收到请求时校验。
+			Shares: share.NormalizeSummaries(e.Shares),
 		}
 		if e.PublicKey != "" {
 			if pub, err := identity.ParsePublic(e.PublicKey); err == nil {
@@ -255,6 +259,7 @@ func (d *DiscoveryApp) entries() []protocol.PeerListEntry {
 			Subnet:      p.Subnet,
 			Caps:        uint32(p.Caps),
 			ProtoVer:    p.ProtoVer,
+			Shares:      p.Shares,
 		}
 		if len(p.PublicKey) == ed25519.PublicKeySize {
 			entry.PublicKey = identity.MarshalPublic(p.PublicKey)

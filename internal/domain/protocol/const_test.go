@@ -13,6 +13,7 @@ func TestTypeNameCoversAllDeclaredTypes(t *testing.T) {
 		TypeHeartbeat: "HEARTBEAT", TypeHeartbeatAck: "HEARTBEAT_ACK", TypeChatAck: "CHAT_ACK",
 		TypeGroupMeta: "GROUP_META", TypeGroupMembersReq: "GROUP_MEMBERS_REQ",
 		TypeGroupMembersRes: "GROUP_MEMBERS_RESP", TypeGroupMsg: "GROUP_MSG",
+		TypeGroupLeave:  "GROUP_LEAVE",
 		TypeKeyExchange: "KEY_EXCHANGE", TypeKeyExchangeAck: "KEY_EXCHANGE_ACK",
 	}
 	for typ, want := range cases {

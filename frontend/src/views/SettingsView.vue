@@ -15,7 +15,7 @@ const ui = useUiStore()
 
 const settings = ref<Settings | null>(null)
 const interfaces = ref<string[]>([])
-const restartNeeded = ref<string[]>([])
+/** 保存/自检的**失败**信息。成功反馈走轻提示（弹层会关闭，见 save）。 */
 const notice = ref('')
 const saving = ref(false)
 const seedsText = ref('')
@@ -33,7 +33,6 @@ async function save(): Promise<void> {
   if (!settings.value) return
   saving.value = true
   notice.value = ''
-  restartNeeded.value = []
   try {
     const api = await getApi()
     const payload: Settings = {
@@ -43,11 +42,18 @@ async function save(): Promise<void> {
         .map((s) => s.trim())
         .filter(Boolean)
     }
-    restartNeeded.value = await api.saveSettings(payload)
-    notice.value = restartNeeded.value.length
-      ? '已保存。带「需重启」标记的改动要重启应用才生效。'
-      : '已保存。'
+    const needRestart = await api.saveSettings(payload)
+
+    // 保存成功 → 就地关闭弹层，结果交给全局轻提示。
+    //
+    // 为什么必须换通道：轻提示是弹层关掉之后【仍然存在】的那块反馈面，
+    // 而「哪些项要重启才生效」不能因为弹层消失就丢掉 —— 用户合上设置、
+    // 回聊天里又发现端口没变，那种困惑排查起来最费劲。
+    ui.notify(needRestart.length ? `已保存，重启后生效：${needRestart.join('、')}` : '已保存')
+    ui.closePanel()
   } catch (e: any) {
+    // 失败【不关】：用户要对着这条错误原地改。关掉弹层等于把错误一起关掉，
+    // 而「点了保存却没生效」恰恰是这一页最不能含糊的一件事。
     notice.value = String(e?.message ?? e)
   } finally {
     saving.value = false
@@ -217,12 +223,8 @@ onMounted(load)
           </label>
           <label>
             <span>排除网卡（每行一条，支持 * 通配）</span>
-            <textarea
-              :value="(settings.denyInterfaces ?? []).join('\n')"
-              rows="4"
-              class="mono"
-              @input="settings.denyInterfaces = lines(($event.target as HTMLTextAreaElement).value)"
-            />
+            <textarea :value="(settings.denyInterfaces ?? []).join('\n')" rows="4" class="mono"
+              @input="settings.denyInterfaces = lines(($event.target as HTMLTextAreaElement).value)" />
           </label>
           <p class="note mono">当前可用：{{ interfaces.length ? interfaces.join('、') : '（无）' }}</p>
         </section>
@@ -269,16 +271,10 @@ onMounted(load)
             <Icon name="refresh" :size="14" />{{ checking ? '检查中…' : '运行自检' }}
           </button>
           <div v-if="selfCheck" class="check-result">
-            <p
-              v-if="selfCheck.performed"
-              :class="['line', selfCheck.p1OK ? 'ok' : 'bad']"
-            >
+            <p v-if="selfCheck.performed" :class="['line', selfCheck.p1OK ? 'ok' : 'bad']">
               P-1：{{ selfCheck.p1Detail }}
             </p>
-            <p
-              v-if="selfCheck.performed"
-              :class="['line', selfCheck.p2Overlap ? 'warn' : 'ok']"
-            >
+            <p v-if="selfCheck.performed" :class="['line', selfCheck.p2Overlap ? 'warn' : 'ok']">
               P-2：{{ selfCheck.p2Detail }}
             </p>
             <p v-if="!selfCheck.performed" class="line faint">
@@ -294,10 +290,7 @@ onMounted(load)
 
     <footer class="bar">
       <div class="bar-msg">
-        <span v-if="notice" :class="{ warn: restartNeeded.length }">{{ notice }}</span>
-        <span v-if="restartNeeded.length" class="mono faint">
-          需重启：{{ restartNeeded.join('、') }}
-        </span>
+        <span v-if="notice">{{ notice }}</span>
       </div>
       <button class="btn btn-primary" :disabled="saving || !settings" @click="save">
         <Icon name="check" :size="14" />{{ saving ? '保存中…' : '保存' }}
@@ -314,10 +307,9 @@ onMounted(load)
   grid-template-columns: 1fr 1fr;
   align-content: start;
   gap: 0 28px;
-  padding: 18px 22px 0;
 }
 
-.settings > .col:last-child {
+.settings>.col:last-child {
   padding-bottom: 56px;
 }
 
@@ -331,7 +323,7 @@ onMounted(load)
 section {
   padding-bottom: 18px;
   margin-bottom: 16px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--divider);
 }
 
 h4 {
@@ -339,16 +331,17 @@ h4 {
   align-items: center;
   gap: 7px;
   margin: 0 0 10px;
-  font-size: var(--fs-sm);
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
   font-weight: 600;
-  letter-spacing: 0.02em;
 }
 
 .req {
   padding: 0 6px;
   border-radius: 999px;
   background: var(--warn-soft);
-  color: var(--warn-ink);
+  color: var(--warn);
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 500;
   line-height: 16px;
@@ -358,10 +351,10 @@ label {
   display: block;
   margin-bottom: 9px;
   font-size: var(--fs-xs);
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
-label > span {
+label>span {
   display: block;
   margin-bottom: 4px;
 }
@@ -370,11 +363,11 @@ label.check {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--t2);
+  color: var(--text-secondary);
   font-size: var(--fs-sm);
 }
 
-label.check > span {
+label.check>span {
   margin: 0;
 }
 
@@ -388,16 +381,16 @@ label.check > span {
   margin: 0 0 9px;
   font-size: var(--fs-xs);
   line-height: 1.6;
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 .note code {
   padding: 1px 5px;
   border-radius: var(--r-xs);
-  background: var(--surface-sunken);
-  font-family: var(--mono);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--t2);
+  color: var(--text-secondary);
 }
 
 /* 自检结果：三条结论各自带色，让人扫一眼就知道哪条不成立。
@@ -412,23 +405,24 @@ label.check > span {
   margin: 0;
   font-size: var(--fs-xs);
   line-height: 1.6;
-  color: var(--t3);
+  color: var(--text-muted);
 }
 
 .line.ok {
-  color: var(--ok-ink);
+  color: var(--accent);
 }
 
 .line.bad {
-  color: var(--err-ink);
+  color: var(--danger);
 }
 
 .line.warn {
-  color: var(--warn-ink);
+  color: var(--warn);
 }
 
-/* 吸底条：渐隐到弹层自己的玻璃色，而不是某个实色 ——
-   实色会在弹层底部切出一条可见的横带 */
+/* 吸底条：渐隐到弹层自己的底色，而不是某个实色 ——
+   实色会在底部切出一条可见的横带。
+   用 color-mix 派生，浅色主题不必再写一份覆写。 */
 .bar {
   grid-column: 1 / -1;
   position: sticky;
@@ -438,23 +432,19 @@ label.check > span {
   gap: 12px;
   padding: 12px 0;
   margin-top: 4px;
-  background: linear-gradient(to top, rgba(18, 9, 44, 0.92) 62%, rgba(18, 9, 44, 0));
+  background: linear-gradient(to top,
+      color-mix(in oklch, var(--bg-panel) 94%, transparent) 62%,
+      transparent);
 }
 
+/* 吸底条上只剩下失败信息了（成功反馈已改走轻提示），
+   因此它固定是警示色 —— 这一栏出现的每一句话都是「没成功」。 */
 .bar-msg {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
   font-size: var(--fs-sm);
-  color: var(--ok);
-}
-
-.bar-msg .warn {
-  color: var(--warn-ink);
-}
-
-html[data-theme='light'] .bar {
-  background: linear-gradient(to top, rgba(255, 255, 255, 0.95) 62%, rgba(255, 255, 255, 0));
+  color: var(--danger);
 }
 </style>

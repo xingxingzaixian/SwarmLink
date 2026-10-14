@@ -34,6 +34,16 @@ type PeerOffline struct {
 	Reason string
 }
 
+// ShareUpdated 是 share.updated 的载荷。
+//
+// Action 取值：published | unpublished | refreshed。
+// 载荷带上 action 而不是让前端「收到就全量刷新」：取消共享时界面需要
+// 立刻知道「是消失了一条」以便收起它的详情面板，事件里说清楚比再猜一次便宜。
+type ShareUpdated struct {
+	ShareID string
+	Action  string
+}
+
 // NetError 是 net.error 的载荷。
 type NetError struct {
 	ConnID string

@@ -3,7 +3,11 @@
  *
  * 生成命令（需要在仓库根目录执行）：
  *
- *   wails3 generate bindings -f "-tags wails" -clean .
+ *   wails3 generate bindings -f "-tags wails" -clean=true -ts -i .
+ *
+ * ⚠ `-ts` 与 `-i` 不能省：漏掉它们会把已入库的 `.ts` 绑定整批换成 `.js`
+ * （`frontend/bindings/` 会变成一堆 JS，前端 import 全部失效）。生成后
+ * 用 `git status --short -- frontend/bindings` 核对只出现预期文件。
  *
  * 产物在 frontend/bindings/ 下（已提交入库，因此前端可以脱离 Go 工具链构建）。
  * 若生成目录结构变化，只需要改本文件的 import 路径。
@@ -30,16 +34,18 @@ import {
   NotifyService,
   PeerService,
   SettingsService,
+  ShareService,
   TransferService
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/index.js'
 import type {
   DiagnosticsDTO,
   GroupDTO,
   SelfCheckDTO,
-  SettingsDTO
+  SettingsDTO,
+  ShareDTO
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/models.js'
 
-import type { Diagnostics, Group, SelfCheck, Settings, SwarmApi } from './types'
+import type { Diagnostics, Group, SelfCheck, Settings, Share, SwarmApi } from './types'
 
 /** 把绑定的可空数组收敛成空数组。 */
 function list<T>(v: T[] | null | undefined): T[] {
@@ -65,6 +71,10 @@ function toDiagnostics(d: DiagnosticsDTO): Diagnostics {
 
 function toSelfCheck(s: SelfCheckDTO): SelfCheck {
   return { ...s, seeds: list(s.seeds) }
+}
+
+function toShare(s: ShareDTO): Share {
+  return { ...s, visibility: { ...s.visibility, allowed: list(s.visibility?.allowed) } }
 }
 
 /** 真实后端实现（由 Wails 生成的服务绑定驱动）。 */
@@ -105,6 +115,7 @@ export const realApi: SwarmApi = {
 
   sendFile: async (peerId, path) => TransferService.SendFile(peerId, path),
   sendFolder: async (peerId, path) => TransferService.SendFolder(peerId, path),
+  sendFolderTo: async (peerIds, path) => TransferService.SendFolderTo(peerIds, path),
   transfers: async () => list(await TransferService.List()),
   batchJobs: async (batchId) => list(await TransferService.ListBatch(batchId)),
   cancelBatch: async (batchId) => TransferService.CancelBatch(batchId),
@@ -124,6 +135,11 @@ export const realApi: SwarmApi = {
   groupCreate: async (name, memberIds) => toGroup(await GroupService.Create(name, memberIds)),
   groupAddMember: async (groupId, memberId) =>
     toGroup(await GroupService.AddMember(groupId, memberId)),
+  groupRemoveMember: async (groupId, memberId) =>
+    toGroup(await GroupService.RemoveMember(groupId, memberId)),
+  groupLeave: async (groupId) => toGroup(await GroupService.Leave(groupId)),
+  groupRename: async (groupId, name) => toGroup(await GroupService.Rename(groupId, name)),
+  groupDissolve: async (groupId) => toGroup(await GroupService.Dissolve(groupId)),
   groupSendMessage: async (groupId, text) => GroupService.SendMessage(groupId, text),
   groupHistory: async (groupId, limit, before) =>
     list(await GroupService.History(groupId, limit, before)),
@@ -131,7 +147,24 @@ export const realApi: SwarmApi = {
   groupSendImageBytes: async (groupId, name, dataB64) =>
     GroupService.SendImageBytes(groupId, name, dataB64),
   groupSendFile: async (groupId, jobId, fileName) =>
-    GroupService.SendFile(groupId, jobId, fileName)
+    GroupService.SendFile(groupId, jobId, fileName),
+  groupSendFolder: async (groupId, batchId, folderName, fileCount, totalSize, skipped) =>
+    GroupService.SendFolder(groupId, batchId, folderName, fileCount, totalSize, skipped),
+
+  shareList: async () => list(await ShareService.List()).map(toShare),
+  sharePublish: async (rootPath, name, visType, allowed) =>
+    toShare(await ShareService.Publish(rootPath, name, visType, allowed)),
+  shareUnpublish: async (shareId) => {
+    await ShareService.Unpublish(shareId)
+  },
+  shareSetVisibility: async (shareId, visType, allowed) =>
+    toShare(await ShareService.SetVisibility(shareId, visType, allowed)),
+  shareRefresh: async (shareId) => toShare(await ShareService.Refresh(shareId)),
+  shareBrowse: async (shareId) => list(await ShareService.Browse(shareId)),
+  shareDownload: async (shareId, paths) => {
+    const res = await ShareService.Download(shareId, paths)
+    return { ...res, rejected: list(res.rejected) }
+  }
 }
 
 /**

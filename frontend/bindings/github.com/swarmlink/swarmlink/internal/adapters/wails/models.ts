@@ -49,6 +49,17 @@ export interface GroupDTO {
     "name": string;
     "ownerId": string;
     "epoch": number;
+
+    /**
+     * MintSeq 是群主的群级发票计数器（票号来源）。只用于展示/排障：
+     * 「为什么某人的 admit_seq 是 13」要靠它解释。
+     */
+    "mintSeq": number;
+
+    /**
+     * State 是群状态（active / dissolved）。解散后前端禁用输入并展示横幅。
+     */
+    "state": string;
     "isOwner": boolean;
     "members": GroupMemberDTO[] | null;
     "createdAt": number;
@@ -56,12 +67,24 @@ export interface GroupDTO {
 
 /**
  * GroupMemberDTO 是群成员项。
+ * 
+ * 票号一起暴露出去，是因为「谁还在群里」在前端也有一份判断需要与后端一致：
+ * 只给 state 会让前端被迫用派生缓存做判据，而缓存与票号一旦不同步，
+ * 就会出现「后端说已退出、前端仍显示在群」这种对不上的现象。
  */
 export interface GroupMemberDTO {
     "nodeId": string;
     "displayName": string;
     "role": string;
     "state": string;
+
+    /**
+     * Active 是权威判据（后端按票号算好），前端不要自己用 state 推。
+     */
+    "active": boolean;
+    "admitSeq": number;
+    "kickSeq": number;
+    "leftSeq": number;
 }
 
 /**
@@ -79,6 +102,15 @@ export interface MessageDTO {
     "state": string;
     "sentAt": number;
     "recvAt"?: number;
+
+    /**
+     * 群消息的送达统计（单聊恒为 0，omitempty 让单聊的 JSON 保持不变）。
+     * 
+     * PendingCount>0 表示还有成员没确认送达（离线或尚未连接），界面据此显示
+     * 「N 人未送达」。消息一旦全员送达，投递记录被清理，这里回到 0。
+     */
+    "memberCount"?: number;
+    "pendingCount"?: number;
 }
 
 /**
@@ -98,6 +130,15 @@ export interface PeerDTO {
     "lastSeen": number;
     "online": boolean;
     "connected": boolean;
+
+    /**
+     * RTTMs 是最近一次心跳测得的往返延迟（毫秒）。0 表示【没有数据】：
+     * 当前没有会话，或会话刚建立、心跳还没跑完一轮。
+     * 
+     * 界面必须把「0」显示成「测量中」而不是「0ms」—— 后者是神仙延迟，
+     * 拿没数据冒充 0 是编造。
+     */
+    "rttMs": number;
 }
 
 /**
@@ -168,6 +209,88 @@ export interface SettingsDTO {
     "notifySound": boolean;
     "notifyMinimizeToTray": boolean;
     "autoStart": boolean;
+}
+
+/**
+ * ShareDTO 是共享列表项：本机发布的与他人发布的共用一种形状。
+ * 
+ * 为什么共用一个 DTO 而不是两份：界面上的两个分组渲染的是同一张卡片，
+ * 差异只有「能不能下载 / 能不能取消」两个按钮位 —— 拆成两个类型会立刻
+ * 出现「改了一边忘了另一边」的不对称。
+ */
+export interface ShareDTO {
+    "shareId": string;
+    "name": string;
+    "ownerId": string;
+    "ownerName": string;
+    "fileCount": number;
+    "totalSize": number;
+    "visibility": ShareVisibilityDTO;
+
+    /**
+     * VisibilityText 是给人看的可见性文案（后端算，保证两处一致）。
+     */
+    "visibilityText": string;
+
+    /**
+     * Mine=true 表示这是【本机发布】的共享。
+     */
+    "mine": boolean;
+
+    /**
+     * RootPath 仅本机共享有值（本地根路径，界面「打开所在文件夹」用）。
+     */
+    "rootPath"?: string;
+
+    /**
+     * Online 仅他人共享有意义：发布者此刻在目录里在线且地址可用。
+     */
+    "online": boolean;
+
+    /**
+     * Downloadable 是后端算好的「现在点下载会成功吗」。
+     * 
+     * 必须由后端给结论：它同时取决于 Mine / Online / 可见性，让前端把三个
+     * 字段组合一遍就等于把一条判定规则复制到第二个地方，而两者迟早不一致。
+     */
+    "downloadable": boolean;
+    "createdAt": number;
+    "updatedAt": number;
+}
+
+/**
+ * ShareDownloadDTO 是一次共享下载的受理结果（进度走传输事件）。
+ */
+export interface ShareDownloadDTO {
+    "batchId": string;
+    "accepted": number;
+    "rejected"?: string[] | null;
+}
+
+/**
+ * ShareItemDTO 是共享里的一条文件。
+ */
+export interface ShareItemDTO {
+    "path": string;
+    "name": string;
+    "size": number;
+    "isDir"?: boolean;
+    "mtime"?: number;
+}
+
+/**
+ * ShareVisibilityDTO 是共享可见性。
+ */
+export interface ShareVisibilityDTO {
+    /**
+     * Type 取值：all | users | group。
+     */
+    "type": string;
+
+    /**
+     * Allowed 是 node_id（users）或群 id（group）列表。
+     */
+    "allowed"?: string[] | null;
 }
 
 /**

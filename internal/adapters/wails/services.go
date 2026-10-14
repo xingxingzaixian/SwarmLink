@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/swarmlink/swarmlink/internal/adapters/config"
@@ -19,6 +20,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/infra/imagecodec"
 )
 
@@ -56,10 +58,12 @@ type Deps struct {
 	Group     *app.GroupApp
 	Peers     *app.PeerApp
 	Discovery *app.DiscoveryApp
+	Share     *app.ShareApp
 
 	PeerDir      ports.PeerDirectory
 	TransferRepo ports.TransferRepo
 	GroupRepo    ports.GroupRepo
+	Deliveries   ports.GroupDeliveryRepo
 	Conns        ConnInspector
 	Seeds        ports.SeedRegistry
 	Interfaces   func() []string
@@ -82,6 +86,7 @@ type ServiceSet struct {
 	Peer     *PeerService
 	Group    *GroupService
 	Notify   *NotifyService
+	Share    *ShareService
 }
 
 // NewServices 构造服务集合。
@@ -93,6 +98,7 @@ func NewServices(d Deps) *ServiceSet {
 		Peer:     &PeerService{d: d},
 		Group:    &GroupService{d: d},
 		Notify:   &NotifyService{d: d},
+		Share:    &ShareService{d: d},
 	}
 }
 
@@ -694,6 +700,46 @@ func (s *TransferService) SendFolder(peerID, path string) (FolderDTO, error) {
 	}, nil
 }
 
+// SendFolderTo 把同一个文件夹发给多个对端（群聊用），全批共享一个 batch_id。
+//
+// 与 SendFolder 的差别只有「一次发给谁」：群聊里聊天框只出现一张卡片，
+// 因此所有成员的任务必须落在同一个批次下，否则卡片进度会按「文件数 × 成员数」算。
+func (s *TransferService) SendFolderTo(peerIDs []string, path string) (FolderDTO, error) {
+	if len(peerIDs) == 0 {
+		return FolderDTO{}, fmt.Errorf("没有可发送的成员")
+	}
+	if path == "" {
+		return FolderDTO{}, fmt.Errorf("请选择文件夹")
+	}
+	ids := make([]identity.NodeID, 0, len(peerIDs))
+	for _, raw := range peerIDs {
+		id, err := identity.ParseNodeID(raw)
+		if err != nil {
+			return FolderDTO{}, fmt.Errorf("无效的 NodeID %q: %w", raw, err)
+		}
+		ids = append(ids, id)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return FolderDTO{}, fmt.Errorf("无法访问: %w", err)
+	}
+	if !st.IsDir() {
+		return FolderDTO{}, fmt.Errorf("请选择文件夹（%s 是一个文件）", path)
+	}
+
+	sum, err := s.d.Transfer.SendFolderTo(context.Background(), ids, path, message.NewID())
+	if err != nil {
+		return FolderDTO{}, err
+	}
+	return FolderDTO{
+		BatchID:    sum.BatchID,
+		FolderName: sum.FolderName,
+		FileCount:  sum.FileCount,
+		TotalSize:  sum.TotalSize,
+		Skipped:    sum.Skipped,
+	}, nil
+}
+
 // CancelBatch 取消整个文件夹批次里未结束的任务（含正在传输的那个），返回取消条数。
 func (s *TransferService) CancelBatch(batchID string) (int, error) {
 	if batchID == "" {
@@ -852,8 +898,8 @@ func (s *PeerService) List() []PeerDTO {
 	all := s.d.PeerDir.List(ports.PeerFilter{})
 	out := make([]PeerDTO, 0, len(all))
 	for _, p := range all {
-		_, connected := s.d.Conns.SessionOf(p.NodeID)
-		out = append(out, ToPeerDTO(p, connected))
+		sess, connected := s.d.Conns.SessionOf(p.NodeID)
+		out = append(out, ToPeerDTO(p, connected, sessionRTTMs(sess, connected)))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Online != out[j].Online {
@@ -862,6 +908,25 @@ func (s *PeerService) List() []PeerDTO {
 		return out[i].DisplayName < out[j].DisplayName
 	})
 	return out
+}
+
+// sessionRTTMs 把会话的往返延迟折成毫秒；没有会话或尚未测到一律返回 0（= 无数据）。
+//
+// 两处细节都是踩过的坑：
+//   - 必须用 connected 判断，不能只判 sess == nil —— ConnManager.SessionOf 在
+//     未命中时返回的是「装了 nil *session 的非 nil 接口」，判 nil 恒为假，
+//     接着调 sess.RTT() 就会在 nil 接收者上取锁崩掉；
+//   - RTT 为 0 时不返回 0ms：会话刚建立、心跳还没跑完一轮时它就是 0，
+//     那是「还没测到」，与「真的没有延迟」是两回事。
+func sessionRTTMs(sess ports.Session, connected bool) int64 {
+	if !connected || sess == nil {
+		return 0
+	}
+	d := sess.RTT()
+	if d <= 0 {
+		return 0
+	}
+	return int64(d / time.Millisecond)
 }
 
 // Remove 从本机列表里移除一个节点（设计文档 §5）。
@@ -967,6 +1032,50 @@ func (s *GroupService) AddMember(groupID, memberID string) (GroupDTO, error) {
 	return toGroupDTO(g, s.d.Self.NodeID), nil
 }
 
+// RemoveMember 由群主把成员移出群（epoch+1 并广播）。
+func (s *GroupService) RemoveMember(groupID, memberID string) (GroupDTO, error) {
+	id, err := identity.ParseNodeID(memberID)
+	if err != nil {
+		return GroupDTO{}, fmt.Errorf("无效的成员 NodeID: %w", err)
+	}
+	g, err := s.d.Group.RemoveMember(context.Background(), groupID, id)
+	if err != nil {
+		return GroupDTO{}, err
+	}
+	return toGroupDTO(g, s.d.Self.NodeID), nil
+}
+
+// Leave 退出群（本人）。本地立即生效，不依赖群主在线 ——
+// 退出权属于本人，把它绑在「群主在线」上正是原设计的硬伤（ADR-012）。
+func (s *GroupService) Leave(groupID string) (GroupDTO, error) {
+	if groupID == "" {
+		return GroupDTO{}, fmt.Errorf("缺少群 id")
+	}
+	g, err := s.d.Group.Leave(context.Background(), groupID)
+	if err != nil {
+		return GroupDTO{}, err
+	}
+	return toGroupDTO(g, s.d.Self.NodeID), nil
+}
+
+// Rename 由群主修改群名（epoch+1 并广播）。
+func (s *GroupService) Rename(groupID, name string) (GroupDTO, error) {
+	g, err := s.d.Group.Rename(context.Background(), groupID, name)
+	if err != nil {
+		return GroupDTO{}, err
+	}
+	return toGroupDTO(g, s.d.Self.NodeID), nil
+}
+
+// Dissolve 由群主解散群（epoch+1 并广播；成员侧收到后停止收发）。
+func (s *GroupService) Dissolve(groupID string) (GroupDTO, error) {
+	g, err := s.d.Group.Dissolve(context.Background(), groupID)
+	if err != nil {
+		return GroupDTO{}, err
+	}
+	return toGroupDTO(g, s.d.Self.NodeID), nil
+}
+
 // SendMessage 群发消息（扇出到在线成员；离线成员不暂存）。
 func (s *GroupService) SendMessage(groupID, text string) (MessageDTO, error) {
 	if text == "" {
@@ -976,7 +1085,7 @@ func (s *GroupService) SendMessage(groupID, text string) (MessageDTO, error) {
 	if err != nil {
 		return MessageDTO{}, err
 	}
-	return ToMessageDTO(msg), nil
+	return s.withStats(ToMessageDTO(msg), groupID), nil
 }
 
 // SendImage 群发一张本地图片（与单聊同一套压缩与内联格式）。
@@ -995,7 +1104,7 @@ func (s *GroupService) SendImage(groupID, path string) (MessageDTO, error) {
 	if err != nil {
 		return MessageDTO{}, err
 	}
-	return ToMessageDTO(msg), nil
+	return s.withStats(ToMessageDTO(msg), groupID), nil
 }
 
 // SendImageBytes 群发剪贴板里的图片（dataB64 为 base64 字符串）。
@@ -1015,13 +1124,13 @@ func (s *GroupService) SendImageBytes(groupID, name, dataB64 string) (MessageDTO
 	if err != nil {
 		return MessageDTO{}, err
 	}
-	return ToMessageDTO(msg), nil
+	return s.withStats(ToMessageDTO(msg), groupID), nil
 }
 
-// SendFile 群发文件消息（通知群成员有文件传输）。
+// SendFile 群发文件消息（在群里放一张文件卡片）。
 //
-// 注意：v1.0 群聊的文件传输实际上不支持点对点传输，
-// 这条消息只是通知群成员「我正在发送一个文件」。
+// 这条消息只承载卡片：文件字节由前端对每个在线成员各自发起点对点传输，
+// 因此「谁收到了文件」与群消息的送达统计是两件独立的事。
 func (s *GroupService) SendFile(groupID, jobID, fileName string) (MessageDTO, error) {
 	if groupID == "" {
 		return MessageDTO{}, fmt.Errorf("缺少群 id")
@@ -1036,10 +1145,35 @@ func (s *GroupService) SendFile(groupID, jobID, fileName string) (MessageDTO, er
 	if err != nil {
 		return MessageDTO{}, err
 	}
-	return ToMessageDTO(msg), nil
+	return s.withStats(ToMessageDTO(msg), groupID), nil
+}
+
+// SendFolder 群发文件夹消息（在群里放一张聚合卡片）。
+//
+// 与 SendFile 同一套路：卡片只描述「发了什么」，真正的传输是前端按
+// 每个在线成员逐个发起（复用文件夹批次的 batch_id）。
+func (s *GroupService) SendFolder(
+	groupID, batchID, folderName string,
+	fileCount int,
+	totalSize int64,
+	skipped int,
+) (MessageDTO, error) {
+	if groupID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少群 id")
+	}
+	if batchID == "" {
+		return MessageDTO{}, fmt.Errorf("缺少批次 id")
+	}
+	msg, err := s.d.Group.SendGroupFolder(context.Background(), groupID, batchID, folderName, fileCount, totalSize, skipped)
+	if err != nil {
+		return MessageDTO{}, err
+	}
+	return s.withStats(ToMessageDTO(msg), groupID), nil
 }
 
 // History 返回群历史消息（新→旧）。
+//
+// 一次性取回整个会话的送达统计再填入，避免每条消息一次查询。
 func (s *GroupService) History(groupID string, limit int, before int64) ([]MessageDTO, error) {
 	if limit <= 0 {
 		limit = 50
@@ -1048,11 +1182,38 @@ func (s *GroupService) History(groupID string, limit int, before int64) ([]Messa
 	if err != nil {
 		return nil, err
 	}
+	stats := s.statsOf(groupID)
 	out := make([]MessageDTO, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, ToMessageDTO(m))
+		out = append(out, fillDeliveryStat(ToMessageDTO(m), stats))
 	}
 	return out, nil
+}
+
+// statsOf 取某群的送达统计；没有投递仓储或查询失败时返回 nil（表示不附加统计）。
+func (s *GroupService) statsOf(groupID string) map[string]ports.DeliveryStat {
+	if s.d.Deliveries == nil {
+		return nil
+	}
+	stats, err := s.d.Deliveries.StatsByConv(message.GroupConvID(groupID))
+	if err != nil {
+		return nil
+	}
+	return stats
+}
+
+// withStats 给一条群消息补上送达统计。
+func (s *GroupService) withStats(dto MessageDTO, groupID string) MessageDTO {
+	return fillDeliveryStat(dto, s.statsOf(groupID))
+}
+
+// fillDeliveryStat 把统计填进 DTO；该消息没有记录（已送达/非群消息）则原样返回。
+func fillDeliveryStat(dto MessageDTO, stats map[string]ports.DeliveryStat) MessageDTO {
+	if st, ok := stats[dto.MsgID]; ok {
+		dto.MemberCount = st.Total
+		dto.PendingCount = st.Pending()
+	}
+	return dto
 }
 
 func toGroupDTO(g group.Group, self identity.NodeID) GroupDTO {
@@ -1063,6 +1224,11 @@ func toGroupDTO(g group.Group, self identity.NodeID) GroupDTO {
 			DisplayName: m.DisplayName,
 			Role:        string(m.Role),
 			State:       string(m.State),
+			// Active 由后端按票号算好：前端拿它做判据，而不是拿 state 缓存推。
+			Active:   m.Active(),
+			AdmitSeq: m.AdmitSeq,
+			KickSeq:  m.KickSeq,
+			LeftSeq:  m.LeftSeq,
 		})
 	}
 	return GroupDTO{
@@ -1070,6 +1236,8 @@ func toGroupDTO(g group.Group, self identity.NodeID) GroupDTO {
 		Name:      g.Name,
 		OwnerID:   g.OwnerID.String(),
 		Epoch:     g.Epoch,
+		MintSeq:   g.MintSeq,
+		State:     string(g.State.StateOrActive()),
 		IsOwner:   g.OwnerID == self,
 		Members:   members,
 		CreatedAt: g.CreatedAt.UnixMilli(),
@@ -1094,4 +1262,156 @@ func (s *NotifyService) SetActiveConversation(convID string) error {
 	}
 	s.d.SetActiveConv(convID)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// ShareService
+// ---------------------------------------------------------------------------
+
+// ShareService 暴露文件共享（FR-14）能力。
+//
+// 与 TransferService 的分工：这里只负责「发布什么、谁能看、要哪些文件」，
+// 字节搬运与进度一律复用传输服务与 transfer:* 事件 —— 界面因此不需要
+// 为共享下载再写一套进度 UI。
+type ShareService struct{ d Deps }
+
+// List 返回共享清单：本机发布的在前，他人发布的在后。
+//
+// 两个分组一次返回而不是分两个方法：界面同一屏要展示它们，分两次调用
+// 会出现两批数据来自不同时刻的经典问题（用户会看到「我发布的没了」
+// 这种一闪）。
+func (s *ShareService) List() ([]ShareDTO, error) {
+	if s.d.Share == nil {
+		return nil, fmt.Errorf("共享功能未启用")
+	}
+	mine := s.d.Share.Mine()
+	remote := s.d.Share.Remote()
+
+	out := make([]ShareDTO, 0, len(mine)+len(remote))
+	for _, m := range mine {
+		out = append(out, ToShareDTO(m))
+	}
+	for _, r := range remote {
+		out = append(out, ToRemoteShareDTO(r))
+	}
+	return out, nil
+}
+
+// Publish 发布一条共享。
+//
+// 可见性用 (visType, allowed) 两个参数表达而不是传一个结构体：Wails 的
+// 绑定生成对「结构体参数」支持是好的，但可见性的两个字段有强耦合的
+// 取值规则（all 忽略 allowed、group 只允许一个），拆成参数能让前端的
+// 调用点一眼看出这条规则。
+func (s *ShareService) Publish(rootPath, name, visType string, allowed []string) (ShareDTO, error) {
+	if s.d.Share == nil {
+		return ShareDTO{}, fmt.Errorf("共享功能未启用")
+	}
+	if strings.TrimSpace(rootPath) == "" {
+		return ShareDTO{}, fmt.Errorf("请选择要共享的目录或文件")
+	}
+	vis := share.Visibility{Type: share.VisibilityType(visType), Allowed: allowed}.Normalize()
+	if err := vis.Validate(); err != nil {
+		return ShareDTO{}, err
+	}
+	sh, err := s.d.Share.Publish(context.Background(), app.PublishRequest{
+		RootPath: rootPath, Name: name, Visibility: vis,
+	})
+	if err != nil {
+		return ShareDTO{}, err
+	}
+	return ToShareDTO(sh), nil
+}
+
+// Unpublish 取消一条本机发布的共享。
+func (s *ShareService) Unpublish(shareID string) error {
+	if s.d.Share == nil {
+		return fmt.Errorf("共享功能未启用")
+	}
+	if shareID == "" {
+		return fmt.Errorf("请选择要取消的共享")
+	}
+	return s.d.Share.Unpublish(shareID)
+}
+
+// Refresh 重新扫描共享根目录（磁盘内容变了之后用）。
+func (s *ShareService) Refresh(shareID string) (ShareDTO, error) {
+	if s.d.Share == nil {
+		return ShareDTO{}, fmt.Errorf("共享功能未启用")
+	}
+	if shareID == "" {
+		return ShareDTO{}, fmt.Errorf("请选择要刷新的共享")
+	}
+	sh, err := s.d.Share.RefreshIndex(context.Background(), shareID)
+	if err != nil {
+		return ShareDTO{}, err
+	}
+	return ToShareDTO(sh), nil
+}
+
+// SetVisibility 修改一条本机共享的可见性。
+//
+// 与 Publish 同一套可见性取值规则（避免前端在两个入口里各写一遍判断），
+// 差别只是它作用在已存在的那条共享上 —— 因此不需要新发布、也不会换 share_id。
+func (s *ShareService) SetVisibility(shareID, visType string, allowed []string) (ShareDTO, error) {
+	if s.d.Share == nil {
+		return ShareDTO{}, fmt.Errorf("共享功能未启用")
+	}
+	if strings.TrimSpace(shareID) == "" {
+		return ShareDTO{}, fmt.Errorf("请选择要修改可见性的共享")
+	}
+	vis := share.Visibility{Type: share.VisibilityType(visType), Allowed: allowed}.Normalize()
+	if err := vis.Validate(); err != nil {
+		return ShareDTO{}, err
+	}
+	sh, err := s.d.Share.SetVisibility(shareID, vis)
+	if err != nil {
+		return ShareDTO{}, err
+	}
+	return ToShareDTO(sh), nil
+}
+
+// Browse 返回一条共享的文件清单（可浏览自己的，也可浏览他人的）。
+//
+// 他人的清单是现拉现取的（SHARE_INDEX_REQ）：摘要里不带清单，因为清单
+// 体积随目录大小增长，而摘要是每 45 秒广播一次的东西。
+func (s *ShareService) Browse(shareID string) ([]ShareItemDTO, error) {
+	if s.d.Share == nil {
+		return nil, fmt.Errorf("共享功能未启用")
+	}
+	if shareID == "" {
+		return nil, fmt.Errorf("请选择共享")
+	}
+	items, err := s.d.Share.Items(context.Background(), shareID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ShareItemDTO, 0, len(items))
+	for _, it := range items {
+		out = append(out, ToShareItemDTO(it))
+	}
+	return out, nil
+}
+
+// Download 请共享方把指定文件推过来（异步传输：返回即代表已受理）。
+//
+// 返回的 batchId 会出现在随后每一条相关任务的 transfer:* 事件里，
+// 界面据此把整批聚合成一张卡片 —— 与文件夹发送是同一套机制。
+func (s *ShareService) Download(shareID string, paths []string) (ShareDownloadDTO, error) {
+	if s.d.Share == nil {
+		return ShareDownloadDTO{}, fmt.Errorf("共享功能未启用")
+	}
+	if shareID == "" {
+		return ShareDownloadDTO{}, fmt.Errorf("请选择共享")
+	}
+	if len(paths) == 0 {
+		return ShareDownloadDTO{}, fmt.Errorf("请选择要下载的文件")
+	}
+	res, err := s.d.Share.Download(context.Background(), shareID, paths)
+	if err != nil {
+		return ShareDownloadDTO{}, err
+	}
+	return ShareDownloadDTO{
+		BatchID: res.BatchID, Accepted: res.Accepted, Rejected: res.Rejected,
+	}, nil
 }

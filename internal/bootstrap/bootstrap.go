@@ -63,15 +63,18 @@ type Node struct {
 	Registry *udp.Registry
 	Sink     *filesink.Sink
 
-	Messages  ports.ChatStore
-	Transfers ports.TransferRepo
-	Groups    ports.GroupRepo
-	PeerDir   ports.PeerDirectory
+	Messages   ports.ChatStore
+	Transfers  ports.TransferRepo
+	Groups     ports.GroupRepo
+	Deliveries ports.GroupDeliveryRepo
+	PeerDir    ports.PeerDirectory
+	Shares     ports.ShareRepo
 
 	PeerApp     *app.PeerApp
 	ChatApp     *app.ChatApp
 	GroupApp    *app.GroupApp
 	TransferApp *app.TransferApp
+	ShareApp    *app.ShareApp
 	DiscApp     *app.DiscoveryApp
 	Router      *app.Router
 
@@ -152,7 +155,9 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 		m := mem.NewMessages(clk)
 		n.Messages, n.Transfers = m, m
 		n.Groups = mem.NewGroups()
+		n.Deliveries = mem.NewGroupDeliveries()
 		n.PeerDir = mem.NewPeers(clk)
+		n.Shares = mem.NewShares()
 	} else {
 		dbPath := config.DBPath(dir)
 		if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
@@ -166,6 +171,7 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 		n.Messages = sqlite.NewMessages(db)
 		n.Transfers = sqlite.NewTransfers(db)
 		n.Groups = sqlite.NewGroups(db)
+		n.Deliveries = sqlite.NewGroupDeliveries(db)
 
 		// 传输记录清理放在【启动】时，而不是退出时 ——
 		// 异常退出根本走不到退出逻辑，而这张表是应用里唯一持续膨胀的东西。
@@ -184,6 +190,7 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 			n.Notices = append(n.Notices, fmt.Sprintf("已清理 %d 条过期传输记录", purged))
 		}
 		n.PeerDir = sqlite.NewPeers(db, clk)
+		n.Shares = sqlite.NewShares(db)
 	}
 
 	// ---------------------------------------------------------------- 落盘
@@ -233,6 +240,19 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 
 	peerApp := app.NewPeerApp(kp.NodeID(), n.PeerDir, bus, clk, cfg.Discovery.PeerTTL.Std(), lg)
 	n.PeerApp = peerApp
+	// Sweep 需要知道「是否仍有活动会话」，才能把 TTL 兜底从 discovered 扩展到 online。
+	peerApp.SetConnLookup(n.Conn)
+
+	// 启动边界：清空上次运行残留的「在线」。
+	//
+	// 进程刚起来不可能有已握手的会话，目录里的 online 一律不可信（ADR-009）。不清零会
+	// 复现「A 重启后，已离线的 B 仍显示在线」—— B 的离线事件在 A 离线期间永远到不了本机，
+	// 只能靠这里 + 下一次 TTL 兜底纠正。放在 startBroadcast 之前，避免与入站 announce 竞争。
+	if cleared, err := n.PeerDir.ResetLiveness(); err != nil {
+		lg.Warn("清除残留在线状态失败", "err", err)
+	} else if cleared > 0 {
+		lg.Info("已清除上次运行残留的在线状态", "count", cleared)
+	}
 
 	if err := startBroadcast(ctx, bc, cfg.Network.UDPPort, cfg.Network.PortFallbackRange, peerApp); err != nil {
 		n.Close()
@@ -253,12 +273,25 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 
 	// ---------------------------------------------------------------- 应用层
 	n.ChatApp = app.NewChatApp(kp.NodeID(), n.Messages, conn, n.PeerDir, bus, clk, lg)
-	n.GroupApp = app.NewGroupApp(kp.NodeID(), kp, n.Groups, n.Messages, conn, n.PeerDir, bus, clk, lg)
+	n.GroupApp = app.NewGroupApp(kp.NodeID(), kp, n.Groups, n.Messages, n.Deliveries, conn, n.PeerDir, bus, clk, lg)
+	// 群消息与单聊共用 TypeChatAck：把群 ACK 从 ChatApp 委派到 GroupApp（按成员记账）。
+	n.ChatApp.GroupAck = n.GroupApp.HandleGroupAck
 	n.TransferApp = app.NewTransferApp(kp.NodeID(), n.Transfers, sink, conn, n.PeerDir, bus, clk, lg)
 	n.TransferApp.MaxConcurrent = cfg.Transfer.MaxConcurrent
 	n.TransferApp.ChunkSize = cfg.Transfer.ChunkSize
 	n.TransferApp.WindowSize = cfg.Transfer.WindowSize
 	n.TransferApp.BitmapFlushInterval = cfg.Transfer.BitmapFlushInterval.Std()
+
+	// 文件共享（FR-14）：仓储在上面按存储分支装配，这里组装应用。
+	n.ShareApp = app.NewShareApp(
+		kp.NodeID(), n.Shares, n.PeerDir, n.Groups, n.TransferApp, bus, clk, lg)
+	// 昵称走回调而不是快照：用户改了昵称之后重发的摘要不该还挂着旧名。
+	n.ShareApp.SelfName = func() string { return cfg.General.DisplayName }
+	// 发布/取消后立刻广播一次：广播周期是 45 秒，等下一轮用户会以为没生效。
+	n.ShareApp.Announce = bc.AnnounceNow
+	// 广播携带本机共享摘要（旧版本客户端会忽略它，见 peer.Announcement.Shares）。
+	bc.SetSharesFunc(n.ShareApp.Summaries)
+	n.ShareApp.Start(ctx)
 
 	seedAddrs, seedErrs := cfg.SeedAddrs()
 	seedAddrs = append(seedAddrs, opts.ExtraSeeds...)
@@ -274,12 +307,28 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	n.DiscApp.SeedsPerRefresh = cfg.Discovery.Seeds.SeedsPerRefresh
 	n.DiscApp.MaxEntries = cfg.Discovery.MaxPeerListSize
 
-	n.Router = app.NewRouter(n.ChatApp, n.GroupApp, n.TransferApp, n.DiscApp, peerApp, lg)
+	n.Router = app.NewRouter(
+		n.ChatApp, n.GroupApp, n.TransferApp, n.DiscApp, peerApp, n.ShareApp, lg)
 	conn.SetHandler(n.Router.Handle)
 
 	peerApp.Start()
 	n.ChatApp.Start(ctx)
 	n.DiscApp.Start(ctx)
+
+	// 群名册同步：peer.online / peer.discovered 时推送与拉取，另有 60s 抽查兜底。
+	// 少了它，「离线成员错过一次变更」就永久错过了 —— 被移出者仍以为在群里，
+	// 被加入者连群都不存在（ADR-012 Decision §6）。
+	n.GroupApp.Start(ctx)
+	// 群主给自己名下的每个群重签一次名册：覆盖 RosterSig 布局变更的存量代价。
+	// 放在这里而不是让用户手工触发，是因为「升级后旧签名验不过」必须自动消失。
+	for _, g := range n.Groups.List() {
+		if g.OwnerID != kp.NodeID() {
+			continue
+		}
+		if _, err := n.GroupApp.Resign(ctx, g.ID); err != nil {
+			lg.Warn("群名册重签失败", "group_id", g.ID, "err", err)
+		}
+	}
 
 	// 文件传输的等待重试：对端上线（peer.online / peer.discovered）是主触发源，
 	// Recover 负责收尾上次运行留下的任务并立刻试一轮等待中的那些。

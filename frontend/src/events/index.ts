@@ -1,7 +1,9 @@
-import { sendFilesWithMessages } from '../composables/useFileSend'
+import { groupFileTargets, sendFilesWithMessages } from '../composables/useFileSend'
 import { useChatStore } from '../stores/chat'
 import { useDebugStore } from '../stores/debug'
+import { useGroupStore } from '../stores/group'
 import { usePeersStore } from '../stores/peers'
+import { useShareStore } from '../stores/share'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
 import { isImagePath } from '../utils/image'
@@ -57,9 +59,14 @@ async function handleFilesDropped(data: FilesDroppedEvent): Promise<void> {
 
   if (!files.length) return
 
-  const peerId = chat.activePeerId
-  if (!peerId) {
-    ui.notify('文件传输暂不支持群聊，请改用图片或在单聊里发送')
+  // 群聊：文件发给每个在线成员（见 useFileSend 的群分支）；没有目标就没有意义。
+  if (conv.kind === 'group') {
+    if (!groupFileTargets(conv).length) {
+      ui.notify('群里当前没有在线成员，文件暂时发不出去')
+      return
+    }
+  } else if (!chat.activePeerId) {
+    ui.notify('先打开与某个联系人的会话，再发送文件')
     return
   }
 
@@ -170,6 +177,27 @@ function scheduleProgressFlush(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 共享清单刷新（合并突发）
+// ---------------------------------------------------------------------------
+
+let shareRefreshTimer: number | undefined
+
+/**
+ * 合并短时间内的多次共享刷新请求。
+ *
+ * 为什么必须合并：他人的共享摘要在【目录条目】上，随 peer:updated 抵达，
+ * 而通告是每几秒一轮的 —— 逐条触发一次 shareList() 会让共享中心在
+ * 一个节点频繁广播时反复整表重查（后端要遍历整个节点目录）。
+ */
+function scheduleShareRefresh(): void {
+  if (shareRefreshTimer) window.clearTimeout(shareRefreshTimer)
+  shareRefreshTimer = window.setTimeout(() => {
+    shareRefreshTimer = undefined
+    void useShareStore().refresh()
+  }, 600)
+}
+
+// ---------------------------------------------------------------------------
 // 集中注册
 // ---------------------------------------------------------------------------
 
@@ -194,6 +222,15 @@ export function registerEvents(): void {
 
   on(EV.peerUpdated, (data: Partial<Peer> & { nodeId: string }) => {
     peers.applyUpdate(data)
+    // 他人的共享摘要随目录条目走，因此这条事件也是「共享清单可能变了」的信号。
+    // 只在共享中心打开时刷新：面板关着时没人看，白查一次整个目录不值得。
+    if (useUiStore().panel === 'share') scheduleShareRefresh()
+  })
+
+  // 本机共享变化（发布 / 取消 / 刷新索引）：无条件刷新 —— 这是用户自己刚做的动作，
+  // 界面必须立刻反映，不存在「没人看就不刷新」的余地。
+  on(EV.shareUpdated, () => {
+    void useShareStore().refresh()
   })
 
   on(EV.chatNewMessage, (m: Message) => chat.receive(m))
@@ -227,11 +264,25 @@ export function registerEvents(): void {
     transfers.applyState(data)
   })
 
-  on(EV.groupUpdated, (data: { groupId: string; name: string; epoch: number }) => {
-    // 群元数据只推摘要；成员详情由 GroupService.List() 拉取
-    void chat.loadConversations()
-    debug.push({ topic: `group.updated → epoch=${data.epoch}`, at: Date.now() })
-  })
+  on(
+    EV.groupUpdated,
+    (data: { groupId: string; name: string; epoch: number; state?: string; digest?: string }) => {
+      // 群元数据只推摘要；成员详情由 GroupService.List() 拉取。
+      //
+      // 但**先比对签名再拉**：名册同步是「多发几次也无害」的设计（推送 + 拉取 + 60s 抽查），
+      // 每次都整份重拉会让面板在毫无变化时反复重渲染。签名含 name，
+      // 因为群名不进名册摘要（改名要能刷新标题与面板）。
+      const signature = `${data.name}|${data.state ?? ''}|${data.digest ?? ''}`
+      if (useGroupStore().signatureChanged(data.groupId, signature)) {
+        void useGroupStore().refresh()
+        void chat.loadConversations()
+      }
+      debug.push({
+        topic: `group.updated → epoch=${data.epoch}${data.state ? ' state=' + data.state : ''}`,
+        at: Date.now()
+      })
+    }
+  )
 
   on(EV.fileDropped, (data: FilesDroppedEvent) => {
     void handleFilesDropped(data)

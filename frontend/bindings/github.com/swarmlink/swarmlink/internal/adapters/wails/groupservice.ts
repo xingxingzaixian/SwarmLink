@@ -29,10 +29,27 @@ export function Create(name: string, memberIDs: string[] | null): $CancellablePr
 }
 
 /**
+ * Dissolve 由群主解散群（epoch+1 并广播；成员侧收到后停止收发）。
+ */
+export function Dissolve(groupID: string): $CancellablePromise<$models.GroupDTO> {
+    return $Call.ByID(4188224092, groupID);
+}
+
+/**
  * History 返回群历史消息（新→旧）。
+ * 
+ * 一次性取回整个会话的送达统计再填入，避免每条消息一次查询。
  */
 export function History(groupID: string, limit: number, before: number): $CancellablePromise<$models.MessageDTO[] | null> {
     return $Call.ByID(737406809, groupID, limit, before);
+}
+
+/**
+ * Leave 退出群（本人）。本地立即生效，不依赖群主在线 ——
+ * 退出权属于本人，把它绑在「群主在线」上正是原设计的硬伤（ADR-012）。
+ */
+export function Leave(groupID: string): $CancellablePromise<$models.GroupDTO> {
+    return $Call.ByID(44939122, groupID);
 }
 
 /**
@@ -43,13 +60,37 @@ export function List(): $CancellablePromise<$models.GroupDTO[] | null> {
 }
 
 /**
- * SendFile 群发文件消息（通知群成员有文件传输）。
+ * RemoveMember 由群主把成员移出群（epoch+1 并广播）。
+ */
+export function RemoveMember(groupID: string, memberID: string): $CancellablePromise<$models.GroupDTO> {
+    return $Call.ByID(3464640585, groupID, memberID);
+}
+
+/**
+ * Rename 由群主修改群名（epoch+1 并广播）。
+ */
+export function Rename(groupID: string, name: string): $CancellablePromise<$models.GroupDTO> {
+    return $Call.ByID(1335725629, groupID, name);
+}
+
+/**
+ * SendFile 群发文件消息（在群里放一张文件卡片）。
  * 
- * 注意：v1.0 群聊的文件传输实际上不支持点对点传输，
- * 这条消息只是通知群成员「我正在发送一个文件」。
+ * 这条消息只承载卡片：文件字节由前端对每个在线成员各自发起点对点传输，
+ * 因此「谁收到了文件」与群消息的送达统计是两件独立的事。
  */
 export function SendFile(groupID: string, jobID: string, fileName: string): $CancellablePromise<$models.MessageDTO> {
     return $Call.ByID(1822531511, groupID, jobID, fileName);
+}
+
+/**
+ * SendFolder 群发文件夹消息（在群里放一张聚合卡片）。
+ * 
+ * 与 SendFile 同一套路：卡片只描述「发了什么」，真正的传输是前端按
+ * 每个在线成员逐个发起（复用文件夹批次的 batch_id）。
+ */
+export function SendFolder(groupID: string, batchID: string, folderName: string, fileCount: number, totalSize: number, skipped: number): $CancellablePromise<$models.MessageDTO> {
+    return $Call.ByID(2946775377, groupID, batchID, folderName, fileCount, totalSize, skipped);
 }
 
 /**

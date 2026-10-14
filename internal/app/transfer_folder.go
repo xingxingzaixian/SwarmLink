@@ -154,6 +154,79 @@ func (a *TransferApp) SendFolderAs(
 	return sum, nil
 }
 
+// SendFolderTo 把同一个文件夹发给多个对端，全批共享一个 batch_id。
+//
+// 群聊场景：群里发文件夹时聊天框只出现【一张】卡片，进度也要按「文件夹里有
+// 几个文件」来数，而不是「文件数 × 成员数」。因此所有成员的任务落在同一个
+// batch_id 下 —— peer_id 不同，任务天然互不干扰；聚合进度由前端按 rel_path
+// 去重（见 utils/batch.ts 的 folderProgress）。
+//
+// 与 SendFolderAs 一致：只 stat 不哈希、建完即返回，传输由既有触发点驱动。
+func (a *TransferApp) SendFolderTo(
+	ctx context.Context,
+	peerIDs []identity.NodeID,
+	dir, batchID string,
+) (FolderSummary, error) {
+	var sum FolderSummary
+	if batchID == "" {
+		return sum, fmt.Errorf("transfer: batch_id 不能为空")
+	}
+	if len(peerIDs) == 0 {
+		return sum, fmt.Errorf("transfer: 没有目标对端")
+	}
+	// 先把所有成员的能力校验完再动盘：半路失败会留下一批只有部分成员的任务，
+	// 界面上看起来像「有人收到了、有人永远收不到」。
+	for _, id := range peerIDs {
+		if err := a.requireFolderCap(id); err != nil {
+			return sum, err
+		}
+	}
+
+	st, err := os.Stat(dir)
+	if err != nil {
+		return sum, fmt.Errorf("transfer: %w", err)
+	}
+	if !st.IsDir() {
+		return sum, fmt.Errorf("transfer: %s 不是文件夹", dir)
+	}
+
+	rootName := batchRootNameOf(dir)
+	entries, skipped, err := a.walkFolder(dir, rootName)
+	if err != nil {
+		return sum, err
+	}
+
+	now := a.clk.Now()
+	jobs := make([]transfer.Job, 0, len(entries)*len(peerIDs))
+	for _, e := range entries {
+		// 文件计数只数一次（每个条目一条），与卡片上的「N 个文件」一致。
+		sum.FileCount++
+		sum.TotalSize += e.size
+		for _, pid := range peerIDs {
+			job := a.newWaitingJob(message.NewID(), pid, e.abs, e.size)
+			job.BatchID = batchID
+			job.RelPath = e.rel
+			job.IsDir = e.isdir
+			job.FileName = filepath.Base(e.abs)
+			if e.isdir {
+				job.FileSize = 0
+				job.TotalChunks = 0
+				job.Bitmap = transfer.NewChunkBitmap(0)
+			}
+			job.WaitReason = transfer.WaitQueued
+			job.NextTryAt = now
+			if err := a.store.UpsertJob(job); err != nil {
+				return sum, err
+			}
+			jobs = append(jobs, job)
+		}
+	}
+
+	sum.BatchID, sum.FolderName, sum.Skipped = batchID, rootName, skipped
+	a.startJobs(ctx, jobs)
+	return sum, nil
+}
+
 // folderEntry 是枚举出来的一个条目。
 type folderEntry struct {
 	abs   string // 绝对路径（发送侧直接用）
