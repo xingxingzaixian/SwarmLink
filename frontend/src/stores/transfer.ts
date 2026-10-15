@@ -231,23 +231,6 @@ export const useTransferStore = defineStore('transfer', () => {
     }
   }
 
-  /** 取消一条等待中的任务。 */
-  async function cancelJob(jobId: string): Promise<void> {
-    await (await getApi()).cancelTransfer(jobId)
-    // 乐观更新 + 后端事件双保险：事件丢了界面也不会卡在「等待对方上线」
-    applyState({ jobId, status: 'cancelled' })
-  }
-
-  /**
-   * 立刻重试一条等待中的任务。
-   *
-   * 不做乐观更新：真正的状态由后端的 transfer:state / 进度事件推来，
-   * 乐观改成「传输中」会在对端其实仍然离线时骗用户。
-   */
-  async function retryJob(jobId: string): Promise<void> {
-    await (await getApi()).retryTransfer(jobId)
-  }
-
   /**
    * 用「刚发出的任务」建一条本地条目。
    *
@@ -367,9 +350,7 @@ export const useTransferStore = defineStore('transfer', () => {
     applyDone,
     applyError,
     applyState,
-    cancelJob,
     cancelBatch,
-    retryJob,
     registerPending,
     sendFile,
     sendFiles,

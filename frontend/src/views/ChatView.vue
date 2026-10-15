@@ -461,7 +461,7 @@ async function restoreView(): Promise<void> {
         </div>
       </template>
       <div v-else class="head-main">
-        <div class="head-title">SwarmLink</div>
+        <div class="head-title">蜂群</div>
         <div class="head-sub">
           <span class="dot dot--static" />
           <span>{{ statusText }}</span>

@@ -447,6 +447,11 @@ type FileSink interface {
 	// 只分配一次根目录 —— 否则同名文件夹被抢到时，一批文件会散落在
 	// 「照片」与「照片 (1)」两个目录里。
 	CreateIn(req SinkRequest) (SinkHandle, error)
+	// Root 返回接收落点根目录。
+	//
+	// 空间预检要用它：Create/CreateIn 之前拿不到具体落点，而批次目录与根
+	// 是同一个卷，按根判剩余空间就够（见 TransferApp.spaceRejectReason）。
+	Root() string
 	// AdoptRoot 认领一个已经分配过的批次根目录（重启恢复用）。
 	//
 	// 不认领的后果：根目录当初可能是「退到唯一名」的结果（同名文件挡路），

@@ -164,11 +164,18 @@ type FileMeta struct {
 	IsDir bool `json:"is_dir,omitempty"`
 }
 
-// FileMetaAck 返回接收方已完成的块位图（base64）。
+// FileMetaAck 返回接收方已完成的块位图（base64），或拒收这条传输。
 type FileMetaAck struct {
 	JobID           string `json:"job_id"`
 	CompletedBitmap string `json:"completed_bitmap"`
 	CompletedChunks int    `json:"completed_chunks"`
+	// Reject 非空表示接收方【拒收】这次传输，值是给用户看的中文原因
+	// （目前只有「超过接收上限」一种），发送方据此立即失败并展示该原因。
+	//
+	// 为什么是「非空即拒收」而不是一个 OK 布尔：JSON 缺字段解出来是零值，
+	// 若用 ok bool，新发送方遇到【旧接收方】（根本不会带这个字段）会把
+	// 「接受」读成「拒收」—— 一次升级就把所有传输打断了。
+	Reject string `json:"reject,omitempty"`
 }
 
 // FileChunkAck 周期性回传全量位图（非累积 ACK）。

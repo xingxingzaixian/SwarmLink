@@ -101,11 +101,6 @@ export const useGroupStore = defineStore('group', () => {
    */
   const memberStateLabel = memberStateLabelOfMember
 
-  /** 本机是否仍在该群中（取不到自己时按「不在」处理，宁可少给操作入口）。 */
-  function isMember(group: Group, selfId: string): boolean {
-    return !!meIn(group, selfId)?.active
-  }
-
   /** 按 groupId 取群（会话标题/状态行等只拿到 convId 的地方用）。 */
   function byId(groupId: string): Group | undefined {
     return groups.value.find((g) => g.groupId === groupId)
@@ -133,12 +128,6 @@ export const useGroupStore = defineStore('group', () => {
     return true
   }
 
-  /** 群是否已解散。取不到群时按「未解散」处理，避免误禁用输入。 */
-  function isDissolved(groupId: string): boolean {
-    const g = byId(groupId)
-    return !!g && g.state === 'dissolved'
-  }
-
   return {
     groups,
     error,
@@ -152,9 +141,7 @@ export const useGroupStore = defineStore('group', () => {
     activeCount,
     memberCount,
     byId,
-    isDissolved,
     meIn,
-    isMember,
     memberStateLabel,
     signatureChanged,
     MAX_MEMBERS

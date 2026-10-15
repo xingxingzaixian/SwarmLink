@@ -2,7 +2,13 @@
 /**
  * 共享文件（独立弹框，FR-14）。
  *
- * 布局照产品给的参照页面：左边选共享、右边文件表格、顶上一排动作 + 搜索。
+ * 布局照产品给的参照页面：左边选共享、右边文件树、顶上一排动作 + 搜索。
+ *
+ * 右侧是【树】而不是平铺表格：清单里只有文件与空目录，中间目录由路径推导
+ * （见 utils/share.ts 的 buildItemTree）。树让「目录」成为一个能勾选的对象 ——
+ * 勾一个目录＝勾它整个子树，这才有「下载整个目录」这个动作。因此也不再需要
+ * 「路径」列：结构已经由缩进与展开表达了，再铺一列重复的路径只是噪音。
+ *
  * 与参照页面的两处【刻意】差异：
  *
  *  1. 「密码」列与「设置密码」按钮 → 「可见性」列与「设置可见性」按钮。
@@ -12,6 +18,8 @@
  *     文件条目，按行取消意味着「按文件发布」，而我们的粒度是整条共享 + 可见性。
  *
  * 下载一律是异步受理：返回只代表共享方已受理，进度走 transfer:* 与传输列表。
+ * 正因为进度不在这里，受理成功后直接跳到「文件传输」页 —— 用户点完下载最想看到的是
+ * 它开始动了，留在本弹框里等于让他自己去另一个弹层追进度。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 
@@ -22,10 +30,11 @@ import { pickShareTarget, type ShareTargetKind } from '../api/dialog'
 import { fileSize, listTime } from '../utils/format'
 import {
   absolutePath,
+  buildItemTree,
   buildShareGroups,
   filterShareItems,
-  pathDepth,
-  pathDir
+  flattenTree,
+  type ShareTreeRow
 } from '../utils/share'
 import { useGroupStore } from '../stores/group'
 import { usePeersStore } from '../stores/peers'
@@ -60,7 +69,7 @@ function toggleGroup(key: string): void {
   collapsed.value = { ...collapsed.value, [key]: !collapsed.value[key] }
 }
 
-// ---------------------------------------------------------------- 右表
+// ---------------------------------------------------------------- 右树
 
 const items = ref<ShareItem[]>([])
 const itemsLoading = ref(false)
@@ -68,19 +77,62 @@ const itemsError = ref('')
 const checked = ref<string[]>([])
 const query = ref('')
 
+/** 目录折叠状态，按路径记。没记过的节点由 flattenTree 给默认值。 */
+const expanded = ref<Record<string, boolean>>({})
+
+const searching = computed(() => !!query.value.trim())
+
+/** 命中集先由 filterShareItems 算（按路径匹配，能连带命中所属目录），再组织成树。 */
 const visibleItems = computed(() => filterShareItems(items.value, query.value))
 
-/** 表格里显示的路径：我的共享给绝对路径，他人共享只给相对路径（对方磁盘路径对我们没意义）。 */
-function pathOf(s: Share, it: ShareItem): string {
-  return s.mine && s.rootPath ? absolutePath(s.rootPath, it.path) : it.path
+const rows = computed(() =>
+  flattenTree(buildItemTree(visibleItems.value), expanded.value, searching.value)
+)
+
+function mtimeOf(row: ShareTreeRow): string {
+  return row.item?.mtime ? listTime(row.item.mtime * 1000) : '—'
 }
 
-function mtimeOf(it: ShareItem): string {
-  return it.mtime ? listTime(it.mtime * 1000) : '—'
+function sizeOf(row: ShareTreeRow): string {
+  // 目录行给子树合计；空目录显示「—」而不是「0 B」（0 B 会读成「有一个空文件」）。
+  return row.size > 0 ? fileSize(row.size) : '—'
+}
+
+function toggleDir(row: ShareTreeRow): void {
+  expanded.value = { ...expanded.value, [row.path]: !row.expanded }
+}
+
+// 勾选的唯一真相是【条目路径列表】：目录行不单独记状态，它的勾选态由子树推导。
+// 这样「下载所选」与「打开所在目录」拿到的永远是后端认得的东西（文件路径），
+// 不需要在下发前再做一次展开，也不会出现「目录勾了但子项没勾」的中间态。
+
+const checkedSet = computed(() => new Set(checked.value))
+
+function rowChecked(row: ShareTreeRow): boolean {
+  return row.targets.length > 0 && row.targets.every((p) => checkedSet.value.has(p))
+}
+
+function rowIndeterminate(row: ShareTreeRow): boolean {
+  return !rowChecked(row) && row.targets.some((p) => checkedSet.value.has(p))
+}
+
+/**
+ * 勾选一整行。目录行＝它的整个子树，因此「下载整个目录」就是勾一下这一行。
+ * 目录在折叠状态下也能整选 —— 用户不必先展开再逐个点。
+ */
+function toggleRow(row: ShareTreeRow): void {
+  if (rowChecked(row)) {
+    const drop = new Set(row.targets)
+    checked.value = checked.value.filter((p) => !drop.has(p))
+    return
+  }
+  const next = new Set(checked.value)
+  for (const p of row.targets) next.add(p)
+  checked.value = [...next]
 }
 
 const allChecked = computed(
-  () => visibleItems.value.length > 0 && checked.value.length === visibleItems.value.length
+  () => visibleItems.value.length > 0 && visibleItems.value.every((i) => checkedSet.value.has(i.path))
 )
 
 function toggleAll(): void {
@@ -173,11 +225,24 @@ async function downloadSelected(): Promise<void> {
     // 后端在受理时就为每个文件落了库（idle + batch_queued），因此立刻刷一次列表
     // 就能看到这一批 —— 用户不必等下一个进度事件才知道点成功了。
     await transfers.refresh()
-    ui.notify(
-      res.rejected?.length
-        ? `已开始下载 ${res.accepted} 个文件，${res.rejected.length} 个被共享方跳过`
-        : `已开始下载 ${res.accepted} 个文件，进度见「文件传输」`
-    )
+    if (res.accepted > 0) {
+      // 受理成功就直接跳到「文件传输」页：下载是异步的，用户点完这一下最想看到的是
+      // 「它开始动了」。留在本弹框里，进度却在另一个弹层里滚，等于让用户自己去追。
+      // 顺序不能反：先 refresh() 再跳，面板打开的那一帧列表里就已经有这批任务了。
+      ui.openPanel('transfers')
+      ui.notify(
+        res.rejected?.length
+          ? `已开始下载 ${res.accepted} 个文件，${res.rejected.length} 个被共享方跳过`
+          : `已开始下载 ${res.accepted} 个文件`
+      )
+    } else {
+      // 一个都没受理：此时跳过去只会看到一张没变化的列表，比留在原地更让人困惑。
+      ui.notify(
+        res.rejected?.length
+          ? `${res.rejected.length} 个条目被共享方跳过，没有开始下载`
+          : '没有开始下载'
+      )
+    }
   } catch (e: any) {
     ui.notify(String(e?.message ?? e) || '下载请求失败')
   } finally {
@@ -185,11 +250,19 @@ async function downloadSelected(): Promise<void> {
   }
 }
 
-/** 定位：没勾选时打开共享根目录，勾选了就定位到第一个勾选的文件。 */
+/**
+ * 定位：没勾选时打开共享根目录，勾选了就定位到【层级最浅】的那条。
+ *
+ * 用「最浅」而不是「第一个」：勾一个目录会连带勾中它下面所有文件，
+ * 而用户此刻想看的是那个目录本身，不是它里面随便哪一个文件 ——
+ * 目录路径在勾选集合里必然比它的子项更浅。
+ */
 async function revealLocal(): Promise<void> {
   const s = selected.value
   if (!s?.mine || !s.rootPath) return
-  const target = checked.value[0] ? absolutePath(s.rootPath, checked.value[0]) : s.rootPath
+  const depth = (p: string) => p.split('/').filter(Boolean).length
+  const shallowest = [...checked.value].sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))
+  const target = shallowest.length ? absolutePath(s.rootPath, shallowest[0]) : s.rootPath
   try {
     await (await getApi()).revealFile(target)
   } catch (e: any) {
@@ -327,6 +400,12 @@ onMounted(async () => {
 
 // 清单被事件驱动刷新后（发布 / 取消 / 刷新索引），选中态要跟着收敛。
 watch(() => shares.shares, ensureSelection)
+
+// 换一条共享就重置折叠状态：上一个清单里的目录路径对这一个没有意义，
+// 留着只会让某些同名的顶层目录莫名其妙是收起的。
+watch(selectedId, () => {
+  expanded.value = {}
+})
 </script>
 
 <template>
@@ -405,7 +484,7 @@ watch(() => shares.shares, ensureSelection)
           <span class="spacer" />
 
           <button v-if="selected?.mine" class="btn btn-soft" :disabled="!selected.rootPath"
-            title="在文件管理器中定位（勾选文件则定位到它，否则打开共享根目录）" @click="revealLocal">
+            title="在文件管理器中定位（有勾选则定位到最浅的那条，否则打开共享根目录）" @click="revealLocal">
             <Icon name="folder" :size="14" />打开所在目录
           </button>
           <button v-else class="btn btn-primary" :disabled="busy || !checked.length || !selected?.downloadable"
@@ -426,12 +505,12 @@ watch(() => shares.shares, ensureSelection)
         <template v-else>
           <div class="thead">
             <span class="c-check">
-              <input type="checkbox" :checked="allChecked" :disabled="!visibleItems.length" @change="toggleAll" />
+              <input type="checkbox" :checked="allChecked" :indeterminate.prop="!allChecked && checked.length > 0"
+                :disabled="!visibleItems.length" @change="toggleAll" />
             </span>
             <span>名称</span>
             <span class="c-size">大小</span>
             <span class="c-time">时间</span>
-            <span>路径</span>
             <span class="c-vis">可见性</span>
           </div>
 
@@ -441,19 +520,26 @@ watch(() => shares.shares, ensureSelection)
             <div v-else-if="!visibleItems.length" class="hint faint small">
               没有匹配「{{ query }}」的文件。
             </div>
-            <label v-for="it in visibleItems" :key="it.path" class="row">
+            <!-- 行是 <label>：点行即勾选。目录的展开由箭头独占（click.stop.prevent
+                 同时挡住 label 转发出来的勾选与箭头自身可能带出的默认行为）。 -->
+            <label v-for="row in rows" :key="row.path" class="row" :class="{ 'row--dir': row.isDir }">
               <span class="c-check">
-                <input v-model="checked" type="checkbox" :value="it.path" />
+                <input type="checkbox" :checked="rowChecked(row)" :indeterminate.prop="rowIndeterminate(row)"
+                  @change="toggleRow(row)" />
               </span>
-              <span class="c-name nowrap" :style="{ paddingLeft: pathDepth(it.path) * 14 + 'px' }">
-                <Icon :name="it.isDir ? 'folder' : 'file'" :size="14" class="row__icon" />
-                <span class="faint mono">{{ pathDir(it.path) }}</span>{{ it.name }}
+              <span class="c-name nowrap" :style="{ paddingLeft: row.depth * 14 + 'px' }">
+                <button v-if="row.isDir && row.hasChildren" class="row__caret"
+                  :title="row.expanded ? '收起' : '展开'" @click.stop.prevent="toggleDir(row)">
+                  <Icon name="chevron" :size="12" :class="{ folded: !row.expanded }" />
+                </button>
+                <span v-else class="row__caret" />
+                <Icon :name="row.isDir ? 'folder' : 'file'" :size="14" class="row__icon" />
+                <span class="row__name" :title="row.path">{{ row.name }}</span>
+                <!-- 目录行直接给出子树合计：不展开也知道这一包值不值得下。 -->
+                <span v-if="row.isDir" class="row__count faint mono small">{{ row.count }} 项</span>
               </span>
-              <span class="c-size mono faint">{{ it.isDir ? '—' : fileSize(it.size) }}</span>
-              <span class="c-time faint">{{ mtimeOf(it) }}</span>
-              <span class="c-path mono faint nowrap" :title="pathOf(selected, it)">
-                {{ pathOf(selected, it) }}
-              </span>
+              <span class="c-size mono faint">{{ sizeOf(row) }}</span>
+              <span class="c-time faint">{{ mtimeOf(row) }}</span>
               <!-- 可见性是整条共享的属性：每行显示同一个值（照参照页面把密码列放在
                    这一列的位置）。用淡色文字而不是 .tag —— 每一行都挂一个绿色药丸
                    只是噪音。 -->
@@ -734,11 +820,12 @@ watch(() => shares.shares, ensureSelection)
   text-align: center;
 }
 
-/* 表格：用 grid 让表头与数据行共用同一套列宽（分开写迟早对不齐） */
+/* 用 grid 让表头与数据行共用同一套列宽（分开写迟早对不齐）。
+   没有「路径」列：结构由缩进与展开表达，再铺一列重复的路径只是噪音。 */
 .thead,
 .row {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 84px 92px minmax(0, 1.1fr) 96px;
+  grid-template-columns: 30px minmax(0, 1fr) 84px 92px 96px;
   align-items: center;
   gap: 8px;
 }
@@ -750,6 +837,11 @@ watch(() => shares.shares, ensureSelection)
   color: var(--text-muted);
   font-size: var(--fs-xs);
   letter-spacing: 0.04em;
+}
+
+/* 表头的「名称」要让开行首那个折叠箭头占位，否则它比下面所有行的图标都靠左 */
+.thead>span:nth-child(2) {
+  padding-left: 16px;
 }
 
 .rows {
@@ -792,10 +884,54 @@ watch(() => shares.shares, ensureSelection)
   text-align: right;
 }
 
-.c-path {
+/* 折叠箭头：固定占位，保证同级目录与文件的图标左边缘对齐（对齐一乱树就读不出来）。
+   不是目录、或目录没有子节点的行渲染一个等宽空 span 顶上这个位置。 */
+.row__caret {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+button.row__caret {
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+button.row__caret:hover {
+  background: var(--bg-hover);
+}
+
+.row__caret .icon {
+  transition: transform var(--dur-1) var(--ease);
+}
+
+/* 与左树的组头同一套折叠观感：收起时箭头指右 */
+.row__caret .folded {
+  transform: rotate(-90deg);
+}
+
+/* 名字独占剩余宽度并吃省略号：深层的长文件名不该把「N 项」挤出可视区 */
+.row__name {
   min-width: 0;
-  direction: rtl;
-  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.row__count {
+  flex: 0 0 auto;
+}
+
+/* 目录行名字加重，让容器与叶子在快速扫视时能分开 */
+.row--dir .row__name {
+  font-weight: 500;
 }
 
 .hint {

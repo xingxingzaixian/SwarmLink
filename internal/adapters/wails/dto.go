@@ -362,10 +362,13 @@ type SettingsDTO struct {
 	MaxConcurrent   int      `json:"maxConcurrent"`
 	ChunkSize       int64    `json:"chunkSize"`
 	WindowSize      int      `json:"windowSize"`
-	MaxActiveConns  int      `json:"maxActiveConns"`
-	IdleTimeoutSec  int      `json:"idleTimeoutSec"`
-	RequireAuth     bool     `json:"requireAuth"`
-	Encryption      string   `json:"encryption"`
+	// MaxFileSize 是接收侧的单文件上限（字节），0 表示不限制。
+	// 前端只用它提前拦住明显发不过去的文件，真正的判定在接收端。
+	MaxFileSize    int64  `json:"maxFileSize"`
+	MaxActiveConns int    `json:"maxActiveConns"`
+	IdleTimeoutSec int    `json:"idleTimeoutSec"`
+	RequireAuth    bool   `json:"requireAuth"`
+	Encryption     string `json:"encryption"`
 
 	// 提示行为（设置页与托盘菜单共用同一份配置，两个入口不会不一致）。
 	NotifySound          bool `json:"notifySound"`

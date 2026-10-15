@@ -103,10 +103,16 @@ type Config struct {
 	} `toml:"connection"`
 
 	Transfer struct {
-		MaxConcurrent       int      `toml:"max_concurrent"`
-		WindowSize          int      `toml:"window_size"`
-		ChunkSize           int64    `toml:"chunk_size"`
-		MaxUploadMbps       int      `toml:"max_upload_mbps"`
+		MaxConcurrent int   `toml:"max_concurrent"`
+		WindowSize    int   `toml:"window_size"`
+		ChunkSize     int64 `toml:"chunk_size"`
+		MaxUploadMbps int   `toml:"max_upload_mbps"`
+		// MaxFileSize 是接收侧的单文件上限（字节），0 表示不限制。
+		// 只约束接收：要不要收下这个文件，是收方机器的决定。
+		MaxFileSize int64 `toml:"max_file_size"`
+		// MaxRetries 是「对端在、但每次尝试都失败」的自动重试上限，
+		// 0 表示用默认值。对方【不在线】不算失败，那次等待不受它约束。
+		MaxRetries          int      `toml:"max_retries"`
 		BitmapFlushInterval Duration `toml:"bitmap_flush_interval"`
 		// HistoryKeep / HistoryTTL 是传输记录的清理策略：
 		// 启动时只保留最近 HistoryKeep 条已结束的，并丢弃超过 HistoryTTL 的。
@@ -172,6 +178,11 @@ func Default() *Config {
 	c.Transfer.MaxConcurrent = 3
 	c.Transfer.WindowSize = 8
 	c.Transfer.ChunkSize = 512 * 1024
+	// 10 GiB：够大（镜像、视频包）又不至于让一次误操作把接收盘写满。
+	// 不需要在 applyDefaults 里回填 0 —— Load 是先填 Default() 再解析文件，
+	// 文件里没写这个键时保留的正是这里这个值；写了 0 就是"不限制"。
+	c.Transfer.MaxFileSize = 10 << 30
+	c.Transfer.MaxRetries = 3
 	c.Transfer.BitmapFlushInterval = Duration(2 * time.Second)
 	c.Transfer.HistoryKeep = 50
 	c.Transfer.HistoryTTL = Duration(7 * 24 * time.Hour)

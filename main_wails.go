@@ -82,10 +82,6 @@ func (a *autostartAdapter) AutostartDisable() error {
 	return a.app.Autostart.Disable()
 }
 
-func (a *autostartAdapter) AutostartIsEnabled() (bool, error) {
-	return a.app.Autostart.IsEnabled()
-}
-
 // 单实例加密密钥（固定值，用于识别同一应用的不同实例）
 var singleInstanceKey = [32]byte{
 	0x53, 0x77, 0x61, 0x72, 0x6d, 0x4c, 0x69, 0x6e,
@@ -179,7 +175,7 @@ func reportFatalStartup(logFile *os.File, logPath string, logErr error, cause er
 	dir, _ := config.Dir()
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "SwarmLink 启动失败。\n\n原因：\n%v\n\n", cause)
+	fmt.Fprintf(&b, "蜂群 启动失败。\n\n原因：\n%v\n\n", cause)
 	fmt.Fprintf(&b, "日志文件：%s\n", logPath)
 	fmt.Fprintf(&b, "数据目录：%s\n", dir)
 	switch {
@@ -203,7 +199,7 @@ func reportFatalStartup(logFile *os.File, logPath string, logErr error, cause er
 	if os.Getenv("SWARMLINK_NO_STARTUP_DIALOG") == "1" {
 		return
 	}
-	showFatalDialog("SwarmLink 启动失败", b.String())
+	showFatalDialog("蜂群 启动失败", b.String())
 }
 
 func main() {
@@ -300,7 +296,7 @@ func main() {
 	// 平台侧的通知通道），而适配器保证「启动失败只降级、不让应用起不来」。
 	var app *application.App
 	app = application.New(application.Options{
-		Name:        "SwarmLink",
+		Name:        "蜂群",
 		Description: "无中心内网 P2P 聊天与文件分享工具",
 		Services: []application.Service{
 			application.NewService(services.Settings),
@@ -359,11 +355,7 @@ func main() {
 
 	// 注入自动启动适配器到服务层（用于自动启动功能）
 	autostart := &autostartAdapter{app: app}
-	wadapter.SetAutostartFuncs(
-		autostart.AutostartEnable,
-		autostart.AutostartDisable,
-		autostart.AutostartIsEnabled,
-	)
+	wadapter.SetAutostartFuncs(autostart.AutostartEnable, autostart.AutostartDisable)
 
 	// 启动时检查自动启动配置并同步到系统
 	if node.Cfg.Startup.AutoStart {
@@ -383,7 +375,7 @@ func main() {
 
 	// 5. 主窗口
 	win = app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:  "SwarmLink",
+		Title:  "蜂群",
 		Width:  1180,
 		Height: 760,
 		// 允许把文件拖进窗口来发送。
@@ -477,7 +469,7 @@ func main() {
 	// 悬停时收到了 NIN_POPUPOPEN；而本应用的图标在不设 tooltip 时收不到 ——
 	// 没有 szTip 就没有「本该显示的提示」可被替代，系统也就没必要通知应用。
 	// 去掉这一行，托盘悬停提示会静默失效（表现为「只闪烁，不弹提示」）。
-	tray.SetTooltip("SwarmLink")
+	tray.SetTooltip("蜂群")
 
 	// 提示气泡：QQ 式「谁发来的、说了什么」。
 	//

@@ -40,7 +40,7 @@ const group = computed(() =>
   conv.value?.kind === 'group' ? groups.groups.find((g) => g.groupId === conv.value?.convId) : undefined
 )
 
-/** 群聊不支持点对点传文件（v1.0），因此不做「传输」页。 */
+/** 群聊里收发文件是各成员会话各自点对点进行的，右侧「传输」页按单个对端汇总，故群聊不做该页。 */
 const canTransfer = computed(() => !isGroup.value && !!peerId.value)
 
 const jobs = computed(() => (peerId.value ? transfers.forPeer(peerId.value) : []))

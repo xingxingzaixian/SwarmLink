@@ -6,7 +6,7 @@ version: '3'
 # This information is used to generate the build assets.
 info:
   companyName: "SwarmLink" # The name of the company
-  productName: "SwarmLink" # The name of the application
+  productName: "蜂群" # The name of the application
   productIdentifier: "io.swarmlink.app" # The unique product identifier
   description: "无中心内网 P2P 聊天与文件分享工具" # The application description
   copyright: "(c) 2026, SwarmLink" # Copyright text

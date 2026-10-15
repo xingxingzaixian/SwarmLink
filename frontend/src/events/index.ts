@@ -15,8 +15,7 @@ import {
   type FilesDroppedEvent,
   type Message,
   type Peer,
-  type SystemNotifyEvent,
-  type TransferJob
+  type SystemNotifyEvent
 } from '../api/types'
 
 /**
@@ -302,21 +301,4 @@ export function registerEvents(): void {
     // 否则两处显示会不一致，用户再点一次保存还会把托盘那次改动覆盖掉。
     useUiStore().bumpConfigRevision()
   })
-}
-
-/** 测试/预览辅助：构造一个传输进度载荷。 */
-export function mockProgress(jobId: string, percent: number): TransferJob {
-  return {
-    jobId,
-    peerId: '',
-    fileName: '',
-    fileSize: 0,
-    direction: 'send',
-    localPath: '',
-    completed: 0,
-    totalChunks: 0,
-    percent,
-    status: 'active',
-    updatedAt: Date.now()
-  }
 }

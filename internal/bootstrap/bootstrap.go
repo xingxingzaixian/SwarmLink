@@ -28,6 +28,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
+	"github.com/swarmlink/swarmlink/internal/infra/diskspace"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
 
@@ -281,6 +282,9 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	n.TransferApp.ChunkSize = cfg.Transfer.ChunkSize
 	n.TransferApp.WindowSize = cfg.Transfer.WindowSize
 	n.TransferApp.BitmapFlushInterval = cfg.Transfer.BitmapFlushInterval.Std()
+	n.TransferApp.MaxFileSize = cfg.Transfer.MaxFileSize
+	n.TransferApp.MaxRetries = cfg.Transfer.MaxRetries
+	n.TransferApp.DiskFree = diskspace.FreeBytes
 
 	// 文件共享（FR-14）：仓储在上面按存储分支装配，这里组装应用。
 	n.ShareApp = app.NewShareApp(

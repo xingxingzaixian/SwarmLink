@@ -27,6 +27,13 @@ type failureEvidence struct {
 	Err          error
 }
 
+// errPeerReject 是「对端明确拒收这条传输」的哨兵错误（例如超过它的接收上限）。
+//
+// 必须与「对端够不着」分开：拒收是终态，重试一万次也是同一个结果。
+// 混进等待路径的后果有两个：界面上是一条永远转圈的任务，而且每次退避到点
+// 都会把同一个注定被拒的文件重发一遍。
+var errPeerReject = errors.New("对端拒收")
+
 // permanentPatterns 是「看起来像连接问题、其实是永久失败」的错误特征。
 //
 // 必须先判它们：`unexpected EOF` 是本地读文件读到一半文件被截断，
@@ -79,6 +86,11 @@ var unreachablePatterns = []string{
 //  3. 兜底看文案（覆盖"目录说在线、对端其实已死"的情况）。
 func shouldWaitForPeer(e failureEvidence) bool {
 	if e.Err == nil {
+		return false
+	}
+	// 对端明确拒收：终态，与可达性无关，也压过下面所有文案特征。
+	// 必须排在最前 —— 拒收理由里也可能凑巧含某条特征字样。
+	if errors.Is(e.Err, errPeerReject) {
 		return false
 	}
 	msg := e.Err.Error()

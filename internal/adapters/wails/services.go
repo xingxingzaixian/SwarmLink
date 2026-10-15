@@ -24,11 +24,13 @@ import (
 	"github.com/swarmlink/swarmlink/internal/infra/imagecodec"
 )
 
-// autostartFuncs 存储自动启动函数（全局变量，避免暴露给 Wails 绑定）
+// autostartFuncs 存储自动启动函数（全局变量，避免暴露给 Wails 绑定）。
+//
+// 只有 enable/disable：查询侧没有消费者 —— 设置页显示的状态来自配置文件
+// （SettingsDTO.autoStart），不必再问系统一次，问出来还可能与配置不一致。
 var autostartFuncs struct {
-	enable    func() error
-	disable   func() error
-	isEnabled func() (bool, error)
+	enable  func() error
+	disable func() error
 }
 
 // ConnInspector 是诊断面板所需的连接信息（由 tcp.Manager 实现）。
@@ -103,10 +105,9 @@ func NewServices(d Deps) *ServiceSet {
 }
 
 // SetAutostartFuncs 设置自动启动函数（由组合根在 app 创建后调用）
-func SetAutostartFuncs(enable, disable func() error, isEnabled func() (bool, error)) {
+func SetAutostartFuncs(enable, disable func() error) {
 	autostartFuncs.enable = enable
 	autostartFuncs.disable = disable
-	autostartFuncs.isEnabled = isEnabled
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ func (s *SettingsService) Get() SettingsDTO {
 		MaxConcurrent:   c.Transfer.MaxConcurrent,
 		ChunkSize:       c.Transfer.ChunkSize,
 		WindowSize:      c.Transfer.WindowSize,
+		MaxFileSize:     c.Transfer.MaxFileSize,
 		MaxActiveConns:  c.Connection.MaxActiveConns,
 		IdleTimeoutSec:  int(c.Connection.IdleConnTimeout.Std() / time.Second),
 		RequireAuth:     c.Security.RequireAuth,
@@ -273,48 +275,6 @@ func (s *SettingsService) RunSelfCheck() SelfCheckDTO {
 		out.Seeds = s.d.SeedSnapshot()
 	}
 	return out
-}
-
-// AutoStartEnable 启用开机自启动
-func (s *SettingsService) AutoStartEnable() error {
-	s.cfg.Startup.AutoStart = true
-	if err := config.Save(s.dir, s.cfg); err != nil {
-		return err
-	}
-	// 调用 Wails 的自动启动 API
-	if autostartFuncs.enable != nil {
-		if err := autostartFuncs.enable(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// AutoStartDisable 禁用开机自启动
-func (s *SettingsService) AutoStartDisable() error {
-	s.cfg.Startup.AutoStart = false
-	if err := config.Save(s.dir, s.cfg); err != nil {
-		return err
-	}
-	// 调用 Wails 的自动启动 API
-	if autostartFuncs.disable != nil {
-		if err := autostartFuncs.disable(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// AutoStartIsEnabled 检查开机自启动是否已启用
-func (s *SettingsService) AutoStartIsEnabled() (bool, error) {
-	if autostartFuncs.isEnabled == nil {
-		return s.cfg.Startup.AutoStart, nil
-	}
-	enabled, err := autostartFuncs.isEnabled()
-	if err != nil {
-		return s.cfg.Startup.AutoStart, err
-	}
-	return enabled, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -659,15 +659,6 @@ export function createMockApi(): SwarmApi {
     async saveSettings() {
       return ['tcp_port']
     },
-    async autoStartEnable() {
-      settings.autoStart = true
-    },
-    async autoStartDisable() {
-      settings.autoStart = false
-    },
-    async autoStartIsEnabled() {
-      return settings.autoStart
-    },
     async listInterfaces() {
       return diagnostics.interfaceSummary
     },

@@ -317,11 +317,6 @@ export interface SwarmApi {
    */
   runSelfCheck(): Promise<SelfCheck>
 
-  // 开机自启动
-  autoStartEnable(): Promise<void>
-  autoStartDisable(): Promise<void>
-  autoStartIsEnabled(): Promise<boolean>
-
   // 单聊
   sendMessage(peerId: string, text: string): Promise<Message>
   history(peerId: string, limit: number, before: number): Promise<Message[]>

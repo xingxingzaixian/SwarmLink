@@ -231,7 +231,7 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
     <div class="brand">
       <div class="brand__logo">S</div>
       <div>
-        <div class="brand__name">SwarmLink</div>
+        <div class="brand__name">蜂群</div>
         <div class="brand__sub micro">P2P Mesh Net</div>
       </div>
     </div>

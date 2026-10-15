@@ -40,6 +40,22 @@ type TransferApp struct {
 	// 几十万条任务，而枚举与落库都在同步路径上，界面会先卡死。
 	MaxFolderEntries int
 
+	// MaxFileSize 是【接收侧】愿意收下的单文件上限（字节），0 表示不限制。
+	//
+	// 只在接收侧强制：发送方能拦住自己界面上的选择，拦不住别人机器上的配置，
+	// 而"要不要收下这个文件"本来就是接收方的决定。
+	MaxFileSize int64
+
+	// MaxRetries 是自动重试次数上限，0 表示用默认值。见 transfer_waiting.go
+	// 里"对端在、但每次尝试都失败"与"对端不在、继续等"的区分。
+	MaxRetries int
+
+	// DiskFree 探测某个路径所在卷的可用字节数，nil 表示不做空间预检。
+	//
+	// 做成字段而不是直接 import 平台包：应用层不依赖适配器（依赖方向单向
+	// 向内），而且「磁盘满」在真实环境里没法可靠复现，测试必须能注入。
+	DiskFree func(path string) (uint64, error)
+
 	// BitmapFlushInterval / FlushEveryChunks 控制位图批量落盘（P1-9）。
 	BitmapFlushInterval time.Duration
 	FlushEveryChunks    int
@@ -78,6 +94,9 @@ type TransferApp struct {
 type chunkAck struct {
 	bitmap    transfer.ChunkBitmap
 	completed int
+	// reject 非空表示对端【拒收】了整个任务（例如超过它的接收上限）。
+	// 它不是「再等等」：收到就立刻失败，不允许掉进等待重试。
+	reject string
 }
 
 type doneAck struct {
@@ -453,6 +472,9 @@ func (a *TransferApp) sendFile(
 	// 等待对端回位图（可续传起点）
 	select {
 	case ck := <-sj.ackCh:
+		if ck.reject != "" {
+			return job, fmt.Errorf("%w: %s", errPeerReject, ck.reject)
+		}
 		sj.acked.OrBits(ck.bitmap)
 	case <-sj.cancel:
 		return job, errJobCancelled
@@ -627,6 +649,15 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 	// 仍按协议非法处理（对方算错了）。
 	if total == 0 && !meta.IsDir {
 		return fmt.Errorf("transfer: invalid meta (total_chunks=0)")
+	}
+
+	// 上限与磁盘空间：都必须在【创建任何东西之前】判。一旦落了库、建了 .part
+	// 再拒，列表里就多出一条永远传不完的任务，接收目录里多半个没人认领的文件。
+	if reason := a.metaRejectReason(meta); reason != "" {
+		return a.sendMetaReject(sess, meta.JobID, reason)
+	}
+	if reason := a.spaceRejectReason(meta, peerID); reason != "" {
+		return a.sendMetaReject(sess, meta.JobID, reason)
 	}
 
 	var (
@@ -895,11 +926,19 @@ func (a *TransferApp) HandleFileDone(sess ports.Session, f protocol.Frame) error
 	return nil
 }
 
-// HandleFileMetaAck 处理对端回的续传位图。
+// HandleFileMetaAck 处理对端回的续传位图，或它的拒收。
 func (a *TransferApp) HandleFileMetaAck(_ ports.Session, f protocol.Frame) error {
 	var ack protocol.FileMetaAck
 	if err := protocol.DecodeJSON(f.Payload, &ack); err != nil {
 		return err
+	}
+	// 拒收分支必须在位图解码【之前】：被拒时对端不带位图，而
+	// DecodeBase64("") 直接报错，排在后面就永远走不到。
+	if ack.Reject != "" {
+		if sj := a.getSender(ack.JobID); sj != nil {
+			sj.ackCh <- chunkAck{reject: ack.Reject}
+		}
+		return nil
 	}
 	bm, err := transfer.DecodeBase64(ack.CompletedBitmap)
 	if err != nil {
@@ -942,6 +981,50 @@ func (a *TransferApp) HandleFileDoneAck(_ ports.Session, f protocol.Frame) error
 // ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
+
+// metaRejectReason 判断这条 FILE_META 该不该拒收，返回给用户看的原因（空串=放行）。
+//
+// 只针对「超过接收上限」：其余校验（空文件、坏 rel_path）都是协议非法，
+// 走的是报错路径而不是拒收路径 —— 那类问题的原因是"对方发错了"，
+// 不是"本机不收"，混在一起会让用户去改一个改不动的设置。
+func (a *TransferApp) metaRejectReason(meta protocol.FileMeta) string {
+	if meta.IsDir || a.MaxFileSize <= 0 {
+		return ""
+	}
+	if meta.FileSize > a.MaxFileSize {
+		return fmt.Sprintf("文件超过接收上限（%s）", formatBytes(a.MaxFileSize))
+	}
+	return ""
+}
+
+// sendMetaReject 回一条带原因的 FILE_META_ACK。
+//
+// 与「直接 return err」的区别：报错只写进本机日志，发送端那边表现为
+// 干等 10 秒后的「传输超时」—— 用户看到的原因完全是错的。
+func (a *TransferApp) sendMetaReject(sess ports.Session, jobID, reason string) error {
+	payload, err := protocol.EncodeJSON(protocol.FileMetaAck{JobID: jobID, Reject: reason})
+	if err != nil {
+		return err
+	}
+	return sess.Send(protocol.New(protocol.TypeFileMetaAck, payload))
+}
+
+// formatBytes 把字节数写成给用户看的样子（拒绝理由里要出现）。
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	v := float64(n)
+	for i, u := range units {
+		v /= unit
+		if v < unit || i == len(units)-1 {
+			return fmt.Sprintf("%.1f %s", v, u)
+		}
+	}
+	return fmt.Sprintf("%d B", n)
+}
 
 func (a *TransferApp) sendMetaAck(sess ports.Session, rj *recvJob) error {
 	payload, err := protocol.EncodeJSON(protocol.FileMetaAck{

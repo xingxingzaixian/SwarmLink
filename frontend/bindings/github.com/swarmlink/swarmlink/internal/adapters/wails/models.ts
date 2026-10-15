@@ -198,6 +198,12 @@ export interface SettingsDTO {
     "maxConcurrent": number;
     "chunkSize": number;
     "windowSize": number;
+
+    /**
+     * MaxFileSize 是接收侧的单文件上限（字节），0 表示不限制。
+     * 前端只用它提前拦住明显发不过去的文件，真正的判定在接收端。
+     */
+    "maxFileSize": number;
     "maxActiveConns": number;
     "idleTimeoutSec": number;
     "requireAuth": boolean;

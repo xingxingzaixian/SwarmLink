@@ -21,6 +21,9 @@ type batchRoot struct {
 	name string
 }
 
+// Root 返回接收落点根目录（见 ports.FileSink.Root）。
+func (s *Sink) Root() string { return s.dir }
+
 // Sink 把文件写入指定目录。
 type Sink struct {
 	dir string
