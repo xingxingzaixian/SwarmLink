@@ -309,6 +309,20 @@ func (s *Messages) SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed i
 	return nil
 }
 
+// SetJobStatus 只改状态，不动位图与进度（与 sqlite 实现语义一致）。
+func (s *Messages) SetJobStatus(jobID string, st transfer.State) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("mem: job %s not found", jobID)
+	}
+	j.Status = st
+	j.UpdatedAt = s.clk.Now()
+	s.jobs[jobID] = j
+	return nil
+}
+
 // ListActive 返回所有未结束的任务。
 func (s *Messages) ListActive() ([]transfer.Job, error) {
 	s.mu.RLock()

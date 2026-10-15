@@ -111,6 +111,20 @@ func (t *Transfers) SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed 
 	})
 }
 
+// SetJobStatus 只更新状态列（D-07 的暂停/恢复用）。
+//
+// 刻意不碰 chunk_bitmap / completed：调用方（暂停路径）手里没有权威的
+// 进度数据，那条数据由接收侧的 SaveBitmap 推进 —— 整行覆盖会把进度归零。
+func (t *Transfers) SetJobStatus(jobID string, st transfer.State) error {
+	return t.db.Write(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE transfer_jobs SET status = ?, updated_at = ? WHERE job_id = ?`,
+			string(st), time.Now().UnixMilli(), jobID,
+		)
+		return err
+	})
+}
+
 // ListActive 返回所有未结束的任务（供启动时全局恢复）。
 //
 // 顺序没有承诺（唯一的消费者 Recover 只看状态），但两种存储必须给出

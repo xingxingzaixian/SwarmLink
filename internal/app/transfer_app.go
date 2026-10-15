@@ -88,6 +88,19 @@ type TransferApp struct {
 	// 用户恰恰最容易在「正在准备」的时候点取消。
 	cancelling map[string]struct{}
 
+	// pausedByUser / pausedByPeer 是暂停意图的两本账（D-07）。
+	//
+	// 为什么必须是两个标志而不是一个「已暂停」：暂停有两个独立的发起人 ——
+	// 本机用户与对端。只记一个布尔就会出现「对方暂停着，我一点恢复它就
+	// 自顾自传起来」（覆盖对方意图），或者「我暂停的任務被对方的恢复信令
+	// 唤醒」。两边各自记账、都清零才算真恢复，与引用计数同构。
+	//
+	// 只活在内存里是刻意的：它们描述的是「此刻谁在按着」，重启后双发重来，
+	// 库里留下的 status=paused 才是跨重启的真相。丢标志的最坏结果是恢复时
+	// 重走一次 META 被对端再次按下（自愈），而不是状态错乱。
+	pausedByUser map[string]bool
+	pausedByPeer map[string]bool
+
 	sendSem chan struct{}
 }
 
@@ -113,6 +126,11 @@ type sendJob struct {
 	doneCh   chan doneAck
 	lastSent map[int]time.Time
 
+	// rate 是速率滑动窗口（D-06）：喂「已确认字节」，吐出界面上的
+	// 速度与剩余时间。只被 runSender 这一个 goroutine 触碰
+	// （进度发布与 ACK 处理都在同一个循环里），不需要额外的锁。
+	rate transfer.RateMeter
+
 	// cancel 被关闭即表示用户要求本次传输尽快干净退出。
 	//
 	// 为什么需要中断点：sender 是「一个任务一个 goroutine + 一条共享 ctx」，
@@ -120,6 +138,12 @@ type sendJob struct {
 	// 取消【不删】半截临时文件：下次重发还能按位图续传。
 	cancel    chan struct{}
 	cancelOne sync.Once
+
+	// pause 与 cancel 同构：关闭即表示「停下，但保留全部进度」。
+	// 与 cancel 的区别只在出口 —— 暂停落 status=paused 并等用户恢复，
+	// 取消落 status=cancelled 且再也不自动开始。
+	pause    chan struct{}
+	pauseOne sync.Once
 }
 
 // isCancelled 报告是否已收到取消信号（非阻塞）。
@@ -135,12 +159,19 @@ func (sj *sendJob) isCancelled() bool {
 // requestCancel 发一次取消信号；重复调用安全（连点取消不该 panic）。
 func (sj *sendJob) requestCancel() { sj.cancelOne.Do(func() { close(sj.cancel) }) }
 
+// requestPause 发一次暂停信号；重复调用安全（本机用户与对端可能先后各按一次）。
+func (sj *sendJob) requestPause() { sj.pauseOne.Do(func() { close(sj.pause) }) }
+
 type recvJob struct {
 	job          transfer.Job
 	handle       ports.SinkHandle
 	f            *os.File
 	bitmap       transfer.ChunkBitmap
 	expectHashes []string
+
+	// rate 是速率滑动窗口（D-06），语义与 sendJob.rate 相同：
+	// 喂「已写入字节」。只被该 job 的会话读协程触碰。
+	rate transfer.RateMeter
 
 	sinceFlush int
 	lastFlush  time.Time
@@ -179,6 +210,8 @@ func NewTransferApp(
 		receivers:           make(map[string]*recvJob),
 		starting:            make(map[string]struct{}),
 		cancelling:          make(map[string]struct{}),
+		pausedByUser:        make(map[string]bool),
+		pausedByPeer:        make(map[string]bool),
 		sendSem:             make(chan struct{}, maxConc),
 	}
 }
@@ -241,7 +274,11 @@ func (a *TransferApp) sendFile(
 	// prev 一直在手：状态校验、退避档位、批次字段三处都要用它，
 	// 读一次比读三次更不容易漏（漏掉的代价见 carryOverBatch 的注释）。
 	prev, prevErr := a.store.GetJob(jobID)
-	if prevErr == nil && prev.Status != transfer.StateIdle {
+	// 入口放行 idle（等待中/新建）与 paused（用户点了恢复，见 ResumeJob）：
+	// 恢复之所以【重跑整个 sendFile】而不是唤醒旧 goroutine，就是要强制
+	// 重走 META 重新协商位图（架构书 3.6），这里正是那条路的口子。
+	// 其余状态一律拒绝 —— 尤其 done/cancelled，绝不能借恢复之名复活。
+	if prevErr == nil && prev.Status != transfer.StateIdle && prev.Status != transfer.StatePaused {
 		return transfer.Job{}, fmt.Errorf("transfer: 任务已不在等待中（当前 %s）", prev.Status)
 	}
 
@@ -284,8 +321,27 @@ func (a *TransferApp) sendFile(
 			job.UpdatedAt = a.clk.Now()
 			_ = a.store.UpsertJob(job)
 			a.clearCancelling(job.JobID)
+			a.clearPause(job.JobID)
 			a.publishState(job, from, string(transfer.StateCancelled), "")
 			err = nil // 取消不是错误
+			return
+		}
+		// 暂停与取消同为「用户/对端的主动意图」，都不是错误：不发
+		// transfer:error（否则暂停的任务在列表里整行标红），也不许掉进
+		// 「转等待」—— 暂停的任务由用户在界面上点恢复，自动重试会把它
+		// 变成「暂停了却又自己跑起来」。
+		//
+		// 必须排在取消之后：两个信号同时到达时以取消为准（终态压过中间态）。
+		if errors.Is(err, errJobPaused) {
+			from := string(job.Status)
+			job.Status = transfer.StatePaused
+			job.WaitReason = transfer.WaitNone
+			job.NextTryAt = time.Time{}
+			job.Error = ""
+			job.UpdatedAt = a.clk.Now()
+			_ = a.store.UpsertJob(job)
+			a.publishState(job, from, string(transfer.StatePaused), "")
+			err = nil // 暂停不是错误
 			return
 		}
 		if networkAttempted && shouldWaitForPeer(failureEvidence{
@@ -308,6 +364,7 @@ func (a *TransferApp) sendFile(
 		job.NextTryAt = time.Time{}
 		job.UpdatedAt = a.clk.Now()
 		_ = a.store.UpsertJob(job)
+		a.clearPause(job.JobID)
 		if a.bus != nil {
 			a.bus.Publish(eventbus.TopicTransferError, eventbus.TransferError{
 				JobID: job.JobID, PeerID: peerID.String(), Err: err,
@@ -428,6 +485,14 @@ func (a *TransferApp) sendFile(
 
 	// 从这里开始进入网络阶段：之后的失败才可能是"对端够不着"。
 	networkAttempted = true
+
+	// 哈希期间对端可能按了暂停：那时还没有 sendJob 可以收信号，
+	// 意图只记在 pausedByPeer 上。在这里兑现它 —— 否则元数据照发、
+	// 暂停被静静吞掉，而用户看到的是「对方明明暂停了，这边还在传」。
+	if a.isPausedByPeer(jobID) {
+		return job, errJobPaused
+	}
+
 	sess, err := a.session(ctx, peerID)
 	if err != nil {
 		return job, err
@@ -442,6 +507,7 @@ func (a *TransferApp) sendFile(
 		doneCh:   make(chan doneAck, 1),
 		lastSent: make(map[int]time.Time),
 		cancel:   make(chan struct{}),
+		pause:    make(chan struct{}),
 	}
 	a.putSender(sj)
 	defer a.dropSender(job.JobID)
@@ -478,6 +544,10 @@ func (a *TransferApp) sendFile(
 		sj.acked.OrBits(ck.bitmap)
 	case <-sj.cancel:
 		return job, errJobCancelled
+	case <-sj.pause:
+		// 暂停也要能打断「等对端回位图」：大文件哈希要几分钟，
+		// 用户点暂停的时机大概率就落在这段窗口里。
+		return job, errJobPaused
 	case <-a.clk.After(10 * time.Second):
 		return job, fmt.Errorf("transfer: timeout waiting for FILE_META_ACK")
 	case <-ctx.Done():
@@ -520,6 +590,7 @@ func (a *TransferApp) sendFile(
 	// 防御性清理：正常不会带着取消标记跑完，但留着它会让同一个 job_id
 	// 的下一次尝试一进门就被判为取消。
 	a.clearCancelling(job.JobID)
+	a.clearPause(job.JobID)
 	if a.bus != nil {
 		a.bus.Publish(eventbus.TopicTransferDone, eventbus.TransferDone{
 			JobID: job.JobID, PeerID: peerID.String(), Path: path,
@@ -583,6 +654,9 @@ func (a *TransferApp) runSender(ctx context.Context, sess ports.Session, sj *sen
 		case <-sj.cancel:
 			// 不在这里返回会让取消等到下一个 50ms 节拍才生效 —— 能更快就不拖。
 			return errJobCancelled
+		case <-sj.pause:
+			// 与 cancel 同构：50ms 节拍内停下，位图原样留在库里（恢复时重走 META）。
+			return errJobPaused
 		case ck := <-sj.ackCh:
 			a.applyChunkAck(sj, ck)
 		case <-a.clk.After(50 * time.Millisecond):
@@ -625,10 +699,17 @@ func (a *TransferApp) publishSendProgress(sj *sendJob, last *time.Time) {
 		return
 	}
 	*last = now
+	// 速率口径是【已确认】字节（对端 ACK 过的块），不是「已发出」：
+	// 发出去但没确认的字节随时可能重传，算进速度会让界面虚高，
+	// 也会让 ETA 在一个丢包的网络上变成永远的谎言。
+	done := chunkBytesDone(sj.acked.CompletedCount(), sj.job.ChunkSize, sj.job.FileSize)
+	sj.rate.Advance(done, now)
 	a.bus.Publish(eventbus.TopicTransferProgress, eventbus.TransferProgress{
 		JobID:   sj.job.JobID,
 		PeerID:  sj.job.PeerID.String(),
 		Percent: percentOf(sj.acked.CompletedCount(), sj.job.TotalChunks),
+		Speed:   sj.rate.Speed(),
+		ETA:     sj.rate.ETA(sj.job.FileSize - done),
 		Status:  string(transfer.StateTransferring),
 	})
 }
@@ -658,6 +739,46 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 	}
 	if reason := a.spaceRejectReason(meta, peerID); reason != "" {
 		return a.sendMetaReject(sess, meta.JobID, reason)
+	}
+
+	// 用户按过暂停的接收任务：新到的 FILE_META 【不能】把它复活成传输中。
+	//
+	// 场景：B 暂停了入站传输（给 A 发了 FILE_PAUSE），A 随后也暂停了；
+	// 接着 A 的用户点恢复 → A 重走 META。若这里照常重建任务，B 的
+	// 「已暂停」就被一次协议握手悄悄覆盖 —— 用户看到文件自己开始下载。
+	//
+	// 处置：保留原任务与位图不动，照常回 ACK（发送方要靠它定位续传起点），
+	// 再补一条 FILE_PAUSE 让 A 停下来。两帧都发而不是「拒收」：
+	// 拒收是终态，会把 A 的任务直接判失败，而那不是任何人想要的。
+	//
+	// 判据用内存两本账而不是 rj.job.Status：暂停路径只改状态列、不碰 rj
+	// （见 transfer_pause.go），照 rj 里的快照判会漏掉新按下的暂停。
+	if rj := a.getReceiver(meta.JobID); rj != nil {
+		if a.isPausedByUser(meta.JobID) {
+			if err := a.sendMetaAck(sess, rj); err != nil {
+				return err
+			}
+			return a.sendPauseSignal(sess, meta.JobID)
+		}
+		// 只是对端暂停的：META 能到达就证明发送方又活跃了，
+		// 清掉这个陈旧标志，下面照常重建（位图经 FindResumable 继承）。
+		a.clearPausePeer(meta.JobID)
+	} else if prev, perr := a.store.GetJob(meta.JobID); perr == nil &&
+		prev.Direction == transfer.DirectionRecv && prev.Status == transfer.StatePaused {
+		// 重启后的陈行：内存标志已丢，但库里仍写着「已暂停」。
+		// 不查这一眼，用户重启前按的暂停就会被一次重传悄悄冲掉。
+		payload, err := protocol.EncodeJSON(protocol.FileMetaAck{
+			JobID:           meta.JobID,
+			CompletedBitmap: prev.Bitmap.EncodeBase64(),
+			CompletedChunks: prev.Bitmap.CompletedCount(),
+		})
+		if err != nil {
+			return err
+		}
+		if err := sess.Send(protocol.New(protocol.TypeFileMetaAck, payload)); err != nil {
+			return err
+		}
+		return a.sendPauseSignal(sess, meta.JobID)
 	}
 
 	var (
@@ -783,6 +904,17 @@ func (a *TransferApp) HandleFileChunk(sess ports.Session, f protocol.Frame) erro
 	if rj == nil {
 		return nil // 元数据尚未到达或任务已结束：丢弃
 	}
+	// 暂停期间到达的块：直接丢，不写盘、不置位、不回 ACK。
+	//
+	// 为什么必须由接收侧「闭嘴」而不只靠发送侧停下：FILE_PAUSE 与最后一批
+	// 块可能在网络上交错，发送方也可能根本没实现暂停（旧版本）——
+	// 不丢的后果是位图悄悄前进，而界面写着「已暂停」，用户恢复后对不上。
+	//
+	// 判据是 app 层那两本账（isJobPaused），不是 rj.job.Status：状态列由
+	// 暂停路径改写，而 rj 归本条读协程独占（见 transfer_pause.go 的说明）。
+	if a.isJobPaused(c.JobID) {
+		return nil
+	}
 	if rj.job.IsDir {
 		// 目录条目没有分块，也没有文件句柄；正常不会收到，收到就忽略。
 		return nil
@@ -835,6 +967,16 @@ func (a *TransferApp) HandleFileDone(sess ports.Session, f protocol.Frame) error
 	}
 	rj := a.getReceiver(done.JobID)
 	if rj == nil {
+		return nil
+	}
+	// 暂停期间到达的 FILE_DONE：忽略。
+	//
+	// 只能在「暂停信令与最后几帧交错」时出现（正常流程里发送方先被我们
+	// 按下）。此刻校验一个残缺文件只会得到 mismatch → 坏块重传的死循环，
+	// 而用户看到的是「暂停了，它却在重传」。恢复后发送方会重发 DONE。
+	//
+	// 与 HandleFileChunk 同一条判据：暂停只看两本账。
+	if a.isJobPaused(done.JobID) {
 		return nil
 	}
 
@@ -914,6 +1056,7 @@ func (a *TransferApp) HandleFileDone(sess ports.Session, f protocol.Frame) error
 	rj.job.UpdatedAt = a.clk.Now()
 	_ = a.store.UpsertJob(rj.job)
 	a.dropReceiver(done.JobID)
+	a.clearPause(done.JobID)
 
 	if err := a.sendDoneAck(sess, done.JobID, true, ""); err != nil {
 		return err
@@ -1103,10 +1246,16 @@ func (a *TransferApp) publishRecvProgress(rj *recvJob) {
 	if now.Sub(rj.lastAck) < a.progressInterval() {
 		return
 	}
+	// 接收侧的速率口径就是【已写入】字节：块落盘即既成事实，
+	// 不存在「发出去又撤回」的情况（坏块在 DONE 时才校验重传）。
+	done := chunkBytesDone(rj.bitmap.CompletedCount(), rj.job.ChunkSize, rj.job.FileSize)
+	rj.rate.Advance(done, now)
 	a.bus.Publish(eventbus.TopicTransferProgress, eventbus.TransferProgress{
 		JobID:   rj.job.JobID,
 		PeerID:  rj.job.PeerID.String(),
 		Percent: percentOf(rj.bitmap.CompletedCount(), rj.job.TotalChunks),
+		Speed:   rj.rate.Speed(),
+		ETA:     rj.rate.ETA(rj.job.FileSize - done),
 		Status:  string(transfer.StateTransferring),
 	})
 }
@@ -1207,6 +1356,22 @@ func percentOf(done, total int) float64 {
 		return 0
 	}
 	return float64(done) / float64(total) * 100
+}
+
+// chunkBytesDone 把「已完成分块数」换算成字节数。
+//
+// 必须按文件大小截断：最后一个块通常不满（总块数 × 块大小会超出
+// FileSize 最多一个块）。不截断的后果是小文件上速率与 ETA 明显虚高 ——
+// 4KB 文件按 1KB 分块时误差可达 25%，而速率恰好是用户盯着看的数字。
+func chunkBytesDone(completed int, chunkSize, fileSize int64) int64 {
+	if completed <= 0 || chunkSize <= 0 {
+		return 0
+	}
+	done := int64(completed) * chunkSize
+	if fileSize > 0 && done > fileSize {
+		return fileSize
+	}
+	return done
 }
 
 // hashFileChunks 一次顺序读完成「整体 SHA-256 + 每块 SHA-256」。

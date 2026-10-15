@@ -68,7 +68,33 @@ func (s *stubTransferRepo) FindResumable(peerID identity.NodeID, fileHash, relPa
 	return transfer.Job{}, false
 }
 
-func (s *stubTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error { return nil }
+// SaveBitmap 实现【真实语义】而不是空操作：接收侧的进度就是这么进库的
+// （见端口契约）。空操作会让「暂停不能把进度冲掉」这类用例永远看不到
+// 进度 —— 断言期望 2 块、库里恒 0 块，测试就只能靠改被测代码来迁就。
+func (s *stubTransferRepo) SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("stub: job %s not found", jobID)
+	}
+	j.Bitmap = bm.Copy()
+	j.Completed = completed
+	s.jobs[jobID] = j
+	return nil
+}
+
+func (s *stubTransferRepo) SetJobStatus(jobID string, st transfer.State) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("stub: job %s not found", jobID)
+	}
+	j.Status = st
+	s.jobs[jobID] = j
+	return nil
+}
 
 // all 返回 stub 里按 job_id 排序的全部任务。
 //

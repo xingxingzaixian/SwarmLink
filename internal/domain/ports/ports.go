@@ -160,6 +160,15 @@ type TransferRepo interface {
 	FindResumable(peerID identity.NodeID, fileHash, relPath string) (transfer.Job, bool)
 	// SaveBitmap 批量落盘，避免每块一次事务（P1-9）。
 	SaveBitmap(jobID string, bm transfer.ChunkBitmap, completed int64) error
+	// SetJobStatus 【只】改任务状态，不动位图与进度（D-07 的暂停/恢复用）。
+	//
+	// 为什么不能拿 UpsertJob 代替：UpsertJob 整行覆盖，而调用方手里那份 Job
+	// 是【内存快照】——接收侧的进度由另一条写入路径（SaveBitmap）推进，
+	// 快照里往往还是零值。用它覆盖整行，就等于「暂停一下，进度条先归零」。
+	//
+	// 只更新 status 还有一个并发上的好处：暂停/恢复由用户操作驱动，与
+	// 传输数据路径是两个 goroutine，两条路径写同一行时交集越小越好。
+	SetJobStatus(jobID string, st transfer.State) error
 	ListActive() ([]transfer.Job, error)
 	// ListWaiting 返回「可以被自动拉起」的发送任务（重启恢复与周期性 sweep 用）。
 	//

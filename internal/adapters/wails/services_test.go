@@ -84,6 +84,18 @@ func (r *memTransferRepo) FindResumable(identity.NodeID, string, string) (transf
 
 func (r *memTransferRepo) SaveBitmap(string, transfer.ChunkBitmap, int64) error { return nil }
 
+func (r *memTransferRepo) SetJobStatus(jobID string, st transfer.State) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	j, ok := r.jobs[jobID]
+	if !ok {
+		return os.ErrNotExist
+	}
+	j.Status = st
+	r.jobs[jobID] = j
+	return nil
+}
+
 func (r *memTransferRepo) ListActive() ([]transfer.Job, error)          { return nil, nil }
 func (r *memTransferRepo) ListRecent(limit int) ([]transfer.Job, error) { return nil, nil }
 

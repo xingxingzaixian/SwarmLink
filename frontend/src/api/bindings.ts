@@ -121,6 +121,8 @@ export const realApi: SwarmApi = {
   clearTransfers: async () => TransferService.ClearFinished(),
   cancelTransfer: async (jobId) => TransferService.CancelTransfer(jobId),
   retryTransfer: async (jobId) => TransferService.RetryTransfer(jobId),
+  pauseTransfer: async (jobId) => TransferService.PauseTransfer(jobId),
+  resumeTransfer: async (jobId) => TransferService.ResumeTransfer(jobId),
 
   self: async () => PeerService.Self(),
   peerList: async () => list(await PeerService.List()),

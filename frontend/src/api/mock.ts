@@ -232,6 +232,7 @@ export function createMockApi(): SwarmApi {
     maxConcurrent: 3,
     chunkSize: 512 * 1024,
     windowSize: 8,
+    maxFileSize: 10 * 1024 * 1024 * 1024,
     maxActiveConns: 32,
     idleTimeoutSec: 300,
     requireAuth: true,
@@ -323,6 +324,56 @@ export function createMockApi(): SwarmApi {
     }
   }
 
+  /**
+   * 预览模式下每个任务一条进度定时器（按 jobId 索引）。
+   *
+   * 为什么要按 jobId 存句柄：暂停必须真的停掉定时器 —— 只改状态码的话，
+   * 进度还会自己往前爬，走查「暂停」看到的是假的。
+   */
+  const simTimers = new Map<string, number>()
+
+  /** 推进一次模拟进度。用 jobId 反查任务，暂停/恢复之间不丢任何状态。 */
+  function tickSimSend(jobId: string): void {
+    const job = jobs.find((x) => x.jobId === jobId)
+    if (!job || job.status === 'paused' || job.status === 'cancelled') {
+      stopSimTimer(jobId)
+      return
+    }
+    const percent = Math.min(100, (job.percent || 0) + 6 + Math.random() * 10)
+    const speed = 3.5 * 1024 * 1024 + Math.random() * 4 * 1024 * 1024
+    job.percent = percent
+    job.updatedAt = Date.now()
+    emit(EV.transferProgress, {
+      jobId,
+      peerId: job.peerId,
+      percent,
+      speed,
+      eta: Math.round((((100 - percent) / 100) * job.fileSize) / speed * 1000),
+      status: percent >= 100 ? 'verifying' : 'transferring'
+    })
+    if (percent >= 100) {
+      stopSimTimer(jobId)
+      job.status = 'done'
+      job.completed = job.totalChunks
+      job.localPath = `/remote/${job.fileName}`
+      diagnostics.activeTransfers = 0
+      emit(EV.transferDone, { jobId, peerId: job.peerId, path: job.localPath })
+    }
+  }
+
+  function startSimTimer(jobId: string): void {
+    if (simTimers.has(jobId)) return
+    simTimers.set(jobId, window.setInterval(() => tickSimSend(jobId), 320))
+  }
+
+  function stopSimTimer(jobId: string): void {
+    const t = simTimers.get(jobId)
+    if (t !== undefined) {
+      window.clearInterval(t)
+      simTimers.delete(jobId)
+    }
+  }
+
   /** 模拟一次发送：起一个定时器把进度推给真实的事件处理链路。 */
   function simulateSend(peerId: string, path: string): string {
     const jobId = `mock-job-${Date.now()}`
@@ -343,32 +394,7 @@ export function createMockApi(): SwarmApi {
       updatedAt: Date.now()
     })
 
-    let percent = 0
-    const timer = window.setInterval(() => {
-      percent = Math.min(100, percent + 6 + Math.random() * 10)
-      const speed = 3.5 * 1024 * 1024 + Math.random() * 4 * 1024 * 1024
-      emit(EV.transferProgress, {
-        jobId,
-        peerId,
-        percent,
-        speed,
-        eta: Math.round(((100 - percent) / 100) * size / speed * 1000),
-        status: percent >= 100 ? 'verifying' : 'transferring'
-      })
-      if (percent >= 100) {
-        window.clearInterval(timer)
-        const job = jobs.find((j) => j.jobId === jobId)
-        if (job) {
-          job.percent = 100
-          job.status = 'done'
-          job.completed = job.totalChunks
-          job.localPath = `/remote/${name}`
-          diagnostics.activeTransfers = 0
-        }
-        emit(EV.transferDone, { jobId, peerId, path: `/remote/${name}` })
-      }
-    }, 320)
-
+    startSimTimer(jobId)
     return jobId
   }
 
@@ -434,6 +460,11 @@ export function createMockApi(): SwarmApi {
           job.waitReason = undefined
           for (let percent = 20; percent <= 100; percent += 20) {
             await sleep(200)
+            if (job.status === 'cancelled') return
+            // 暂停期间挂住不动：真实后端里这个文件会被 FILE_PAUSE 按在
+            // 传输中，恢复后从当前进度继续 —— 预览模式照做，
+            // 否则走查看不到「暂停后进度真的停住」。
+            while (job.status === 'paused') await sleep(150)
             if (job.status === 'cancelled') return
             job.percent = percent
             job.updatedAt = Date.now()
@@ -869,12 +900,33 @@ export function createMockApi(): SwarmApi {
       if (!j) throw new Error('任务不存在')
       j.status = 'cancelled'
       j.waitReason = undefined
+      stopSimTimer(jobId)
     },
     async retryTransfer(jobId) {
       const j = jobs.find((x) => x.jobId === jobId)
       if (!j) throw new Error('任务不存在')
       j.waitReason = undefined
       j.status = 'active'
+    },
+    // 暂停/恢复的判据与后端 PauseJob/ResumeJob 对齐（只有正在传的能暂停、
+    // 只有暂停中的能恢复）：预览模式下按钮的可用性与点下去的反馈才和真机一致。
+    async pauseTransfer(jobId) {
+      const j = jobs.find((x) => x.jobId === jobId)
+      if (!j) throw new Error('任务不存在')
+      if (j.status !== 'transferring' && j.status !== 'meta_exchange') {
+        throw new Error('只能暂停正在传输的任务')
+      }
+      j.status = 'paused'
+      j.updatedAt = Date.now()
+      stopSimTimer(jobId)
+    },
+    async resumeTransfer(jobId) {
+      const j = jobs.find((x) => x.jobId === jobId)
+      if (!j) throw new Error('任务不存在')
+      if (j.status !== 'paused') throw new Error('任务未暂停')
+      j.status = 'transferring'
+      j.updatedAt = Date.now()
+      startSimTimer(jobId)
     },
 
     async self() {

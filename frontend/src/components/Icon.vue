@@ -54,6 +54,8 @@ const ICONS: Record<string, string[]> = {
     'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'
   ],
   check: ['M20 6 9 17l-5-5'],
+  pause: ['M9 4v16', 'M15 4v16'],
+  play: ['M6 4l14 8-14 8z'],
   refresh: [
     'M23 4v6h-6',
     'M1 20v-6h6',

@@ -748,6 +748,28 @@ func (s *TransferService) RetryTransfer(jobID string) error {
 	return s.d.Transfer.RetryNow(context.Background(), jobID)
 }
 
+// PauseTransfer 暂停一条正在传输的任务（FR-08-2）：进度与半截文件全部保留。
+//
+// 只有「正在传」的能暂停：等待态（等对端上线 / 批次排队）有自己的出口
+// （立即重试、取消），暂停一条还没开始的任务只会造出第三种中间态。
+func (s *TransferService) PauseTransfer(jobID string) error {
+	if jobID == "" {
+		return fmt.Errorf("请选择任务")
+	}
+	return s.d.Transfer.PauseJob(jobID)
+}
+
+// ResumeTransfer 恢复一条已暂停的任务。
+//
+// 发送侧重走 FILE_META 重新协商位图（架构书 3.6），接收侧直接续写；
+// 对端还按着时会返回错误，等对端恢复后由 FILE_RESUME 自动继续。
+func (s *TransferService) ResumeTransfer(jobID string) error {
+	if jobID == "" {
+		return fmt.Errorf("请选择任务")
+	}
+	return s.d.Transfer.ResumeJob(context.Background(), jobID)
+}
+
 // Reveal 在系统文件管理器中定位该路径（尽可能选中文件本身）。
 //
 // 三个平台语义不同：Windows 用 `explorer /select,`、macOS 用 `open -R`

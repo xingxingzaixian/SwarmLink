@@ -77,6 +77,10 @@ func (r *Router) Handle(sess ports.Session, f protocol.Frame) {
 		r.dispatch(sess, f, handleOf(r.Transfer, (*TransferApp).HandleFileDone))
 	case protocol.TypeFileDoneAck:
 		r.dispatch(sess, f, handleOf(r.Transfer, (*TransferApp).HandleFileDoneAck))
+	case protocol.TypeFilePause:
+		r.dispatch(sess, f, handleOf(r.Transfer, (*TransferApp).HandleFilePause))
+	case protocol.TypeFileResume:
+		r.dispatch(sess, f, handleOf(r.Transfer, (*TransferApp).HandleFileResume))
 
 	case protocol.TypeShareIndexReq:
 		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandleIndexReq))

@@ -517,12 +517,15 @@ func (a *TransferApp) busyPeers() map[identity.NodeID]bool {
 	return out
 }
 
-// CancelJob 取消一条任务：排队/等待中的直接落取消；正在传输的通过取消信号
-// 让它干净退出并落取消。返回错误表示不可取消。
+// CancelJob 取消一条任务：排队/等待中、或已暂停的直接落取消；正在传输的通过
+// 取消信号让它干净退出并落取消。返回错误表示不可取消。
 //
 // 过去这里明确拒绝取消在传任务，理由是「sender 没有中断点，假取消比拒绝更糟」
 // —— 那个理由现在依然成立，所以这里只在【确实能把任务停下来】的前提下放行：
 // 有在跑的 sender 就发信号，没有就（且只能）对排队中的任务直接落状态。
+//
+// 暂停态也走「直接落状态」那条：暂停的发送侧没有在跑的 goroutine（它已经
+// 干净退出了），不在这里放行的话，用户暂停之后就没法把这条任务清掉。
 func (a *TransferApp) CancelJob(jobID string) error {
 	j, err := a.store.GetJob(jobID)
 	if err != nil {
@@ -548,7 +551,7 @@ func (a *TransferApp) CancelJob(jobID string) error {
 		// 它下一个检查点就会退出。
 		return nil
 	}
-	if j.Status != transfer.StateIdle {
+	if j.Status != transfer.StateIdle && j.Status != transfer.StatePaused {
 		a.clearCancelling(jobID)
 		return fmt.Errorf("transfer: 任务既不在等待中、也没有在传输（当前 %s）", j.Status)
 	}
@@ -562,6 +565,9 @@ func (a *TransferApp) CancelJob(jobID string) error {
 		return err
 	}
 	a.clearCancelling(jobID)
+	// 暂停的任务被取消：两本账都要清，否则同一个 job_id 的下一次尝试
+	// 会带着「还暂停着」的记忆进门（见 clearPause）。
+	a.clearPause(jobID)
 	a.publishState(j, from, string(transfer.StateCancelled), "")
 	return nil
 }

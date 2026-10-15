@@ -10,6 +10,7 @@ func TestTypeNameCoversAllDeclaredTypes(t *testing.T) {
 		TypeFileMeta: "FILE_META", TypeFileMetaAck: "FILE_META_ACK",
 		TypeFileChunk: "FILE_CHUNK", TypeFileChunkAck: "FILE_CHUNK_ACK",
 		TypeFileDone: "FILE_DONE", TypeFileDoneAck: "FILE_DONE_ACK",
+		TypeFilePause: "FILE_PAUSE", TypeFileResume: "FILE_RESUME",
 		TypeHeartbeat: "HEARTBEAT", TypeHeartbeatAck: "HEARTBEAT_ACK", TypeChatAck: "CHAT_ACK",
 		TypeGroupMeta: "GROUP_META", TypeGroupMembersReq: "GROUP_MEMBERS_REQ",
 		TypeGroupMembersRes: "GROUP_MEMBERS_RESP", TypeGroupMsg: "GROUP_MSG",

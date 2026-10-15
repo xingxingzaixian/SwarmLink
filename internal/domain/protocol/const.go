@@ -63,6 +63,18 @@ const (
 	TypeFileChunkAck byte = 0x13
 	TypeFileDone     byte = 0x14
 	TypeFileDoneAck  byte = 0x15
+	// TypeFilePause / TypeFileResume 是传输的【控制信令】（FR-08-2）：
+	// 任一方向都可以发 —— 发送方发表示「别再发块了」，接收方发表示
+	// 「我先停嘴，你也别发了」。恢复时方向相反。
+	//
+	// 为什么暂停必须是信令而不是本地动作：只有本地停下时，对端的界面
+	// 会挂在一个永远不动的「传输中」上，而且发送方仍会每 400ms 重发
+	// 未确认的块 —— 带宽照烧，两端状态还对不上。
+	//
+	// 兼容性：旧版本收到不认识的 Type 会直接丢弃并计数、不断连
+	// （规格 16.2 的未知 Type 规则），因此新旧混跑时降级为「本地暂停」。
+	TypeFilePause  byte = 0x16
+	TypeFileResume byte = 0x17
 
 	// 0x20–0x2F 消息可靠性
 	TypeHeartbeat    byte = 0x20
@@ -155,6 +167,10 @@ func TypeName(t byte) string {
 		return "FILE_DONE"
 	case TypeFileDoneAck:
 		return "FILE_DONE_ACK"
+	case TypeFilePause:
+		return "FILE_PAUSE"
+	case TypeFileResume:
+		return "FILE_RESUME"
 	case TypeHeartbeat:
 		return "HEARTBEAT"
 	case TypeHeartbeatAck:

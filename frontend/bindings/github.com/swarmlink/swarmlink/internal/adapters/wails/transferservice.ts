@@ -71,6 +71,26 @@ export function ListBatch(batchID: string): $CancellablePromise<$models.Transfer
 }
 
 /**
+ * PauseTransfer 暂停一条正在传输的任务（FR-08-2）：进度与半截文件全部保留。
+ * 
+ * 只有「正在传」的能暂停：等待态（等对端上线 / 批次排队）有自己的出口
+ * （立即重试、取消），暂停一条还没开始的任务只会造出第三种中间态。
+ */
+export function PauseTransfer(jobID: string): $CancellablePromise<void> {
+    return $Call.ByID(279410598, jobID);
+}
+
+/**
+ * ResumeTransfer 恢复一条已暂停的任务。
+ * 
+ * 发送侧重走 FILE_META 重新协商位图（架构书 3.6），接收侧直接续写；
+ * 对端还按着时会返回错误，等对端恢复后由 FILE_RESUME 自动继续。
+ */
+export function ResumeTransfer(jobID: string): $CancellablePromise<void> {
+    return $Call.ByID(1496713769, jobID);
+}
+
+/**
  * RetryTransfer 立刻重试一条等待中的传输任务（不等退避，也不要求对端在目录里在线）。
  */
 export function RetryTransfer(jobID: string): $CancellablePromise<void> {

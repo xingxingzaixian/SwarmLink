@@ -36,6 +36,27 @@ export function isWaiting(j: TransferJob): boolean {
 }
 
 /**
+ * 该任务是否处于「已暂停」。
+ *
+ * 只看 status：后端把暂停落成 paused（DB 与事件都是它），恢复时先发一条
+ * transfer:state 把它翻走 —— 前端只认这一个值，不另造本地标记。
+ */
+export function isPaused(j: TransferJob): boolean {
+  return j.status === 'paused'
+}
+
+/**
+ * 该任务此刻能否被暂停。
+ *
+ * 判据与后端 PauseJob 对齐（只有「正在传」的能暂停）：等待态（等对方上线 /
+ * 批次排队）有它们自己的出口（立即重试、取消），前端先不显示按钮，
+ * 比点下去收一个错误提示友好。
+ */
+export function canPause(j: TransferJob): boolean {
+  return j.status === 'transferring' || j.status === 'meta_exchange'
+}
+
+/**
  * 传输任务状态。
  *
  * 进度的数据来源有两条，职责必须分清：
@@ -122,6 +143,14 @@ export const useTransferStore = defineStore('transfer', () => {
     // 就会把「传输完成」打回「正在传输」—— 表现为「文件早就传完了，
     // 气泡上还写着正在传输」，而且此后再没有任何事件能把它改回来。
     if (!isActive(prev.status)) return
+    // 「已暂停」也必须把进度挡在门外（理由同上一段）：进度事件被
+    // requestAnimationFrame 合并，而 transfer:state 是同步应用的 ——
+    // 一帧内先到进度、后到暂停，就会把「已暂停」打回「正在传输」，
+    // 用户点了暂停却看着它还在动。
+    //
+    // 不会卡住恢复：恢复时后端【先】发一条 transfer:state（见 ResumeJob 与
+    // HandleFileResume），状态翻回非暂停之后进度才被接受。
+    if (prev.status === 'paused') return
     const nextStatus = p.status ?? prev.status
     jobs.value[i] = {
       ...prev,

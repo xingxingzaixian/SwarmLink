@@ -161,6 +161,43 @@ func TestFileMetaFolderFields(t *testing.T) {
 	}
 }
 
+// 暂停/恢复信令的载荷必须原样过线（FR-08-2）。
+//
+// 这条看着像废话，但它是「两端对同一条任务用了同一个 job_id」的唯一保证：
+// 载荷丢了 job_id，收到的一方就只能靠猜，而猜错的方向是把【别人的】任务
+// 按下去 —— 用户看到另一个文件莫名其妙停了。
+func TestFilePauseResumeWireRoundTrip(t *testing.T) {
+	raw, err := EncodeJSON(FilePause{JobID: "job-0x16"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pause FilePause
+	if err := DecodeJSON(raw, &pause); err != nil {
+		t.Fatal(err)
+	}
+	if pause.JobID != "job-0x16" {
+		t.Fatalf("FILE_PAUSE 载荷错位：%+v", pause)
+	}
+
+	raw, err = EncodeJSON(FileResume{JobID: "job-0x17"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resume FileResume
+	if err := DecodeJSON(raw, &resume); err != nil {
+		t.Fatal(err)
+	}
+	if resume.JobID != "job-0x17" {
+		t.Fatalf("FILE_RESUME 载荷错位：%+v", resume)
+	}
+
+	// 两个类型必须是两个不同的值：混用会让「暂停」被当成「恢复」，
+	// 而这类错误在日志里长得一模一样（都是 FILE_PAUSE 分支的一条日志）。
+	if TypeFilePause == TypeFileResume {
+		t.Fatal("FILE_PAUSE 与 FILE_RESUME 不能是同一个 Type")
+	}
+}
+
 func TestErrorPayloadAndGroupWireRoundTrip(t *testing.T) {
 	raw, err := EncodeJSON(ErrorPayload{Code: 42, Message: "协议违规"})
 	if err != nil {

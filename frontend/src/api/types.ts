@@ -281,6 +281,8 @@ export interface Settings {
   maxConcurrent: number
   chunkSize: number
   windowSize: number
+  /** 接收侧的单文件上限（字节），0 表示不限制。前端只用来提前拦截，真正的判定在接收端。 */
+  maxFileSize: number
   maxActiveConns: number
   idleTimeoutSec: number
   requireAuth: boolean
@@ -399,6 +401,16 @@ export interface SwarmApi {
   cancelTransfer(jobId: string): Promise<void>
   /** 立刻重试一条等待中的传输（不等退避，也不要求对端在目录里在线）。 */
   retryTransfer(jobId: string): Promise<void>
+  /**
+   * 暂停一条正在传输的任务：进度与半截文件全部保留，对端也会跟着停下。
+   * 只有「正在传」的能暂停，等待态（等对端 / 批次排队）会返回错误。
+   */
+  pauseTransfer(jobId: string): Promise<void>
+  /**
+   * 恢复一条已暂停的任务。发送侧重走元数据协商，接收侧直接续写；
+   * 对方还按着时会返回错误，等对方恢复后自动继续。
+   */
+  resumeTransfer(jobId: string): Promise<void>
 
   // 节点与诊断
   self(): Promise<Self>

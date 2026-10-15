@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swarmlink/swarmlink/internal/bootstrap"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/transfer"
@@ -448,4 +449,37 @@ func TestCrossSubnetConvergenceViaSeed(t *testing.T) {
 		m, ok := a1.Messages.Get(msg.MsgID)
 		return ok && m.State == message.StateDelivered
 	})
+}
+
+// 换数据目录 / 重装应用后身份必须保持不变 —— 这是身份托管对用户的可见承诺。
+//
+// 走真实的装配路径（bootstrap.Start + SWARMLINK_VAULT_DIR），而不是直接调 keystore：
+// 「托管目录由 bootstrap 解析并传进去」这件事只有这条路径能证伪，
+// 同时它也验证了仓库自己的部署入口（环境变量）确实生效。
+func TestBootstrapIdentitySurvivesDataDirChange(t *testing.T) {
+	t.Setenv("SWARMLINK_VAULT_DIR", t.TempDir())
+
+	start := func(dataDir string) string {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		n, err := bootstrap.Start(ctx, bootstrap.Options{
+			DataDir:     dataDir,
+			DownloadDir: t.TempDir(),
+			TCPPort:     0, // 交给系统分配，避免与开发机上的实例抢端口
+			UDPPort:     0,
+			UseMem:      true,
+		})
+		if err != nil {
+			t.Fatalf("bootstrap.Start(%s): %v", dataDir, err)
+		}
+		defer n.Close()
+		return n.KP.NodeID().String()
+	}
+
+	first := start(t.TempDir())
+	// 换一个数据目录：托管副本仍在，身份必须不变。
+	if second := start(t.TempDir()); second != first {
+		t.Fatalf("换数据目录后换了身份：%s → %s", first, second)
+	}
 }

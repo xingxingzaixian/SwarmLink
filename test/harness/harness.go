@@ -22,6 +22,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/peer"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
+	"github.com/swarmlink/swarmlink/internal/domain/share"
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
@@ -47,6 +48,7 @@ type Node struct {
 	Messages *mem.Messages
 	Peers    *mem.Peers
 	Groups   *mem.Groups
+	Shares   *mem.Shares
 
 	Conn     *tcp.Manager
 	BC       *udp.Broadcaster
@@ -57,6 +59,7 @@ type Node struct {
 	ChatApp     *app.ChatApp
 	GroupApp    *app.GroupApp
 	TransferApp *app.TransferApp
+	ShareApp    *app.ShareApp
 	DiscApp     *app.DiscoveryApp
 	Router      *app.Router
 
@@ -80,6 +83,8 @@ func New(name string, opts Options) (*Node, error) {
 	messages := mem.NewMessages(clk)
 	peers := mem.NewPeers(clk)
 	groups := mem.NewGroups()
+	deliveries := mem.NewGroupDeliveries()
+	shares := mem.NewShares()
 
 	downloadDir, err := os.MkdirTemp("", "swarmlink-dl-"+name+"-")
 	if err != nil {
@@ -117,12 +122,20 @@ func New(name string, opts Options) (*Node, error) {
 	}
 
 	peerApp := app.NewPeerApp(kp.NodeID(), peers, bus, clk, ttl, nil)
+	// 与生产装配一致：让 Sweep 能判断「是否仍有活动会话」，否则会把「连接还在、
+	// 只是没等到 announce」的节点误判离线。
+	peerApp.SetConnLookup(conn)
 	chatApp := app.NewChatApp(kp.NodeID(), messages, conn, peers, bus, clk, nil)
-	groupApp := app.NewGroupApp(kp.NodeID(), kp, groups, messages, conn, peers, bus, clk, nil)
+	groupApp := app.NewGroupApp(kp.NodeID(), kp, groups, messages, deliveries, conn, peers, bus, clk, nil)
+	chatApp.GroupAck = groupApp.HandleGroupAck
 	transferApp := app.NewTransferApp(kp.NodeID(), messages, sink, conn, peers, bus, clk, nil)
 	if opts.ChunkSize > 0 {
 		transferApp.ChunkSize = opts.ChunkSize
 	}
+	// 与生产装配逐参对齐（见 bootstrap）：少一个依赖就是「测试跑一套、生产跑另一套」。
+	shareApp := app.NewShareApp(kp.NodeID(), shares, peers, groups, transferApp, bus, clk, nil)
+	shareApp.SelfName = func() string { return name }
+	shareApp.Start(ctx)
 
 	bcCfg := udp.DefaultConfig()
 	bcCfg.DisplayName = name
@@ -150,11 +163,14 @@ func New(name string, opts Options) (*Node, error) {
 	discApp.RefreshInterval = 300 * time.Second // 由测试显式调用 RefreshSeeds
 	discApp.SeedsPerRefresh = 2
 
-	router := app.NewRouter(chatApp, groupApp, transferApp, discApp, peerApp, nil)
+	router := app.NewRouter(chatApp, groupApp, transferApp, discApp, peerApp, shareApp, nil)
 	conn.SetHandler(router.Handle)
 
 	peerApp.Start()
 	chatApp.Start(ctx)
+	// 与生产装配一致：对端上下线时做群名册的推送与拉取（含按需拨号）。
+	// 少了它，e2e 里「离线成员上线后对齐名册」这条路径根本不会触发。
+	groupApp.Start(ctx)
 	// 与生产装配一致：对端上线（peer.online / peer.discovered）会唤醒等待中的传输，
 	// Recover 负责收尾上次运行留下的任务
 	transferApp.Start(ctx)
@@ -162,10 +178,10 @@ func New(name string, opts Options) (*Node, error) {
 
 	n := &Node{
 		Name: name, KP: kp,
-		Bus: bus, Messages: messages, Peers: peers, Groups: groups,
+		Bus: bus, Messages: messages, Peers: peers, Groups: groups, Shares: shares,
 		Conn: conn, BC: bc, Registry: registry, Prober: prober,
 		PeerApp: peerApp, ChatApp: chatApp, GroupApp: groupApp,
-		TransferApp: transferApp, DiscApp: discApp, Router: router,
+		TransferApp: transferApp, ShareApp: shareApp, DiscApp: discApp, Router: router,
 		Sink: sink, DownloadDir: downloadDir,
 		clk: clk, cancel: cancel, ctx: ctx,
 	}
@@ -214,8 +230,20 @@ func (n *Node) Announcement() peer.Announcement {
 		Source:      peer.SourceBroadcast,
 		ObservedIP:  "127.0.0.1",
 	}
+	// 共享摘要随通告一起走，与生产广播同构（那边由 bc.cfg.Shares 回调填）。
+	// 少了这一行，e2e 里「共享被对方发现」这条路径永远不会被触发。
+	if n.ShareApp != nil {
+		an.Shares = n.ShareApp.Summaries()
+	}
 	an.Sig = n.KP.Sign(an.SigningBytes())
 	return an
+}
+
+// PublishShare 在测试节点上发布一条共享（供 e2e 的共享用例复用）。
+func (n *Node) PublishShare(root, shareName string, vis share.Visibility) (share.Share, error) {
+	return n.ShareApp.Publish(n.ctx, app.PublishRequest{
+		RootPath: root, Name: shareName, Visibility: vis,
+	})
 }
 
 // Link 让 a 与 b 互相「听见」对方（模拟同网段广播发现）。
@@ -257,4 +285,11 @@ func (n *Node) Close() {
 }
 
 // LoadOrCreateIdentity 暴露 keystore，便于需要持久身份的测试。
-func LoadOrCreateIdentity(dir string) (*identity.KeyPair, error) { return keystore.LoadOrCreate(dir) }
+// vaultDir 为 "" 表示禁用托管（与 bootstrap 的语义一致）。
+func LoadOrCreateIdentity(dir, vaultDir string) (*identity.KeyPair, error) {
+	res, err := keystore.LoadOrCreate(dir, vaultDir)
+	if err != nil {
+		return nil, err
+	}
+	return res.KeyPair, nil
+}

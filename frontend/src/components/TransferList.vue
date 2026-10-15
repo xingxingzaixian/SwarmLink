@@ -10,7 +10,7 @@ import { computed } from "vue";
 import Icon from "./Icon.vue";
 import { getApi } from "../api";
 import type { TransferJob } from "../api/types";
-import { isActive, isWaiting } from "../stores/transfer";
+import { canPause, isActive, isPaused, isWaiting } from "../stores/transfer";
 import { usePeersStore } from "../stores/peers";
 import { useUiStore } from "../stores/ui";
 import {
@@ -59,6 +59,34 @@ async function cancel(j: TransferJob): Promise<void> {
     await (await getApi()).cancelTransfer(j.jobId);
   } catch (e: any) {
     ui.notify(String(e?.message ?? e) || "取消失败");
+  }
+}
+
+/**
+ * 暂停一条正在传输的任务。
+ *
+ * 后端会把进度与半截文件原样保留，并给对端发一条 FILE_PAUSE 让它一起停下
+ * —— 只有本机停下的话，对端界面会挂在一个永远不动的「传输中」上。
+ */
+async function pause(j: TransferJob): Promise<void> {
+  try {
+    await (await getApi()).pauseTransfer(j.jobId);
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || "暂停失败");
+  }
+}
+
+/**
+ * 恢复一条已暂停的任务。
+ *
+ * 「对方已暂停」不是失败而是提示：对方一点恢复，后端会自动继续，
+ * 所以这里原样把后端的话转给用户，不要自己改写文案（改了就对不上）。
+ */
+async function resume(j: TransferJob): Promise<void> {
+  try {
+    await (await getApi()).resumeTransfer(j.jobId);
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || "恢复失败");
   }
 }
 
@@ -182,6 +210,15 @@ function doneBytes(j: TransferJob): number {
             >
               <Icon name="folder" :size="13" />
             </button>
+            <button
+              v-else-if="canPause(j)"
+              class="reveal"
+              title="暂停传输（进度与半截文件保留）"
+              aria-label="暂停传输"
+              @click="pause(j)"
+            >
+              <Icon name="pause" :size="13" />
+            </button>
             <span v-else class="reveal-ph" />
 
             <button
@@ -192,6 +229,15 @@ function doneBytes(j: TransferJob): number {
               @click="cancel(j)"
             >
               <Icon name="x" :size="13" />
+            </button>
+            <button
+              v-else-if="isPaused(j)"
+              class="reveal"
+              title="恢复传输"
+              aria-label="恢复传输"
+              @click="resume(j)"
+            >
+              <Icon name="play" :size="13" />
             </button>
             <span v-else class="reveal-ph" />
           </div>
