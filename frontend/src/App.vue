@@ -13,6 +13,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import ChatView from './views/ChatView.vue'
 import ContactPanel from './components/ContactPanel.vue'
 import SidePanel from './components/SidePanel.vue'
+import TransferQueueBar from './components/TransferQueueBar.vue'
 import SettingsDialog from './views/SettingsDialog.vue'
 import ShareDialog from './views/ShareDialog.vue'
 import { getApi, isMockMode } from './api'
@@ -81,7 +82,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ 'with-queue': transfers.activeJobs.length > 0 }">
     <ContactPanel :mock="mock" />
     <ChatView />
     <SidePanel />
@@ -89,6 +90,11 @@ onUnmounted(() => {
     <Transition name="toast">
       <div v-if="ui.toast" class="toast">{{ ui.toast }}</div>
     </Transition>
+
+    <!-- 全局传输队列浮层（规格 1.1）。有没有它由它自己那一个条件决定，
+         外壳只负责「有它时让出 --queue-h」—— 判据同源（store.activeJobs），
+         所以不会出现留了空间却没有浮层的空档。 -->
+    <TransferQueueBar />
   </div>
 
   <!-- 共享中心是独立弹框：它的形态（左右分栏 + 文件表格 + 一排动作）与
@@ -122,6 +128,18 @@ onUnmounted(() => {
   .app > :nth-child(3) {
     display: none;
   }
+}
+
+/* 底部浮层占位：不让出这一档内边距，左栏底部的「加好友」、右栏底部的按钮
+   和输入框都会有一段被浮层压住（浮层是 fixed，不参与栅格）。 */
+.app.with-queue {
+  padding-bottom: var(--queue-h);
+}
+
+/* 轻提示默认贴在视口底部 30px —— 浮层出现时它正好落在浮层上，跟着抬上去。
+   `--queue-h` 是两者唯一的耦合点（见 style.css 的布局尺寸段）。 */
+.app.with-queue .toast {
+  bottom: calc(30px + var(--queue-h));
 }
 
 /* 轻提示只负责进出场动画；外观在 style.css 的 .toast 里（全局只此一份） */

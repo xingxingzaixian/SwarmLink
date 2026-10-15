@@ -74,8 +74,8 @@ func TestShouldWaitForPeer(t *testing.T) {
 //
 // 可观测性靠「本地文件不存在」：被拉起的任务会立刻走一次发送，本地检查
 // （sendFile 的第一步）当场失败并发 transfer:error；没被拉起的则毫无动静。
-// 三个任务刻意用【不同对端】：同一对端同一时刻只启动一个是既有规则
-// （防哈希风暴），同对端会让用例只能观察到一条。
+// 三个任务用【不同对端】只是为了让诊断信息一眼看出是哪一个 ——
+// D-11 之后同一对端也能并行启动（见 transfer_parallel_test.go 的对照用例）。
 func TestStartJobsOnlyPicksAutoStartable(t *testing.T) {
 	repo := &stubTransferRepo{}
 	bus := eventbus.New()
@@ -402,29 +402,35 @@ func countAttempted(repo *stubTransferRepo) int {
 	return n
 }
 
-// sweep 只挑「到点」的等待任务，且同一对端每轮只启动一个。
+// sweep 只挑「到点」的等待任务，且严格受【全局】并发额度约束。
 //
-// 后半句是硬要求：对方一上线，10 个等待任务同时开始整文件哈希，
-// 磁盘会先崩。
-func TestSweepWaitingRespectsBackoffAndPerPeerSerialization(t *testing.T) {
+// 额度（而不是「每对端一条」）才是防哈希风暴的那道闸：它在哈希之前就占住了，
+// 所以「同时在哈希的文件数 ≤ max_concurrent」。D-11 之前这里额外有一条
+// 「同一对端每轮只启动一个」，而那条规则只写在调度路径上（用户一个个手动发
+// 从来不受它约束）—— 去掉之后，文件夹批次才和手动发送一样快。
+//
+// 三个任务刻意用【同一个】对端：这正是新语义要覆盖的形态。
+// 会话发得出去但永远不回 ACK，于是启动起来的任务会一直占着额度停在
+// 「等 FILE_META_ACK」—— 让「额度用尽时不再多启一条」成为确定性断言，
+// 而不是跟 goroutine 的退出时机赛跑。
+func TestSweepWaitingRespectsBackoffAndGlobalBudget(t *testing.T) {
 	peerID := mustNodeID(t, testPeerHex)
 	repo := &stubTransferRepo{}
 	fc := clock.NewFake(time.Unix(1_700_000_000, 0))
 
 	// 目录里对端显示在线（所以「值得一试」），但会话查不到：
-	// 于是尝试会真的走到网络阶段，然后因写失败回到等待。
+	// 于是尝试会真的走到网络阶段（Dial 给的会话只收不发）。
 	peers := mem.NewPeers(fc)
 	if err := peers.Upsert(peer.Peer{
 		NodeID: peerID, State: peer.StateOnline, LastAddr: "127.0.0.1:9", LastSeen: fc.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	sess := &brokenSession{
-		peer: peerID, failFrom: 1, err: errors.New("use of closed network connection"),
-	}
+	sess := &brokenSession{peer: peerID, failFrom: 1 << 30} // 从不失败，只在计数
 	a := NewTransferApp(identity.NodeID{}, repo, nil, deadConns{sess: sess}, peers, eventbus.New(), fc, nil)
 	a.ChunkSize = 1024
 	a.BaseBackoff = time.Second
+	a.sendSem = make(chan struct{}, 1) // 额度收紧到 1 条，才观察得到「用尽」
 
 	dir := t.TempDir()
 	for i, id := range []string{"job-1", "job-2", "job-3"} {
@@ -441,24 +447,34 @@ func TestSweepWaitingRespectsBackoffAndPerPeerSerialization(t *testing.T) {
 
 	// 退避未到点：一条都不该动，也不该发出任何帧
 	a.SweepWaiting(context.Background())
-	if n := countAttempted(repo); n != 0 {
+	if n := a.ActiveJobs(); n != 0 {
 		t.Fatalf("退避未到点就启动了 %d 条任务", n)
 	}
 	if got := sess.sent(); got != 0 {
 		t.Fatalf("退避未到点就发了 %d 帧", got)
 	}
 
-	// 到点：同一对端这一轮只启动一条
+	// 到点：额度只够一条
 	fc.Advance(2 * time.Second)
 	a.SweepWaiting(context.Background())
-	waitUntil(t, 2*time.Second, "有一条任务被启动", func() bool {
-		return countAttempted(repo) == 1
+	waitUntil(t, 2*time.Second, "有一条任务进入网络阶段（已登记 sender）", func() bool {
+		return a.ActiveJobs() == 1
 	})
 	// 给「误启动第二条」留出犯错窗口：真出问题时它会在这一小段时间里出现
 	time.Sleep(50 * time.Millisecond)
-	if n := countAttempted(repo); n != 1 {
-		t.Fatalf("同一对端在同一轮启动了 %d 条（want 1）—— 对方一上线就会同时哈希多个文件", n)
+	if n := a.ActiveJobs(); n != 1 {
+		t.Fatalf("额度为 1 时启动了 %d 条 —— 并发记账漏了一处", n)
 	}
+	if got := sess.sent(); got != 1 {
+		t.Fatalf("额度为 1 时发了 %d 条 FILE_META（want 1）", got)
+	}
+
+	// 收尾：把时钟推过「等 FILE_META_ACK」的 10 秒超时，让那条尝试干净退出。
+	// 否则它手里的文件句柄会卡住 t.TempDir 的清理（Windows 上必现）。
+	fc.Advance(11 * time.Second)
+	waitUntil(t, 2*time.Second, "尝试超时退出并释放文件句柄", func() bool {
+		return a.ActiveJobs() == 0
+	})
 }
 
 // 连续失败必须让退避递增。
@@ -578,7 +594,7 @@ func TestStartAfterCancelDoesNotResurrectJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := a.sendFile(context.Background(), peerID, p, "job-race", true); err == nil {
+	if _, err := a.sendFile(context.Background(), peerID, p, "job-race", true, false); err == nil {
 		t.Fatal("已取消的任务不该被启动")
 	}
 	got, err := repo.GetJob("job-race")

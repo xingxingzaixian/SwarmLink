@@ -73,9 +73,19 @@ type Job struct {
 	TempPath    string
 	Completed   int64
 	Bitmap      ChunkBitmap
-	Status      State
-	WindowSize  int
-	RetryCount  int
+	// ResumeFrom 是【本次尝试的起点块数】：0 表示从头传，>0 表示这次是从第
+	// ResumeFrom 块接上的，界面据此显示「续传自 XX%」。
+	//
+	// 与 Completed 的分工是这个字段存在的全部理由：Completed 随传输往前爬，
+	// ResumeFrom 记的是「这一次从哪儿接上」，写下之后不再改动。
+	//
+	// 它必须落库而不是只放在内存里：重启一次、或者换一次尝试（恢复 / 重试 /
+	// 退避后自动重发）之后，用户仍然需要看到「这条是从半截续的」——
+	// 否则同一份文件在列表里看起来就像从头传了一遍。
+	ResumeFrom int64
+	Status     State
+	WindowSize int
+	RetryCount int
 	// WaitReason / NextTryAt 只在 Status 为 StateIdle（"还没开始"）时有意义：
 	// 前者说明在等谁，后者说明什么时候可以再试。
 	WaitReason WaitReason
@@ -128,6 +138,22 @@ func (j *Job) Percent() float64 {
 		return 0
 	}
 	return float64(j.Bitmap.CompletedCount()) / float64(j.TotalChunks) * 100
+}
+
+// ResumePercent 返回本次尝试的起点百分比 [0,100]；0 表示从头传。
+//
+// 与 Percent 分开而不是复用它：Percent 读的是位图（随时在涨），这里读的是
+// ResumeFrom（这一次从哪儿接上，写死不动的那个数）。界面上一行同时出现
+// 「续传自 12%」与「42%」正是两者的分工。
+func (j *Job) ResumePercent() float64 {
+	if j.TotalChunks <= 0 || j.ResumeFrom <= 0 {
+		return 0
+	}
+	if j.ResumeFrom >= int64(j.TotalChunks) {
+		// 对端声称全部已完成：这条任务会立刻收尾，但别让界面出现「续传自 120%」。
+		return 100
+	}
+	return float64(j.ResumeFrom) / float64(j.TotalChunks) * 100
 }
 
 // SetCompleted 更新 completed 计数（由位图推导，属于合理冗余，便于高频 UI 查询）。

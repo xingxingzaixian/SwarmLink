@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { getApi, type FolderSummary, type TransferJob } from '../api'
-import { baseName } from '../utils/format'
+import { baseName, isSending } from '../utils/format'
 
 /** 事件载荷：只带「易变」的进度，落地元数据（文件名/大小）靠 List() 补齐。 */
 interface ProgressPayload {
@@ -12,6 +12,15 @@ interface ProgressPayload {
   status?: string
   speed?: number
   etaMs?: number
+  /**
+   * 本次尝试的起点百分比（只有真的续传过的任务才带这个键）。
+   *
+   * 它不随帧变化，本来按「只发易变字段」的原则不该在这里 —— 但续传起点是在
+   * FILE_META_ACK 之后才定下来的，那一刻没有别的可用事件，而「收到状态变化就
+   * 重读整行」会把库里滞后的进度盖回界面（发送侧的进度根本不落库）。
+   * 详见 internal/infra/eventbus/payloads.go 的同名字段。
+   */
+  resumeFromPercent?: number
 }
 
 /** 已结束的状态。注意 failed 也算结束 —— 它不会自己再动起来。 */
@@ -54,6 +63,25 @@ export function isPaused(j: TransferJob): boolean {
  */
 export function canPause(j: TransferJob): boolean {
   return j.status === 'transferring' || j.status === 'meta_exchange'
+}
+
+/**
+ * 该任务此刻能否被取消。
+ *
+ * 判据与后端 CancelJob 对齐，两条：
+ *   - 只有【本机发出】的任务：接收侧的在途任务后端直接拒绝
+ *     （「只能取消本机发出的任务」），显示了按钮也是白点；
+ *   - 终态（done / failed / cancelled）不再可取消 —— 已完成没什么可取消的，
+ *     失败的出口是重发。
+ *
+ * 覆盖面比过去宽：过去只在「等对方上线」时才给按钮，而排队中、正在传、
+ * 已暂停这三种后端都能干净停下（在传的由发送路径的中断点落 cancelled，
+ * 半截临时文件保留给下次续传），按钮因此跟着放开。
+ *
+ * 等待态是唯一会同时出现两个按钮的行：立即重试 + 取消。
+ */
+export function canCancel(j: TransferJob): boolean {
+  return isSending(j.direction) && isActive(j.status)
 }
 
 /**
@@ -163,6 +191,9 @@ export const useTransferStore = defineStore('transfer', () => {
         nextStatus !== 'idle' && nextStatus !== 'queued' ? undefined : prev.waitReason,
       speed: p.speed ?? prev.speed,
       etaMs: p.etaMs ?? prev.etaMs,
+      // 续传起点：事件只在真的续传时带它，所以缺省时沿用上一条 —— 抹成
+      // undefined 会让「续传自 XX%」在传输途中一闪消失（绝大多数帧都不带）。
+      resumeFromPercent: p.resumeFromPercent ?? prev.resumeFromPercent,
       updatedAt: Date.now()
     }
     // 名字由发起方从本地路径填好了，大小/分块数只能向后端要。

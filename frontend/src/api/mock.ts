@@ -214,6 +214,46 @@ export function createMockApi(): SwarmApi {
       batchId: SEED_BATCH,
       relPath: '照片/报告.pdf',
       updatedAt: now - 5 * 60_000
+    },
+    // 下面两条是给【全局传输队列浮层】预置的。理由与上面那条文件夹批次一样：
+    // 浏览器里没有原生文件对话框，pickFile 点不出来，于是浮层（只在有未结束
+    // 任务时才渲染）在预览模式下永远看不到，走查等于没走。
+    //
+    // 一条「正在传」+ 一条「已暂停」，是为了把浮层上全部四种形态都摆出来：
+    // 并发数（1/3）、总网速（只有正在传的贡献）、总进度（分母含排队中的那个
+    // 12MB）、以及按钮在「暂停全部 ⇄ 全部恢复」之间的切换。
+    //
+    // 刻意【不挂模拟定时器】：浮层要验的是布局与文案，挂上定时器反而会在三五
+    // 秒内把它自己跑成 done，把要检查的形态跑没（速度沿用真实事件里的量级）。
+    {
+      jobId: 'mock-live-1',
+      peerId: ALICE,
+      fileName: 'dataset-2024-q3.tar.zst',
+      fileSize: 486 * 1024 * 1024,
+      direction: 'send',
+      localPath: '',
+      completed: 158,
+      totalChunks: 972,
+      percent: 42,
+      // 起点 12% + 当前 42%：正是「续传自」最该被看懂的形态。
+      // 不预置的话，那颗标记在预览模式里永远渲染不到（浏览器里没有真实续传）。
+      resumeFromPercent: 12,
+      speed: 6.4 * 1024 * 1024,
+      status: 'transferring',
+      updatedAt: now - 2_000
+    },
+    {
+      jobId: 'mock-paused-1',
+      peerId: BOB,
+      fileName: '会议录像.mp4',
+      fileSize: 218 * 1024 * 1024,
+      direction: 'send',
+      localPath: '',
+      completed: 66,
+      totalChunks: 436,
+      percent: 31,
+      status: 'paused',
+      updatedAt: now - 30_000
     }
   ]
 
@@ -895,18 +935,33 @@ export function createMockApi(): SwarmApi {
     },
     // 预览模式下没有真实传输：这两个动作只把状态改到位，
     // 保证「等待对方上线 → 取消 / 立即重试」这两条交互在浏览器里能走通。
+    //
+    // 判据与后端 CancelJob 对齐（只有本机发出的、且未结束的任务能取消；
+    // 「正在传」也允许）：预览模式下按钮的可用性与点下去的反馈才和真机一致。
+    //
+    // 改完状态必须自己 emit 一次 transfer:state —— 真机是后端推这条事件，
+    // 而这里改的是夹具数组里的【原始对象】，绕过 store 那份响应式副本，
+    // 不推事件的话界面要等下一次别的渲染才更新（表现为「点了没反应」）。
     async cancelTransfer(jobId) {
       const j = jobs.find((x) => x.jobId === jobId)
       if (!j) throw new Error('任务不存在')
+      if (j.direction === 'recv') throw new Error('只能取消本机发出的任务')
+      if (j.status === 'done' || j.status === 'cancelled') {
+        throw new Error('任务已结束，无需取消')
+      }
       j.status = 'cancelled'
       j.waitReason = undefined
       stopSimTimer(jobId)
+      emit(EV.transferState, { jobId, status: 'cancelled' })
     },
     async retryTransfer(jobId) {
       const j = jobs.find((x) => x.jobId === jobId)
       if (!j) throw new Error('任务不存在')
       j.waitReason = undefined
-      j.status = 'active'
+      // 后端重试后落的是 idle（等待原因清空、等调度重新捡起），不是造一个
+      // 叫 active 的新状态 —— 夹具里的每个 status 都必须是后端真会写出来的值。
+      j.status = 'idle'
+      emit(EV.transferState, { jobId, status: 'idle' })
     },
     // 暂停/恢复的判据与后端 PauseJob/ResumeJob 对齐（只有正在传的能暂停、
     // 只有暂停中的能恢复）：预览模式下按钮的可用性与点下去的反馈才和真机一致。
@@ -919,6 +974,7 @@ export function createMockApi(): SwarmApi {
       j.status = 'paused'
       j.updatedAt = Date.now()
       stopSimTimer(jobId)
+      emit(EV.transferState, { jobId, status: 'paused' })
     },
     async resumeTransfer(jobId) {
       const j = jobs.find((x) => x.jobId === jobId)
@@ -927,6 +983,7 @@ export function createMockApi(): SwarmApi {
       j.status = 'transferring'
       j.updatedAt = Date.now()
       startSimTimer(jobId)
+      emit(EV.transferState, { jobId, status: 'transferring' })
     },
 
     async self() {

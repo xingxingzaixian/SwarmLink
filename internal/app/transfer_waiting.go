@@ -280,6 +280,11 @@ func (a *TransferApp) isStarting(jobID string) bool {
 // （UDP 通告）都要订阅 —— 只订阅前者会漏掉「对端一直在广播但没建连」
 // 这种最常见的离线恢复场景（那时它是 discovered，不是 online）。
 func (a *TransferApp) Start(ctx context.Context) {
+	// 调度补位循环与事件订阅无关，所以放在 bus 判空之前：它是「额度一空就
+	// 立刻拉下一条」的唯一实现，少了它并发补位就退回 1 秒节拍，一个几百个
+	// 小文件的批次会慢一个数量级。ctx 结束即退出。
+	go a.schedulerLoop(ctx)
+
 	if a.bus == nil {
 		return
 	}
@@ -346,12 +351,18 @@ func (a *TransferApp) startDue(ctx context.Context, jobs []transfer.Job) {
 	a.startJobs(ctx, due)
 }
 
-// startJobs 尝试启动给定任务：同一对端同一时刻只启动一个。
+// startJobs 尝试启动给定任务：受【全局】并发额度约束，不再有每对端限制。
 //
-// 这一条是为了防哈希风暴：对方一上线，10 个等待任务同时开始整文件哈希，
-// 磁盘会先崩。其余任务留到下一轮（或下一个事件）—— 它们不会丢。
+// 为什么不再限制每对端（D-11）：那条规则本来就只写在调度路径上，
+// 而用户直接发送的多个文件从来不受它约束（各自独立 goroutine 抢全局额度）——
+// 保留它等于让「文件夹批次」比「手动一个个发」慢 N 倍。防哈希风暴靠的
+// 也不是它，而是下面这行：额度在【哈希之前】就已经占住了。
+//
+// 额度占不到就【停止本轮】而不是继续起 goroutine：一个几千条的批次会因此
+// 变成几千个阻塞在信号量上的 goroutine，而且它们身上的取消标记要等到
+// 真拿到额度、白算完一整遍哈希之后才会被看到。剩下的留给下一轮
+// （sweep 的 1 秒节拍，以及槽位释放时的 kick）—— 它们不会丢。
 func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
-	busy := a.busyPeers()
 	for _, j := range jobs {
 		// 只自动拉起「可自动拉起」的任务：等对方上线的，以及文件夹批次里
 		// 排队等轮到的（WaitQueued）。
@@ -367,16 +378,19 @@ func (a *TransferApp) startJobs(ctx context.Context, jobs []transfer.Job) {
 		if !j.WaitReason.AutoStartable() {
 			continue
 		}
-		if busy[j.PeerID] {
-			continue
-		}
 		if !a.claimStarting(j.JobID) {
 			continue
 		}
-		busy[j.PeerID] = true
+		if !a.trySendSlot() {
+			// 额度满了：连它一起放回队列（抢占也要退掉），本轮到此为止。
+			a.releaseStarting(j.JobID)
+			return
+		}
 		go func(job transfer.Job) {
 			defer a.releaseStarting(job.JobID)
-			_, _ = a.sendFile(ctx, job.PeerID, job.LocalPath, job.JobID, false)
+			// 额度由调度器预留，由这里归还（sendFile 收 slotHeld=true）。
+			defer a.releaseSendSlot()
+			_, _ = a.sendFile(ctx, job.PeerID, job.LocalPath, job.JobID, false, true)
 		}(j)
 	}
 }
@@ -506,15 +520,70 @@ func (a *TransferApp) Recover(ctx context.Context) {
 	}
 }
 
-// busyPeers 返回「已经有任务在传」的对端集合。
-func (a *TransferApp) busyPeers() map[identity.NodeID]bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make(map[identity.NodeID]bool, len(a.senders))
-	for _, sj := range a.senders {
-		out[sj.job.PeerID] = true
+// ---------------------------------------------------------------------------
+// 并发额度（全局，不再有每对端限制：D-11）
+//
+// 额度只有一个语义来源：sendSem 的容量。过去它只在 sendFile 里阻塞获取，
+// 于是「到点就起 goroutine、再阻塞排队」—— 批次的队列长度直接变成 goroutine
+// 数量。现在调度路径改成先占位再起（见 startJobs），两者数量严格相等。
+// ---------------------------------------------------------------------------
+
+// trySendSlot 尝试非阻塞地占一个全局并发额度。
+func (a *TransferApp) trySendSlot() bool {
+	select {
+	case a.sendSem <- struct{}{}:
+		return true
+	default:
+		return false
 	}
-	return out
+}
+
+// acquireSendSlot 阻塞获取一个额度（只给用户直接发起的路径用）：用户按下的
+// 按钮最终一定要跑起来，哪怕要等一会儿。ctx 结束即放弃。
+func (a *TransferApp) acquireSendSlot(ctx context.Context) error {
+	select {
+	case a.sendSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releaseSendSlot 归还一个额度，并顺手请求一次补位。
+//
+// 必须【持有额度时】调用：它就是对 sendSem 的一次接收。
+func (a *TransferApp) releaseSendSlot() {
+	<-a.sendSem
+	a.kickSweep()
+}
+
+// kickSweep 请求「尽快补位」（非阻塞、自动合并）。
+func (a *TransferApp) kickSweep() {
+	if a.kick == nil {
+		return
+	}
+	select {
+	case a.kick <- struct{}{}:
+	default:
+	}
+}
+
+// schedulerLoop 把「额度空出来了」这件事转成一次调度。
+//
+// 它只决定「什么时候」再扫一遍，不改变任何语义：没有到点的任务就不会有
+// 额度释放，也就不会有信号 —— 不存在自旋。bootstrap 的 1 秒 sweep 仍是兜底。
+func (a *TransferApp) schedulerLoop(ctx context.Context) {
+	if a.kick == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.kick:
+			a.SweepWaiting(ctx)
+		}
+	}
 }
 
 // CancelJob 取消一条任务：排队/等待中、或已暂停的直接落取消；正在传输的通过
@@ -626,7 +695,9 @@ func (a *TransferApp) RetryNow(ctx context.Context, jobID string) error {
 	}
 	go func() {
 		defer a.releaseStarting(jobID)
-		_, _ = a.sendFile(ctx, j.PeerID, j.LocalPath, j.JobID, true) // force：真拨一次
+		// force：真拨一次；slotHeld=false：用户点的按钮自己等一个并发额度，
+		// 与直接发送同一条语义（不会因为额度满就永远不动）。
+		_, _ = a.sendFile(ctx, j.PeerID, j.LocalPath, j.JobID, true, false)
 	}()
 	return nil
 }

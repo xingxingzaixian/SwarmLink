@@ -204,7 +204,8 @@ func (a *TransferApp) ResumeJob(ctx context.Context, jobID string) error {
 		go func() {
 			// force：用户点了恢复就是要真的试一次，哪怕目录说对方离线
 			// （与「立即重试」同一口径，见 sendFile 的 force 参数）。
-			_, _ = a.sendFile(ctx, j.PeerID, j.LocalPath, jobID, true)
+			// slotHeld=false：与直接发送同一条语义，自己等一个并发额度。
+			_, _ = a.sendFile(ctx, j.PeerID, j.LocalPath, jobID, true, false)
 		}()
 		return nil
 	}
@@ -304,7 +305,8 @@ func (a *TransferApp) HandleFileResume(_ ports.Session, f protocol.Frame) error 
 		defer a.releaseStarting(r.JobID)
 		// 重走 META（架构书 3.6）：发送侧内存里的位图只是「对端 ACK 过的
 		// 部分」，暂停期间对端可能已落盘更多块，必须重新协商续传起点。
-		_, _ = a.sendFile(context.Background(), j.PeerID, j.LocalPath, r.JobID, true)
+		// slotHeld=false：对端恢复触发的自动继续同样自己等一个并发额度。
+		_, _ = a.sendFile(context.Background(), j.PeerID, j.LocalPath, r.JobID, true, false)
 	}()
 	return nil
 }

@@ -80,9 +80,9 @@ func batchRootOf(j transfer.Job) (string, bool) {
 // SendFolderAs 枚举目录、建好一批排队任务后立即返回。
 //
 // 为什么立即返回而不是「等整批传完」：传输由既有的三个触发点
-// （SweepWaiting / WakePeer / Recover）驱动，且 startJobs 已经保证同一对端
-// 同时只传一个 —— 整批天然串行、天然继承离线等待与断点续传，一行新调度
-// 都不用写。
+// （SweepWaiting / WakePeer / Recover）驱动，startJobs 按全局额度同时拉起
+// 最多 max_concurrent 条（D-11 之前是「同一对端一条」）—— 整批天然继承并发
+// 预算、离线等待与断点续传，一行新调度都不用写。
 //
 // 为什么枚举不哈希：一个 10GB 的文件夹为了「开始发送」先读一整遍磁盘，
 // 用户会以为程序卡死。哈希仍在单个文件真的要传的那一刻做（同 sendFile），
@@ -149,7 +149,7 @@ func (a *TransferApp) SendFolderAs(
 	sum.BatchID, sum.FolderName, sum.Skipped = batchID, rootName, skipped
 
 	// 立刻试第一轮：否则用户要等下一个 1 秒节拍才看到任何动静。
-	// 其余任务由 sweep 依次拉起（同一对端同时只传一个）。
+	// 其余任务由 sweep 与「额度释放补位」依次拉起（同时最多 max_concurrent 条）。
 	a.startJobs(ctx, jobs)
 	return sum, nil
 }

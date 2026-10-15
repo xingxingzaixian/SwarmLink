@@ -125,7 +125,13 @@ type TransferDTO struct {
 	Completed   int64   `json:"completed"`
 	TotalChunks int     `json:"totalChunks"`
 	Percent     float64 `json:"percent"`
-	Status      string  `json:"status"`
+	// ResumeFromPercent 是【本次尝试的起点】百分比：>0 表示这条是从上次的
+	// 半截续传的，界面显示「续传自 XX%」；0（omitempty 直接省掉）表示从头传。
+	//
+	// 与 Percent 并列而不是塞进 percent：两者回答的是不同的问题 ——
+	// 「现在到哪儿了」与「这次从哪儿接上」。
+	ResumeFromPercent float64 `json:"resumeFromPercent,omitempty"`
+	Status            string  `json:"status"`
 	// WaitReason 非空表示这条任务在等：`peer_offline`（等对端上线）或
 	// `batch_queued`（文件夹批次里排队等前一个传完）。
 	// 界面靠它区分「等待对方上线」与「排队中」—— 两者在 status 上都是 idle/queued。
@@ -151,13 +157,16 @@ func ToTransferDTO(j transfer.Job) TransferDTO {
 		Completed:   j.Completed,
 		TotalChunks: j.TotalChunks,
 		Percent:     j.Percent(),
-		Status:      string(j.Status),
-		WaitReason:  string(j.WaitReason),
-		BatchID:     j.BatchID,
-		RelPath:     j.RelPath,
-		IsDir:       j.IsDir,
-		Error:       j.Error,
-		UpdatedAt:   j.UpdatedAt.UnixMilli(),
+		// 起点百分比由领域层算（ResumeFrom / TotalChunks）：界面与用例看的是
+		// 同一个数，不在装配层再取一次整。
+		ResumeFromPercent: j.ResumePercent(),
+		Status:            string(j.Status),
+		WaitReason:        string(j.WaitReason),
+		BatchID:           j.BatchID,
+		RelPath:           j.RelPath,
+		IsDir:             j.IsDir,
+		Error:             j.Error,
+		UpdatedAt:         j.UpdatedAt.UnixMilli(),
 	}
 }
 

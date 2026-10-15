@@ -10,7 +10,7 @@ import { computed } from "vue";
 import Icon from "./Icon.vue";
 import { getApi } from "../api";
 import type { TransferJob } from "../api/types";
-import { canPause, isActive, isPaused, isWaiting } from "../stores/transfer";
+import { canCancel, canPause, isActive, isPaused, isWaiting } from "../stores/transfer";
 import { usePeersStore } from "../stores/peers";
 import { useUiStore } from "../stores/ui";
 import {
@@ -53,7 +53,15 @@ async function retry(j: TransferJob): Promise<void> {
   }
 }
 
-/** 取消一条等待中的任务。正在传的任务后端会拒绝（没有中断点，假取消更糟）。 */
+/**
+ * 取消一条任务（等待中 / 排队中 / 正在传 / 已暂停都走这里）。
+ *
+ * 后端对「正在传」的取消不是假动作：它给发送路径发中断点，由那条路径干净
+ * 退出并落 cancelled，半截临时文件保留 —— 下次重发仍按位图续传。
+ *
+ * 只有一种会被拒：接收侧的任务（后端只允许取消本机发出的），以及仓储写着
+ * 「在传」但实际没有在跑的 goroutine 的崩溃陈行。两者的错误文案原样透给用户。
+ */
 async function cancel(j: TransferJob): Promise<void> {
   try {
     await (await getApi()).cancelTransfer(j.jobId);
@@ -130,6 +138,17 @@ function nameOf(j: TransferJob): string {
 function doneBytes(j: TransferJob): number {
   return transferredBytes(j.fileSize, percentOf(j), j.status === "done");
 }
+
+/**
+ * 「续传自 XX%」的文案；没有起点（从头传）时返回空串。
+ *
+ * 不足 1% 也当没有：一条从 0.4% 接上的任务，显示「续传自 0%」比不显示更让人
+ * 困惑 —— 那个数字看起来像出错，而它想说的只是「没从头发」。
+ */
+function resumeText(j: TransferJob): string {
+  const pct = Math.round(j.resumeFromPercent || 0);
+  return pct >= 1 ? `续传自 ${pct}%` : "";
+}
 </script>
 
 <template>
@@ -163,6 +182,17 @@ function doneBytes(j: TransferJob): number {
             <div class="name nowrap" :title="j.error || nameOf(j)">
               {{ nameOf(j) || "正在获取文件名…" }}
             </div>
+
+            <!-- 续传起点（规格 FR-06-1）。放在文件名这一行而不是下面那行数字里：
+                 文件名的盒子本来就带省略号，多一个标记它先让步；
+                 下面那行在 330px 的右栏里已经很挤，再加就会压到进度与按钮。 -->
+            <span
+              v-if="resumeText(j)"
+              class="tag"
+              title="这条任务从上次中断处继续，不是从头开始"
+            >
+              {{ resumeText(j) }}
+            </span>
           </div>
 
           <div class="bottom">
@@ -191,7 +221,11 @@ function doneBytes(j: TransferJob): number {
               {{ transferStatus(j.status, j.waitReason).text }}
             </span>
 
-            <!-- 末尾固定两个槽位，保证各行右侧对齐（等待中占用两格） -->
+            <!-- 末尾固定两个槽位，保证各行右侧对齐。
+                 左槽放「主操作」，四种互斥情形各占一种：等待→立即重试、
+                 已完成→定位文件、在传→暂停、已暂停→恢复。
+                 右槽放「取消」：只有本机发出且未结束的任务才有，因此它会与
+                 上面任意一种并存（例如「在传」一行是 [暂停][取消]）。 -->
             <button
               v-if="isWaiting(j)"
               class="reveal"
@@ -219,17 +253,6 @@ function doneBytes(j: TransferJob): number {
             >
               <Icon name="pause" :size="13" />
             </button>
-            <span v-else class="reveal-ph" />
-
-            <button
-              v-if="isWaiting(j)"
-              class="reveal"
-              title="取消传输"
-              aria-label="取消传输"
-              @click="cancel(j)"
-            >
-              <Icon name="x" :size="13" />
-            </button>
             <button
               v-else-if="isPaused(j)"
               class="reveal"
@@ -238,6 +261,17 @@ function doneBytes(j: TransferJob): number {
               @click="resume(j)"
             >
               <Icon name="play" :size="13" />
+            </button>
+            <span v-else class="reveal-ph" />
+
+            <button
+              v-if="canCancel(j)"
+              class="reveal danger"
+              title="取消传输（半截文件保留，重新发送时可续传）"
+              aria-label="取消传输"
+              @click="cancel(j)"
+            >
+              <Icon name="x" :size="13" />
             </button>
             <span v-else class="reveal-ph" />
           </div>
@@ -378,6 +412,12 @@ function doneBytes(j: TransferJob): number {
 .reveal:hover {
   background: var(--bg-hover);
   color: var(--accent);
+}
+
+/* 取消是破坏性操作：同一行里它与「暂停」并排，悬停颜色必须能分开 ——
+   两个按钮都变强调色的话，用户分不清哪个是「停下」哪个是「作废」。 */
+.reveal.danger:hover {
+  color: var(--danger);
 }
 
 /* 占位：与按钮等宽，保证各行末尾对齐。 */

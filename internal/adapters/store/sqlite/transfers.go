@@ -27,7 +27,7 @@ func NewTransfers(db *DB) *Transfers { return &Transfers{db: db} }
 const transferColumns = `job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
                          window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at,
-                         batch_id, rel_path, is_dir`
+                         batch_id, rel_path, is_dir, resume_from`
 
 // UpsertJob 写入/更新传输任务。
 func (t *Transfers) UpsertJob(j transfer.Job) error {
@@ -36,8 +36,8 @@ func (t *Transfers) UpsertJob(j transfer.Job) error {
 INSERT INTO transfer_jobs(job_id, peer_id, file_name, file_size, file_hash, chunk_size, total_chunks,
                          direction, local_path, temp_path, completed, chunk_bitmap, status,
                          window_size, retry_count, wait_reason, next_try_at, error, created_at, updated_at,
-                         batch_id, rel_path, is_dir)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         batch_id, rel_path, is_dir, resume_from)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(job_id) DO UPDATE SET
   file_name    = excluded.file_name,
   file_size    = excluded.file_size,
@@ -56,13 +56,14 @@ ON CONFLICT(job_id) DO UPDATE SET
   batch_id     = excluded.batch_id,
   rel_path     = excluded.rel_path,
   is_dir       = excluded.is_dir,
+  resume_from  = excluded.resume_from,
   error        = excluded.error,
   updated_at   = excluded.updated_at`,
 			j.JobID, j.PeerID.String(), j.FileName, j.FileSize, j.FileHash, j.ChunkSize, j.TotalChunks,
 			string(j.Direction), j.LocalPath, j.TempPath, j.Completed, j.Bitmap.Bytes(), j.Status.DBStatus(),
 			j.WindowSize, j.RetryCount, string(j.WaitReason), msOf(j.NextTryAt), j.Error,
 			msOf(j.CreatedAt), msOf(j.UpdatedAt),
-			j.BatchID, j.RelPath, j.IsDir,
+			j.BatchID, j.RelPath, j.IsDir, j.ResumeFrom,
 		)
 		return err
 	})
@@ -310,7 +311,7 @@ func scanTransfer(s rowScanner) (transfer.Job, error) {
 		&out.JobID, &peerID, &out.FileName, &out.FileSize, &out.FileHash, &out.ChunkSize,
 		&out.TotalChunks, &direction, &out.LocalPath, &tempPath, &out.Completed, &bitmap,
 		&status, &out.WindowSize, &out.RetryCount, &waitReason, &nextTryAt, &errMsg,
-		&createdAt, &updatedAt, &batchID, &relPath, &isDir,
+		&createdAt, &updatedAt, &batchID, &relPath, &isDir, &out.ResumeFrom,
 	); err != nil {
 		return out, err
 	}

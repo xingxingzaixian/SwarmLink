@@ -727,12 +727,12 @@ func (s *TransferService) ListBatch(batchID string) ([]TransferDTO, error) {
 	return out, nil
 }
 
-// CancelTransfer 取消一条尚未开始的传输任务（等待中的那种）。
+// CancelTransfer 取消一条传输任务：排队/等待中、已暂停、正在传的都能取消。
 //
 // 正在传输的任务也能取消：sender 有中断点，状态由发送路径落成 cancelled，
 // 半截临时文件【保留】以便下次按位图续传。
-// 仍会被拒绝的只有一种：仓储说「在传」、实际没有在跑的 goroutine（崩溃陈行）
-// —— 接受它只会给出一个假动作。
+// 仍会被拒绝的有两类：接收侧的任务（只允许取消本机发出的），以及仓储说
+// 「在传」、实际没有在跑的 goroutine（崩溃陈行）—— 接受它只会给出一个假动作。
 func (s *TransferService) CancelTransfer(jobID string) error {
 	if jobID == "" {
 		return fmt.Errorf("请选择任务")

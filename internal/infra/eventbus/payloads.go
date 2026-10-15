@@ -63,6 +63,14 @@ type TransferProgress struct {
 	Speed   float64 // 字节/秒（滑动窗口计算，非瞬时值）
 	ETA     time.Duration
 	Status  string
+	// ResumeFromPercent 是【本次尝试的起点】百分比（0 = 从头传）。
+	//
+	// 它是这条载荷里唯一不随帧变化的字段，为什么仍然搭进度事件走：续传起点是
+	// 在 FILE_META_ACK 之后才定下来的，那一刻没有任何事件；而「收到状态变化
+	// 就去重读整行」这条路会把库里滞后的进度盖回界面（发送侧的进度根本
+	// 不落库，见 sendFile 的注释）。搭进度事件是唯一不会说谎的载体，
+	// 且只有真的续传过的任务才带上它（装配层按 >0 才放这个键）。
+	ResumeFromPercent float64
 }
 
 // TransferState 是 transfer.state 的载荷。

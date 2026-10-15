@@ -102,6 +102,15 @@ type TransferApp struct {
 	pausedByPeer map[string]bool
 
 	sendSem chan struct{}
+
+	// kick 用来「槽位一空就补位」。
+	//
+	// 只靠 bootstrap 的 1 秒 sweep 兜底的话，并发的补位粒度会被节拍卡住：
+	// 一个「10 个小文件」的批次会退化成每秒钟起 N 个。这里让归还槽位的一方
+	// 顺手敲一下，由 Start 起的循环立刻走一次 SweepWaiting。
+	//
+	// 容量 1 + 非阻塞投递 = 天然合并：连敲多次只欠一次 sweep。
+	kick chan struct{}
 }
 
 type chunkAck struct {
@@ -144,6 +153,37 @@ type sendJob struct {
 	// 取消落 status=cancelled 且再也不自动开始。
 	pause    chan struct{}
 	pauseOne sync.Once
+
+	// stopped 在本次尝试的 goroutine 退出时关闭。
+	//
+	// 存在理由只有一条：ACK 是由【会话读循环】投进来的（见 HandleFileChunkAck
+	// 等），而那个 goroutine 是整条会话共用的。一条已经退出的任务若让投递阻塞
+	// （缓冲区满了），它会把该对端上所有其它任务、心跳与聊天一起堵死。
+	// 同一对端可以并行多条（D-11）之后，这从「理论」变成「迟早」。
+	stopped    chan struct{}
+	stoppedOne sync.Once
+}
+
+// markStopped 标记本次尝试已结束（幂等）。
+func (sj *sendJob) markStopped() { sj.stoppedOne.Do(func() { close(sj.stopped) }) }
+
+// deliverAck 把一帧 ACK 投给本次尝试；尝试已结束则直接放弃，绝不阻塞调用方。
+//
+// 刻意不做「缓冲区满就丢弃」：位图 ACK 是累积全量、丢一帧虽然无害，但
+// META 阶段的 reject 是一次性信号，丢不起。这里只区分「消费者已死」。
+func (sj *sendJob) deliverAck(ck chunkAck) {
+	select {
+	case sj.ackCh <- ck:
+	case <-sj.stopped:
+	}
+}
+
+// deliverDone 与 deliverAck 同构，用于 FILE_DONE_ACK。
+func (sj *sendJob) deliverDone(da doneAck) {
+	select {
+	case sj.doneCh <- da:
+	case <-sj.stopped:
+	}
 }
 
 // isCancelled 报告是否已收到取消信号（非阻塞）。
@@ -213,6 +253,7 @@ func NewTransferApp(
 		pausedByUser:        make(map[string]bool),
 		pausedByPeer:        make(map[string]bool),
 		sendSem:             make(chan struct{}, maxConc),
+		kick:                make(chan struct{}, 1),
 	}
 }
 
@@ -247,18 +288,24 @@ func (a *TransferApp) SendFileAs(
 		return transfer.Job{}, fmt.Errorf("transfer: job %s 已在传输中", jobID)
 	}
 	defer a.releaseStarting(jobID)
-	return a.sendFile(ctx, peerID, path, jobID, false)
+	return a.sendFile(ctx, peerID, path, jobID, false, false)
 }
 
 // sendFile 是「一次传输尝试」的实现。force 为真时【跳过】"对端看起来不可达"
 // 的快速判定 —— 只给「立即重试」用：用户点了按钮就是想要真的试一次，
 // 哪怕目录说对方离线（目录可能滞后于现实）。
+//
+// slotHeld 表示调用方【已经】预留了全局并发额度（调度路径由 startJobs 预留）。
+// 为真时本函数不再获取、也不归还：额度的生命周期归属调用方。直连路径
+// （SendFileAs / RetryNow）传假，自己阻塞等一个额度 —— 用户按下的按钮
+// 最终一定要跑起来，这条语义与 D-07 之前完全一致。
 func (a *TransferApp) sendFile(
 	ctx context.Context,
 	peerID identity.NodeID,
 	path string,
 	jobID string,
 	force bool,
+	slotHeld bool,
 ) (job transfer.Job, err error) {
 	if jobID == "" {
 		return transfer.Job{}, fmt.Errorf("transfer: job_id 不能为空")
@@ -280,6 +327,14 @@ func (a *TransferApp) sendFile(
 	// 其余状态一律拒绝 —— 尤其 done/cancelled，绝不能借恢复之名复活。
 	if prevErr == nil && prev.Status != transfer.StateIdle && prev.Status != transfer.StatePaused {
 		return transfer.Job{}, fmt.Errorf("transfer: 任务已不在等待中（当前 %s）", prev.Status)
+	}
+
+	// 把旧行搬进命名返回值：早退路径（本地检查失败 / 取消）会用它写终态行，
+	// 而 job 直到下面的整份字面量赋值之前都是零值 —— 用零值 UpsertJob 会把
+	// 文件名、批次 id 与相对路径一起抹成空（文件夹卡片随即算不出进度）。
+	// 下面那次整份赋值不受影响，它本来就要重建这一行。
+	if prevErr == nil {
+		job = prev
 	}
 
 	// 目录条目（空目录占位）的线上形状与文件不同：零字节、无分块、无哈希。
@@ -380,21 +435,23 @@ func (a *TransferApp) sendFile(
 	}
 	st, serr := os.Stat(path)
 	if serr != nil {
-		return transfer.Job{}, fmt.Errorf("transfer: %w", serr)
+		// 返回 job（而不是零值）：统一出口会把它写成终态行，零值会把
+		// 旧行的文件名/批次字段抹掉（见上面 job = prev 的注释）。
+		return job, fmt.Errorf("transfer: %w", serr)
 	}
 	if st.IsDir() != isDir {
 		// 两侧都要拦：目录条目把文件当路径（改名/重建后会出现），
 		// 文件任务把目录当路径（历史行为，文案保持不变）。
 		if st.IsDir() {
-			return transfer.Job{}, fmt.Errorf("transfer: %s is a directory", path)
+			return job, fmt.Errorf("transfer: %s is a directory", path)
 		}
-		return transfer.Job{}, fmt.Errorf("transfer: %s 不是目录（任务标记为目录条目）", path)
+		return job, fmt.Errorf("transfer: %s 不是目录（任务标记为目录条目）", path)
 	}
 	statSize := st.Size()
 	if isDir {
 		statSize = 0 // 目录条目零字节：st.Size() 在目录上是平台相关的元数据大小
 	} else if transfer.ChunkCount(statSize, chunkSize) == 0 {
-		return transfer.Job{}, fmt.Errorf("transfer: empty file")
+		return job, fmt.Errorf("transfer: empty file")
 	}
 
 	// 2) 对端明显不在 → 直接落等待，连哈希都不做。
@@ -410,11 +467,20 @@ func (a *TransferApp) sendFile(
 		return a.markWaiting(fresh, jobID, peerID, path, nil), nil
 	}
 
-	select {
-	case a.sendSem <- struct{}{}:
-		defer func() { <-a.sendSem }()
-	case <-ctx.Done():
-		return transfer.Job{}, ctx.Err()
+	// 并发额度：调度路径已由 startJobs 预留（slotHeld），这里不再重复占；
+	// 直连路径自己等一个（见 sendFile 的文档注释）。
+	if !slotHeld {
+		if err := a.acquireSendSlot(ctx); err != nil {
+			return job, err
+		}
+		defer a.releaseSendSlot()
+	}
+
+	// 拿到额度之后再看一眼取消标记：用户点取消的时机大概率落在「排队等额度」
+	// 那段窗口里，而整文件哈希是分钟级的 —— 不拦在这里，就等于为一条已经被
+	// 取消的任务白读一整遍磁盘。
+	if a.isCancelling(jobID) {
+		return job, errJobCancelled
 	}
 
 	// 目录条目没有内容可哈希、也没有分块：它的全部就是 META → ACK → DONE。
@@ -424,11 +490,11 @@ func (a *TransferApp) sendFile(
 	if !isDir {
 		h, hs, sz, herr := hashFileChunks(path, chunkSize)
 		if herr != nil {
-			return transfer.Job{}, fmt.Errorf("transfer: hash %s: %w", path, herr)
+			return job, fmt.Errorf("transfer: hash %s: %w", path, herr)
 		}
 		fileHash, chunkHashes, size = h, hs, sz
 		if total = transfer.ChunkCount(size, chunkSize); total == 0 {
-			return transfer.Job{}, fmt.Errorf("transfer: empty file")
+			return job, fmt.Errorf("transfer: empty file")
 		}
 	}
 
@@ -508,9 +574,13 @@ func (a *TransferApp) sendFile(
 		lastSent: make(map[int]time.Time),
 		cancel:   make(chan struct{}),
 		pause:    make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
 	a.putSender(sj)
 	defer a.dropSender(job.JobID)
+	// 顺序有意：先标记「本次尝试已结束」，再从表里摘掉。反过来的话，
+	// 已经拿到 sj 的会话读循环会在这个窗口里阻塞在满缓冲的 ackCh 上。
+	defer sj.markStopped()
 
 	// 第一段：元数据（始终携带全量 chunk_hashes，简化 > 省流）
 	metaPayload, err := protocol.EncodeJSON(protocol.FileMeta{
@@ -542,6 +612,20 @@ func (a *TransferApp) sendFile(
 			return job, fmt.Errorf("%w: %s", errPeerReject, ck.reject)
 		}
 		sj.acked.OrBits(ck.bitmap)
+		// 对端回的位图就是【本次尝试的起点】：从头传时它是空的（ResumeFrom=0），
+		// 续传时它是"从第几块接上"。
+		//
+		// 这里写一次库、之后不再写：发送侧的进度本来就不落库（runSender 不碰
+		// 仓储），所以这一笔落下的正是"起点"这个不动的数 —— 交给界面的
+		// 「续传自 XX%」，以及重启后仍然看得出这条是从半截续的。
+		sj.job.ResumeFrom = int64(sj.acked.CompletedCount())
+		sj.job.Bitmap = sj.acked.Copy()
+		sj.job.Completed = sj.job.ResumeFrom
+		job = sj.job
+		job.UpdatedAt = a.clk.Now()
+		if err := a.store.UpsertJob(job); err != nil {
+			return job, err
+		}
 	case <-sj.cancel:
 		return job, errJobCancelled
 	case <-sj.pause:
@@ -711,6 +795,8 @@ func (a *TransferApp) publishSendProgress(sj *sendJob, last *time.Time) {
 		Speed:   sj.rate.Speed(),
 		ETA:     sj.rate.ETA(sj.job.FileSize - done),
 		Status:  string(transfer.StateTransferring),
+		// 本次尝试的起点（在 FILE_META_ACK 处定下来，见 sendFile）。
+		ResumeFromPercent: sj.job.ResumePercent(),
 	})
 }
 
@@ -844,6 +930,9 @@ func (a *TransferApp) HandleFileMeta(sess ports.Session, f protocol.Frame) error
 		job.TempPath = existing.TempPath
 		job.LocalPath = existing.LocalPath
 		job.Completed = int64(inherited.CompletedCount())
+		// 继承来的位图也就是【本次尝试的起点】：界面据此显示「续传自 XX%」。
+		// 新任务从头收时它保持 0，那句提示也就不出现。
+		job.ResumeFrom = job.Completed
 		handle = ports.SinkHandle{
 			JobID: meta.JobID, TempPath: existing.TempPath, FinalPath: existing.LocalPath,
 		}
@@ -1079,7 +1168,7 @@ func (a *TransferApp) HandleFileMetaAck(_ ports.Session, f protocol.Frame) error
 	// DecodeBase64("") 直接报错，排在后面就永远走不到。
 	if ack.Reject != "" {
 		if sj := a.getSender(ack.JobID); sj != nil {
-			sj.ackCh <- chunkAck{reject: ack.Reject}
+			sj.deliverAck(chunkAck{reject: ack.Reject})
 		}
 		return nil
 	}
@@ -1088,7 +1177,7 @@ func (a *TransferApp) HandleFileMetaAck(_ ports.Session, f protocol.Frame) error
 		return nil
 	}
 	if sj := a.getSender(ack.JobID); sj != nil {
-		sj.ackCh <- chunkAck{bitmap: bm, completed: ack.CompletedChunks}
+		sj.deliverAck(chunkAck{bitmap: bm, completed: ack.CompletedChunks})
 	}
 	return nil
 }
@@ -1104,7 +1193,7 @@ func (a *TransferApp) HandleFileChunkAck(_ ports.Session, f protocol.Frame) erro
 		return nil
 	}
 	if sj := a.getSender(ack.JobID); sj != nil {
-		sj.ackCh <- chunkAck{bitmap: bm, completed: ack.CompletedChunks}
+		sj.deliverAck(chunkAck{bitmap: bm, completed: ack.CompletedChunks})
 	}
 	return nil
 }
@@ -1116,7 +1205,7 @@ func (a *TransferApp) HandleFileDoneAck(_ ports.Session, f protocol.Frame) error
 		return err
 	}
 	if sj := a.getSender(ack.JobID); sj != nil {
-		sj.doneCh <- doneAck{ok: ack.OK, err: ack.Error}
+		sj.deliverDone(doneAck{ok: ack.OK, err: ack.Error})
 	}
 	return nil
 }
@@ -1257,6 +1346,8 @@ func (a *TransferApp) publishRecvProgress(rj *recvJob) {
 		Speed:   rj.rate.Speed(),
 		ETA:     rj.rate.ETA(rj.job.FileSize - done),
 		Status:  string(transfer.StateTransferring),
+		// 本次尝试的起点（在 HandleFileMeta 继承位图时定下来）。
+		ResumeFromPercent: rj.job.ResumePercent(),
 	})
 }
 

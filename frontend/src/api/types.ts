@@ -100,6 +100,18 @@ export interface TransferJob {
   completed: number
   totalChunks: number
   percent: number
+  /**
+   * 【本次尝试的起点】百分比：>0 表示这条是从上次的半截续传的（界面显示
+   * 「续传自 XX%」），缺省/0 表示从头传。
+   *
+   * 与 percent 并列而不是同一个数：percent 答「现在到哪儿了」（一路上涨），
+   * 它答「这次是从哪儿接上的」（定下就不动）。
+   *
+   * 两个来源都带它：TransferService.List() 落库的 DTO（含重启后的陈行），
+   * 以及 `transfer:progress` 事件 —— 续传起点要等 FILE_META_ACK 才定下来，
+   * 那一刻没有别的可用事件。
+   */
+  resumeFromPercent?: number
   status: string
   error?: string
   updatedAt: number
@@ -395,8 +407,11 @@ export interface SwarmApi {
   /** 清空已结束的传输记录，返回删除条数。 */
   clearTransfers(): Promise<number>
   /**
-   * 取消一条传输：排队/等待中的直接置取消，正在传的由发送路径干净退出。
-   * 半截临时文件会保留，下次重发仍可按位图续传。
+   * 取消一条传输：排队/等待中、已暂停、正在传的都能取消 —— 前两种直接置
+   * 取消，正在传的由发送路径干净退出。半截临时文件会保留，下次重发仍可按
+   * 位图续传。
+   *
+   * 只对本机发出的任务可用：接收侧没有取消出口（后端会拒绝）。
    */
   cancelTransfer(jobId: string): Promise<void>
   /** 立刻重试一条等待中的传输（不等退避，也不要求对端在目录里在线）。 */

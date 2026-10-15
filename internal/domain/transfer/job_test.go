@@ -106,6 +106,37 @@ func TestLocateBadChunksIgnoresIncomplete(t *testing.T) {
 	}
 }
 
+// ResumePercent 是「续传自 XX%」的唯一数据源，必须与 Percent 分工清楚：
+// Percent 读位图（一路上涨），它读 ResumeFrom（本次尝试的起点，写死不动）。
+func TestJobResumePercent(t *testing.T) {
+	cases := []struct {
+		name        string
+		resumeFrom  int64
+		totalChunks int
+		want        float64
+	}{
+		{"从头传", 0, 8, 0},
+		{"从第 1 块接上", 1, 8, 12.5},
+		{"从一半接上", 4, 8, 50},
+		{"正好全部已完成", 8, 8, 100},
+		// 对端声称的已完成块数可能超过本机算出的总块数（分块大小不一致的历史行）：
+		// 钳到 100，别让界面出现「续传自 120%」。
+		{"超出总块数要钳住", 9, 8, 100},
+		// 没有总块数就无从谈起：0 表示「不显示」，而不是除零或 NaN。
+		{"总块数为零", 4, 0, 0},
+		{"负数起点", -1, 8, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			j := &Job{ResumeFrom: c.resumeFrom, TotalChunks: c.totalChunks}
+			if got := j.ResumePercent(); got != c.want {
+				t.Errorf("ResumePercent() = %v，期望 %v（resumeFrom=%d total=%d）",
+					got, c.want, c.resumeFrom, c.totalChunks)
+			}
+		})
+	}
+}
+
 func TestJobValidate(t *testing.T) {
 	j := mkJob()
 	if err := j.Validate(); err != nil {

@@ -292,6 +292,22 @@ ALTER TABLE peers ADD COLUMN shares TEXT NOT NULL DEFAULT '';
 		// share_items 的情况下显示「N 个文件 / M MB」，而 share_items
 		// 可能是上万行 —— COUNT/SUM 每次列表刷新跑一遍是不必要的开销。
 	},
+	{
+		version: 8,
+		name:    "transfer_resume_from",
+		// 续传起点（D-10：「续传自 XX%」展示）。
+		//
+		// 为什么必须单独一列，而不是从 chunk_bitmap 推出来：位图回答的是
+		// 「现在收到哪儿了」，一路上涨；这一列回答的是「这一次尝试是从哪儿
+		// 接上的」，写下来就不动。暂停恢复、重启续传之后两者差别最大 ——
+		// 而那正是用户需要看到这句提示的时刻。
+		//
+		// 沿用 v3–v7 的既定做法：纯 ADD COLUMN，零重建。默认 0 = 从头传，
+		// 历史行也因此天然正确（它们记不清起点，显示成"没有续传"而不是乱猜）。
+		sql: `
+ALTER TABLE transfer_jobs ADD COLUMN resume_from INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 func migrationChecksum(sql string) string {

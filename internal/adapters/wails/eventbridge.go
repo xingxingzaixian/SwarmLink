@@ -195,14 +195,24 @@ func (b *Bridge) Start() {
 		}
 		// 只发「易变」的进度：文件名/大小等元数据由 TransferService.List() 提供。
 		// 高频事件里塞不变的字段，会让 4 Hz 的通道背负无谓的序列化成本。
-		b.emitter.Emit(EventTransferProgress, map[string]any{
+		payload := map[string]any{
 			"jobId":   ev.JobID,
 			"peerId":  ev.PeerID,
 			"percent": ev.Percent,
 			"speed":   ev.Speed,              // 字节/秒
 			"eta":     ev.ETA.Milliseconds(), // 由前端格式化成「剩余 1 分 20 秒」
 			"status":  ev.Status,
-		})
+		}
+		// 唯一的例外，且只在真的续传过时出现：续传起点定在 FILE_META_ACK 之后，
+		// 那一刻没有别的事件可用，而它又不是「重读整行」能安全拿到的（发送侧的
+		// 进度不落库，重读会把界面上的百分比盖回去）。理由详见
+		// eventbus.TransferProgress.ResumeFromPercent。
+		//
+		// 不续传的任务（绝大多数帧）一个字节都不多花。
+		if ev.ResumeFromPercent > 0 {
+			payload["resumeFromPercent"] = ev.ResumeFromPercent
+		}
+		b.emitter.Emit(EventTransferProgress, payload)
 	})
 
 	b.on(eventbus.TopicTransferDone, func(p any) {
