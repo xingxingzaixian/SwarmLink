@@ -1134,6 +1134,21 @@ func (a *TransferApp) HandleFileDone(sess ports.Session, f protocol.Frame) error
 
 	final, err := a.sink.Commit(rj.handle)
 	if err != nil {
+		// 校验已经通过、位图也完整，失败的是「把临时文件换成最终文件」这一步：
+		// 这是本地落盘问题，不是内容问题。
+		//
+		// 必须在这里把状态收敛掉：否则任务永远停在 verifying，界面上是一条
+		// 永远转圈的进度条，receivers 里那条记录不会被回收（ActiveJobs 泄漏），
+		// 而用户对着一个"看起来还在跑"的任务无从处置。
+		//
+		// 临时文件【不删】：下次重下同一路径时，FindResumable 还能按
+		// (peer, file_hash, rel_path) 命中它，只补缺块而不是整份重传。
+		rj.job.Bitmap = rj.bitmap.Copy() // 与成功路径一致：位图此刻是完整的
+		rj.job.Status = transfer.StateFailed
+		rj.job.Error = err.Error()
+		rj.job.UpdatedAt = a.clk.Now()
+		_ = a.store.UpsertJob(rj.job)
+		a.dropReceiver(done.JobID)
 		return a.sendDoneAck(sess, done.JobID, false, err.Error())
 	}
 

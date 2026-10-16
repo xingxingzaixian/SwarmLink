@@ -323,10 +323,17 @@ func (s *Sink) Commit(h ports.SinkHandle) (string, error) {
 	if h.TempPath == "" || h.FinalPath == "" {
 		return "", fmt.Errorf("filesink: invalid sink handle")
 	}
+	// 无论成败都要释放占位：失败的 Commit 同样意味着「这次写入结束了」。
+	//
+	// 只在成功路径释放是个不对称的漏洞：一旦替换失败（目标被占用），这条
+	// 路径会在进程余下的生命周期里一直被视为「此刻有任务在写」，后续同路径
+	// 的下载全部退化成「c (1).txt」——「同名同路径就地覆盖」这条语义就此失效，
+	// 而且失效得毫无提示（用户只看到目录里多出一堆副本）。
+	defer s.release(h.FinalPath)
+
 	if err := fsutil.Replace(h.TempPath, h.FinalPath); err != nil {
 		return "", err
 	}
-	s.release(h.FinalPath)
 	return h.FinalPath, nil
 }
 
