@@ -81,22 +81,7 @@ func (m *Messages) Latest(convID string, limit int, before int64) ([]message.Mes
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
-
-	rows, err := m.db.Query(q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: latest messages: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]message.Message, 0, 16)
-	for rows.Next() {
-		item, err := scanMessage(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, item)
-	}
-	return out, rows.Err()
+	return m.queryMessages(q, args...)
 }
 
 // MarkDelivered 置为已送达（不删 outbox；Deliver 会同时处理）。
@@ -201,6 +186,28 @@ func (m *Messages) Deliver(msgID string) error {
 		_, err := tx.Exec(`DELETE FROM outbox WHERE msg_id = ?`, msgID)
 		return err
 	})
+}
+
+// queryMessages 执行一条返回消息列的查询并逐个扫描。
+//
+// 消息列的扫描只有一种正确写法（scanMessage 与列序严格对应），把这段循环
+// 收成一个函数，Latest / Search / Window 三处就不会各自漂移。
+func (m *Messages) queryMessages(q string, args ...any) ([]message.Message, error) {
+	rows, err := m.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: query messages: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]message.Message, 0, 16)
+	for rows.Next() {
+		item, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (m *Messages) queryOutbox(q string, args ...any) ([]ports.OutboxEntry, error) {

@@ -1,6 +1,7 @@
 import { directConvId } from './ids'
 import { EV } from './types'
 import { baseName } from '../utils/format'
+import { likeContains } from '../utils/search'
 import type {
   Conversation,
   Diagnostics,
@@ -17,6 +18,17 @@ import type {
   SwarmApi,
   TransferJob
 } from './types'
+
+/**
+ * 「消息 + 写入序号」：搜索与跳转窗口的排序条目。
+ *
+ * 与 mem 实现里的 `seqMessage` 是同一个东西，存在的理由也一样 ——
+ * 排序键不能只有 sent_at（同一毫秒里可以有多条），必须带上唯一的写入序。
+ */
+interface SeqMessage {
+  seq: number
+  m: Message
+}
 
 /**
  * 降级实现：在没有生成绑定（即没有 Go 后端）时让前端仍可运行。
@@ -62,6 +74,17 @@ export function createMockApi(): SwarmApi {
   const convAlice = directConvId(self.nodeId, ALICE)
   const convBob = directConvId(self.nodeId, BOB)
 
+  /**
+   * 写入序号：搜索游标与跳转窗口的排序键。
+   *
+   * 它对应后端 sqlite 的 rowid / mem 实现里的 seq —— 游标必须是「唯一且单调」
+   * 的写入序，不能是 sent_at：同一毫秒里发几条时按时间跳会漏掉边界上的命中。
+   * 不塞进 Message 字段里，是因为 mock 的数据形态必须与后端 DTO 【逐字一致】，
+   * 多一个字段就是给「预览能跑、真机没有」留一个坑。
+   */
+  const seqByMsg = new Map<string, number>()
+  let seqCounter = 0
+
   const seed: [string, string, 'in' | 'out', number][] = [
     [convAlice, '在吗？我把测试包的校验和发你', 'in', -42],
     [convAlice, '在的', 'out', -40],
@@ -77,9 +100,10 @@ export function createMockApi(): SwarmApi {
 
   const now = Date.now()
   for (const [convId, content, direction, offsetMin] of seed) {
-    const list = threads.get(convId) ?? []
-    list.push({
-      msgId: `seed-${list.length}-${convId.slice(0, 6)}`,
+    // 走 push 而不是直接改 threads：写入序号必须与消息同时落账，
+    // 否则种子消息在搜索游标 / 跳转窗口里没有排序键（分页会错位）。
+    push(convId, {
+      msgId: `seed-${threads.get(convId)?.length ?? 0}-${convId.slice(0, 6)}`,
       convId,
       senderId: direction === 'out' ? self.nodeId : ALICE,
       direction,
@@ -88,7 +112,6 @@ export function createMockApi(): SwarmApi {
       state: direction === 'out' ? 'delivered' : 'delivered',
       sentAt: now + offsetMin * 60_000
     })
-    threads.set(convId, list)
   }
 
   // 预置一条入站图片消息：一打开预览就能确认图片气泡的渲染路径是通的
@@ -303,8 +326,33 @@ export function createMockApi(): SwarmApi {
     window.dispatchEvent(new CustomEvent(name, { detail: data }))
   }
 
+  /** 追加一条消息并分配写入序号（搜索/跳转都要用它，见 seqByMsg）。 */
   function push(convId: string, m: Message): void {
+    seqByMsg.set(m.msgId, ++seqCounter)
     threads.set(convId, [...(threads.get(convId) ?? []), m])
+  }
+
+  /** 某会话的清空点（毫秒；缺省 = 未清空）。判据与后端 `sent_at > cleared_at` 同向。 */
+  function clearedOf(convId: string): number {
+    return cleared.get(convId) ?? 0
+  }
+
+  /** 某会话里「未被清空点隐藏」的消息（正序，与 threads 的存入顺序一致）。 */
+  function visibleOf(convId: string): Message[] {
+    const at = clearedOf(convId)
+    return (threads.get(convId) ?? []).filter((m) => m.sentAt > at)
+  }
+
+  /**
+   * 显示序比较：(sent_at, 写入序号) 升序，返回三值（Array.prototype.sort 要的形状）。
+   *
+   * 与后端 sqlite 的 `ORDER BY sent_at, id` 是同一条规则（那边的 id 就是 rowid），
+   * 两个实现必须逐字一致 —— 否则「同一毫秒里的多条消息」在预览与真机上
+   * 会落进不同的窗口位置。
+   */
+  function byDisplay(a: SeqMessage, b: SeqMessage): number {
+    if (a.m.sentAt !== b.m.sentAt) return a.m.sentAt - b.m.sentAt
+    return a.seq - b.seq
   }
 
   /** 倒序返回（与后端 Contract 一致：新 → 旧）。 */
@@ -808,6 +856,79 @@ export function createMockApi(): SwarmApi {
     },
     async clearedAt(convId) {
       return cleared.get(convId) ?? 0
+    },
+    // ---------------------------------------------------------------- 历史搜索
+    //
+    // 与后端 SearchService.Search 的语义逐条对齐（ADR-013）：
+    //   - 空白关键词返回空（不查库）；
+    //   - 白名单为空 = 「可见会话集合」：mock 里没有「已移除的对端」这回事，
+    //     因此等价于全部已知会话；
+    //   - 游标指向不存在的消息时返回空，【绝不】退化成首页 ——
+    //     退化会让前端以为「又翻出一批」而把第一页重复贴一遍；
+    //   - 排序是写入序号倒序（等价 sqlite 的 ORDER BY id DESC），不是 sent_at。
+    async searchHistory(text, convIds, limit, beforeMsgId) {
+      const needle = text.trim()
+      if (!needle) return []
+
+      const pageSize = limit > 0 ? limit : 50
+      const allow = new Set(convIds.length ? convIds : [...threads.keys()])
+
+      let cursor = 0
+      if (beforeMsgId) {
+        const c = seqByMsg.get(beforeMsgId)
+        if (c === undefined) return []
+        cursor = c
+      }
+
+      const hits: SeqMessage[] = []
+      for (const [convId, list] of threads) {
+        if (!allow.has(convId)) continue
+        const clearedAtMs = clearedOf(convId)
+        for (const m of list) {
+          const seq = seqByMsg.get(m.msgId) ?? 0
+          if (cursor > 0 && seq >= cursor) continue
+          if (m.sentAt <= clearedAtMs) continue
+          if (!likeContains(m.content, needle)) continue
+          hits.push({ seq, m })
+        }
+      }
+      hits.sort((a, b) => b.seq - a.seq)
+      return hits.slice(0, pageSize).map((h) => h.m)
+    },
+    // 与后端 SearchService.JumpContext 对齐：锚点不存在 / 不属于该会话 /
+    // 已被清空时一律返回空数组（调用方据此回退到会话最新一页，不当作错误）。
+    async jumpContext(convId, msgId, before, after) {
+      if (!convId || !msgId) return []
+      const b = Math.max(0, before)
+      const a = Math.max(0, after)
+
+      const list = visibleOf(convId)
+      const anchor = list.find((m) => m.msgId === msgId)
+      if (!anchor) return []
+
+      const anchorEntry: SeqMessage = { seq: seqByMsg.get(msgId) ?? 0, m: anchor }
+      const older: SeqMessage[] = []
+      const newer: SeqMessage[] = []
+      for (const m of list) {
+        const e: SeqMessage = { seq: seqByMsg.get(m.msgId) ?? 0, m }
+        // 锚点本身归入旧侧（后端 `(sent_at, id) <= 锚点` 那一支）。
+        if (byDisplay(anchorEntry, e) < 0) newer.push(e)
+        else older.push(e)
+      }
+
+      // 显示序：旧侧要「紧邻锚点之前的 b 条」（含锚点，故 b+1），故按显示序倒排后取头；
+      // 新侧同理要「紧邻锚点之后的 a 条」，按显示序正排后取头。取成整段尾部就错了。
+      older.sort(byDisplay)
+      older.reverse()
+      newer.sort(byDisplay)
+      const olderCut = older.slice(0, b + 1)
+      const newerCut = newer.slice(0, a)
+
+      // 新侧翻成新→旧接在前面，再接旧侧 —— 与后端 Window 的返回方向一致。
+      const out: Message[] = []
+      for (let i = newerCut.length - 1; i >= 0; i--) out.push(newerCut[i].m)
+      for (const e of olderCut) out.push(e.m)
+      return out
     },
     async sendFileMessage(peerId, jobId, fileName) {
       const convId = directConvId(self.nodeId, peerId)

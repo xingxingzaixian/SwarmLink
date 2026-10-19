@@ -2,16 +2,93 @@
 /**
  * 设置（弹层的「设置」页）。
  *
- * 不复用旧的整页布局：弹层里没有整屏可用，因此把动作（保存）做成吸底条，
- * 保证滚动到任何位置都能落盘，而不用先滚回顶部。
+ * 布局是「左分类 + 右配置项」：设置项之间的差异远大于它们之间的联系
+ * （端口/网卡与显示名毫无关系），一屏平铺两列时用户只能靠扫读去找；
+ * 分类栏把「找到那一项」变成一次点击，也让每一页都能写清楚自己在管什么。
+ *
+ * 分类粒度宁可细一点：不把无关的项塞进同一页 —— 「跨网段种子」和「传输」
+ * 都跟带宽有关，但一个是发现面、一个是数据面，混在一起只会让两边的说明
+ * 都变长，而找起来仍然是猜。
+ *
+ * 两处刻意保留的老行为（别顺手改掉）：
+ *   - 动作（保存）做成常驻底条：弹层里没有整屏可用，且任何一页都可能比
+ *     视口高，保证不滚动也能落盘；
+ *   - 保存成功即关闭弹层、结果交给全局轻提示（见 save 的注释）。
  */
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 import Icon from '../components/Icon.vue'
 import { getApi, type SelfCheck, type Settings } from '../api'
 import { useUiStore } from '../stores/ui'
 
 const ui = useUiStore()
+
+type CatKey = 'general' | 'notify' | 'network' | 'connect' | 'transfer' | 'seed' | 'diag'
+
+interface Cat {
+  key: CatKey
+  label: string
+  icon: string
+  /** 右侧标题下的导语：一句话说清这页在管什么、以及为什么要注意。 */
+  desc: string
+  /** 本页含「改完需重启才生效」的项 → 分类栏上点一个警示点。 */
+  restart?: boolean
+}
+
+/**
+ * 顺序按使用频率排：改名/换接收目录是常事，部署自检只在跨网段上线前跑一次。
+ *
+ * `restart` 只挂在「网络」上 —— 后端 Save 返回的需重启项就是
+ * tcp_port / udp_port / interface_mode 三个，全在这一页。
+ */
+const CATS: Cat[] = [
+  {
+    key: 'general',
+    label: '通用',
+    icon: 'sliders',
+    desc: '显示名与接收目录。显示名对端在资料卡里看得到。'
+  },
+  {
+    key: 'notify',
+    label: '提示与启动',
+    icon: 'bell',
+    desc: '提示音、托盘行为与开机自启。'
+  },
+  {
+    key: 'network',
+    label: '网络',
+    icon: 'signal',
+    restart: true,
+    desc: '端口与网卡。改完需重启应用才生效 —— 监听端口是内核层绑定的，无法热切换。'
+  },
+  {
+    key: 'connect',
+    label: '连接与安全',
+    icon: 'shield',
+    desc: '空闲连接回收、握手认证与加密通道。'
+  },
+  {
+    key: 'transfer',
+    label: '传输',
+    icon: 'download',
+    desc: '并发、窗口与分块共同决定实际吞吐。'
+  },
+  {
+    key: 'seed',
+    label: '跨网段种子',
+    icon: 'globe',
+    desc: '跨网段发现只认种子清单；这里配错了，跨网段就等于断网。'
+  },
+  {
+    key: 'diag',
+    label: '部署自检',
+    icon: 'activity',
+    desc: '两条前置条件只能靠改网段规划来修，软件无能为力。'
+  }
+]
+
+const cat = ref<CatKey>('general')
+const current = computed<Cat>(() => CATS.find((c) => c.key === cat.value) ?? CATS[0])
 
 const settings = ref<Settings | null>(null)
 const interfaces = ref<string[]>([])
@@ -116,121 +193,104 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="settings">
-    <div v-if="!settings" class="empty">正在加载…</div>
+  <div v-if="!settings" class="empty">正在加载…</div>
 
-    <template v-else>
-      <div class="col">
-        <section>
-          <h4>通用</h4>
-          <label>
-            <span>显示名</span>
-            <input v-model="settings.displayName" placeholder="其他节点看到的名字" />
-          </label>
-          <label>
-            <span>接收目录</span>
-            <input v-model="settings.downloadDir" class="mono" />
-          </label>
-          <label class="check">
-            <input v-model="settings.autoOpen" type="checkbox" />
-            <span>接收完成后自动打开</span>
-          </label>
-        </section>
+  <div v-else class="settings">
+    <!-- 左：分类。只有一层导航，每一项都是一个「页面」。 -->
+    <nav class="cats" aria-label="设置分类">
+      <button
+        v-for="c in CATS"
+        :key="c.key"
+        class="cat"
+        :class="{ on: cat === c.key }"
+        :aria-current="cat === c.key ? 'page' : undefined"
+        @click="cat = c.key"
+      >
+        <Icon :name="c.icon" :size="15" class="cat__icon" />
+        <span class="cat__label">{{ c.label }}</span>
+        <!-- 需重启的点只做提示、不改文字：分类名里塞不下「需重启」，
+             而把一个圆点解释清楚的成本远低于让用户改完端口白等。 -->
+        <span v-if="c.restart" class="cat__dot" title="本页有需重启才生效的项" />
+      </button>
+    </nav>
 
-        <section>
-          <h4>提示</h4>
-          <label class="check">
-            <input v-model="settings.notifySound" type="checkbox" />
-            <span>新消息提示音</span>
-          </label>
-          <label class="check">
-            <input v-model="settings.notifyMinimizeToTray" type="checkbox" />
-            <span>关闭时最小化到托盘</span>
-          </label>
-          <label class="check">
-            <input v-model="settings.autoStart" type="checkbox" />
-            <span>开机自启动</span>
-          </label>
-          <p class="note">
-            右键托盘图标也有提示音和托盘设置，与这里是同一份配置，改哪边都一样。
-            关掉提示音只影响声音，托盘图标闪烁与未读计数照常工作。
-          </p>
-        </section>
-
-        <section>
-          <h4>跨网段种子</h4>
-          <p class="note">
-            每网段至少 2 颗、共 6–10 条，格式 <code>IP:UDP端口</code>。
-            被选为种子的机器必须固定 UDP 端口（不允许回退），否则跨网段节点的
-            第一个报文就石沉大海。
-          </p>
-          <label>
-            <span>种子清单（每行一条）</span>
-            <textarea v-model="seedsText" rows="5" class="mono" />
-          </label>
-          <div class="pair">
-            <label>
-              <span>每轮拉取种子数</span>
-              <input v-model.number="settings.seedsPerRefresh" type="number" min="1" max="8" />
-            </label>
-            <label>
-              <span>目录刷新周期（秒）</span>
-              <input v-model.number="settings.seedRefreshSec" type="number" min="30" />
-            </label>
-          </div>
-          <p class="note">建议值 2：拉更多只是成倍增加流量，可靠性并不提高（ADR-011）。</p>
-        </section>
-
-        <section>
-          <h4>传输</h4>
-          <div class="pair">
-            <label>
-              <span>全局并发上限</span>
-              <input v-model.number="settings.maxConcurrent" type="number" min="1" />
-            </label>
-            <label>
-              <span>初始窗口大小</span>
-              <input v-model.number="settings.windowSize" type="number" min="1" max="64" />
-            </label>
-          </div>
-          <label>
-            <span>分块大小（字节，建议 2 的幂）</span>
-            <input v-model.number="settings.chunkSize" type="number" min="65536" />
-          </label>
-        </section>
+    <!-- 右：当前分类的配置项。独立滚动，底条始终可见。 -->
+    <div class="pane scroll">
+      <!-- 用 div 而不是 header：`<header>` 在没有 sectioning 祖先时会被映射成
+           role=banner，而一个弹层里再冒出一个 banner 地标会打乱屏幕阅读器的
+           页面结构（真正的 banner 是弹层顶栏）。 -->
+      <div class="pane-head">
+        <h4>
+          {{ current.label }}
+          <span v-if="current.restart" class="req">需重启</span>
+        </h4>
+        <p class="lead">{{ current.desc }}</p>
       </div>
 
-      <div class="col">
-        <section>
-          <h4>网络<span class="req">需重启</span></h4>
-          <div class="pair">
-            <label>
-              <span>TCP 端口（0 = 自动）</span>
-              <input v-model.number="settings.tcpPort" type="number" min="0" />
-            </label>
-            <label>
-              <span>UDP 端口（0 = 自动）</span>
-              <input v-model.number="settings.udpPort" type="number" min="0" />
-            </label>
-          </div>
-          <label>
-            <span>网卡模式</span>
-            <select v-model="settings.interfaceMode">
-              <option value="auto">自动</option>
-              <option value="manual">指定网卡</option>
-              <option value="seed_only">仅显式种子（VPN / 安全敏感）</option>
-            </select>
-          </label>
-          <label>
-            <span>排除网卡（每行一条，支持 * 通配）</span>
-            <textarea :value="(settings.denyInterfaces ?? []).join('\n')" rows="4" class="mono"
-              @input="settings.denyInterfaces = lines(($event.target as HTMLTextAreaElement).value)" />
-          </label>
-          <p class="note mono">当前可用：{{ interfaces.length ? interfaces.join('、') : '（无）' }}</p>
-        </section>
+      <section v-if="cat === 'general'">
+        <label>
+          <span>显示名</span>
+          <input v-model="settings.displayName" placeholder="其他节点看到的名字" />
+        </label>
+        <label>
+          <span>接收目录</span>
+          <input v-model="settings.downloadDir" class="mono" />
+        </label>
+        <label class="check">
+          <input v-model="settings.autoOpen" type="checkbox" />
+          <span>接收完成后自动打开</span>
+        </label>
+      </section>
 
+      <section v-else-if="cat === 'notify'">
+        <label class="check">
+          <input v-model="settings.notifySound" type="checkbox" />
+          <span>新消息提示音</span>
+        </label>
+        <label class="check">
+          <input v-model="settings.notifyMinimizeToTray" type="checkbox" />
+          <span>关闭时最小化到托盘</span>
+        </label>
+        <label class="check">
+          <input v-model="settings.autoStart" type="checkbox" />
+          <span>开机自启动</span>
+        </label>
+        <p class="note">
+          右键托盘图标也有提示音和托盘设置，与这里是同一份配置，改哪边都一样。
+          关掉提示音只影响声音，托盘图标闪烁与未读计数照常工作。
+        </p>
+      </section>
+
+      <section v-else-if="cat === 'network'">
+        <div class="pair">
+          <label>
+            <span>TCP 端口（0 = 自动）</span>
+            <input v-model.number="settings.tcpPort" type="number" min="0" />
+          </label>
+          <label>
+            <span>UDP 端口（0 = 自动）</span>
+            <input v-model.number="settings.udpPort" type="number" min="0" />
+          </label>
+        </div>
+        <label>
+          <span>网卡模式</span>
+          <select v-model="settings.interfaceMode">
+            <option value="auto">自动</option>
+            <option value="manual">指定网卡</option>
+            <option value="seed_only">仅显式种子（VPN / 安全敏感）</option>
+          </select>
+        </label>
+        <label>
+          <span>排除网卡（每行一条，支持 * 通配）</span>
+          <textarea :value="(settings.denyInterfaces ?? []).join('\n')" rows="4" class="mono"
+            @input="settings.denyInterfaces = lines(($event.target as HTMLTextAreaElement).value)" />
+        </label>
+        <p class="note mono">当前可用：{{ interfaces.length ? interfaces.join('、') : '（无）' }}</p>
+      </section>
+
+      <template v-else-if="cat === 'connect'">
         <section>
-          <h4>连接</h4>
+          <h5>连接</h5>
           <label>
             <span>空闲连接回收（秒）</span>
             <input v-model.number="settings.idleTimeoutSec" type="number" min="30" />
@@ -241,9 +301,8 @@ onMounted(load)
           </label>
           <p class="note">关闭后任何节点都可冒充他人身份，仅用于本地调试。</p>
         </section>
-
         <section>
-          <h4>安全</h4>
+          <h5>安全</h5>
           <label>
             <span>加密通道</span>
             <select v-model="settings.encryption">
@@ -257,36 +316,74 @@ onMounted(load)
             （Flags.ENCRYPTED + KEY_EXCHANGE）已在协议里预留，v1.1 启用。
           </p>
         </section>
+      </template>
 
-        <section class="plain">
-          <h4>部署前置条件（代码救不了）</h4>
-          <p class="note">
-            <b>P-1</b> 任意两网段的种子 IP 之间可 TCP 直连（三层路由可达，非 NAT 隔离）。
-            不满足则跨网段发现与消息全部失效。<br /><br />
-            <b>P-2</b> 各网段使用不重叠的地址段（不得都是 192.168.1.0/24）。
-            不满足会出现「node_id 不同、IP 相同」，跨网段寻址崩溃且现象隐蔽。<br /><br />
-            这两条只能靠改网段规划来修，软件无能为力 —— 所以跨网段部署前先跑一次自检。
+      <section v-else-if="cat === 'transfer'">
+        <div class="pair">
+          <label>
+            <span>全局并发上限</span>
+            <input v-model.number="settings.maxConcurrent" type="number" min="1" />
+          </label>
+          <label>
+            <span>初始窗口大小</span>
+            <input v-model.number="settings.windowSize" type="number" min="1" max="64" />
+          </label>
+        </div>
+        <label>
+          <span>分块大小（字节，建议 2 的幂）</span>
+          <input v-model.number="settings.chunkSize" type="number" min="65536" />
+        </label>
+      </section>
+
+      <section v-else-if="cat === 'seed'">
+        <p class="note">
+          每网段至少 2 颗、共 6–10 条，格式 <code>IP:UDP端口</code>。
+          被选为种子的机器必须固定 UDP 端口（不允许回退），否则跨网段节点的
+          第一个报文就石沉大海。
+        </p>
+        <label>
+          <span>种子清单（每行一条）</span>
+          <textarea v-model="seedsText" rows="5" class="mono" />
+        </label>
+        <div class="pair">
+          <label>
+            <span>每轮拉取种子数</span>
+            <input v-model.number="settings.seedsPerRefresh" type="number" min="1" max="8" />
+          </label>
+          <label>
+            <span>目录刷新周期（秒）</span>
+            <input v-model.number="settings.seedRefreshSec" type="number" min="30" />
+          </label>
+        </div>
+        <p class="note">建议值 2：拉更多只是成倍增加流量，可靠性并不提高（ADR-011）。</p>
+      </section>
+
+      <section v-else>
+        <p class="note">
+          <b>P-1</b> 任意两网段的种子 IP 之间可 TCP 直连（三层路由可达，非 NAT 隔离）。
+          不满足则跨网段发现与消息全部失效。<br /><br />
+          <b>P-2</b> 各网段使用不重叠的地址段（不得都是 192.168.1.0/24）。
+          不满足会出现「node_id 不同、IP 相同」，跨网段寻址崩溃且现象隐蔽。
+        </p>
+        <button class="btn btn-soft" :disabled="checking" @click="runSelfCheck">
+          <Icon name="refresh" :size="14" />{{ checking ? '检查中…' : '运行自检' }}
+        </button>
+        <div v-if="selfCheck" class="check-result">
+          <p v-if="selfCheck.performed" :class="['line', selfCheck.p1OK ? 'ok' : 'bad']">
+            P-1：{{ selfCheck.p1Detail }}
           </p>
-          <button class="btn btn-soft" :disabled="checking" @click="runSelfCheck">
-            <Icon name="refresh" :size="14" />{{ checking ? '检查中…' : '运行自检' }}
-          </button>
-          <div v-if="selfCheck" class="check-result">
-            <p v-if="selfCheck.performed" :class="['line', selfCheck.p1OK ? 'ok' : 'bad']">
-              P-1：{{ selfCheck.p1Detail }}
-            </p>
-            <p v-if="selfCheck.performed" :class="['line', selfCheck.p2Overlap ? 'warn' : 'ok']">
-              P-2：{{ selfCheck.p2Detail }}
-            </p>
-            <p v-if="!selfCheck.performed" class="line faint">
-              {{ selfCheck.p1Detail }}
-            </p>
-            <p v-if="selfCheck.performed && selfCheck.seeds.length" class="line faint mono">
-              种子 {{ selfCheck.seedCount }} 颗：{{ selfCheck.seeds.map(seedLine).join('、') }}
-            </p>
-          </div>
-        </section>
-      </div>
-    </template>
+          <p v-if="selfCheck.performed" :class="['line', selfCheck.p2Overlap ? 'warn' : 'ok']">
+            P-2：{{ selfCheck.p2Detail }}
+          </p>
+          <p v-if="!selfCheck.performed" class="line faint">
+            {{ selfCheck.p1Detail }}
+          </p>
+          <p v-if="selfCheck.performed && selfCheck.seeds.length" class="line faint mono">
+            种子 {{ selfCheck.seedCount }} 颗：{{ selfCheck.seeds.map(seedLine).join('、') }}
+          </p>
+        </div>
+      </section>
+    </div>
 
     <footer class="bar">
       <div class="bar-msg">
@@ -300,40 +397,112 @@ onMounted(load)
 </template>
 
 <style scoped>
-/* 两列：设置项多而短，单列会在弹层里留下大量空白。
-   底部留出吸底条的高度，最后一行才能完整滚出来，不会永远被压住一截。 */
+/* 左栏固定宽度 + 右栏吃掉剩余；两行分别给「内容（可滚）」和「底条（不动）」。
+   高度 100% 依赖 Modal 的 .body 是定高 flex 项（同共享中心、搜索弹层）。 */
 .settings {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  align-content: start;
-  gap: 0 28px;
+  grid-template-columns: 168px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
 }
 
-.settings>.col:last-child {
-  padding-bottom: 56px;
-}
-
-.col {
+/* ---------------------------------------------------------------- 分类栏 */
+/* 与共享中心的左树同一套观感：内缩、右分割线、圆角行。
+   两处必须一致 —— 它们是同一个弹层里同一种「左侧导航」。 */
+.cats {
+  grid-column: 1;
+  grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: 0;
+  gap: 2px;
+  min-height: 0;
+  padding: 0 10px 0 0;
+  border-right: 1px solid var(--divider);
 }
 
-section {
-  padding-bottom: 18px;
+.cat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  /* 透明边框占位：切到 .on 时行宽不跳 */
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  text-align: left;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
+}
+
+.cat:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.cat.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.cat__icon {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.cat.on .cat__icon {
+  color: var(--accent);
+}
+
+.cat__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cat__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+/* ---------------------------------------------------------------- 配置区 */
+
+.pane {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+  padding: 2px 6px 10px 16px;
+}
+
+.pane-head {
   margin-bottom: 16px;
-  border-bottom: 1px solid var(--divider);
 }
 
 h4 {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: 0 0 10px;
+  margin: 0;
   font-family: var(--font-display);
   font-size: var(--fs-lg);
   font-weight: 600;
+}
+
+/* 导语：分类名已经说明了「是什么」，这里补「为什么要注意」 */
+.lead {
+  margin: 4px 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--text-muted);
 }
 
 .req {
@@ -345,6 +514,30 @@ h4 {
   font-size: 10px;
   font-weight: 500;
   line-height: 16px;
+}
+
+/* 一页里有多组时用虚线分隔（与参考的「分组标题 + 点线」一致）；
+   最后一组不加，否则页尾会多一条悬空的线。 */
+section {
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px dashed var(--divider);
+}
+
+section:last-of-type {
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+
+/* 组标题：只在「一页有多组」时出现（目前只有连接与安全），
+   因此比页面标题小两档、不加粗体以外的装饰 —— 它不该跟 h4 抢层级。 */
+h5 {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-secondary);
 }
 
 label {
@@ -420,24 +613,20 @@ label.check>span {
   color: var(--warn);
 }
 
-/* 吸底条：渐隐到弹层自己的底色，而不是某个实色 ——
-   实色会在底部切出一条可见的横带。
-   用 color-mix 派生，浅色主题不必再写一份覆写。 */
+/* ---------------------------------------------------------------- 吸底条 */
+/* 独立成网格行而不是 sticky：内容区自己滚，底条永远在同一位置，
+   既不用渐变遮罩，也不会在短页面上飘在内容中间。 */
 .bar {
-  grid-column: 1 / -1;
-  position: sticky;
-  bottom: 0;
+  grid-column: 2;
+  grid-row: 2;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 0;
-  margin-top: 4px;
-  background: linear-gradient(to top,
-      color-mix(in oklch, var(--bg-panel) 94%, transparent) 62%,
-      transparent);
+  padding: 10px 6px 0 16px;
+  border-top: 1px solid var(--divider);
 }
 
-/* 吸底条上只剩下失败信息了（成功反馈已改走轻提示），
+/* 底条上只剩下失败信息了（成功反馈已改走轻提示），
    因此它固定是警示色 —— 这一栏出现的每一句话都是「没成功」。 */
 .bar-msg {
   flex: 1 1 auto;

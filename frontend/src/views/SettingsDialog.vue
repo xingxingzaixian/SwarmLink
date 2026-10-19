@@ -42,7 +42,9 @@ const active = computed<DialogTab>(() =>
 const META: Record<DialogTab, { title: string; subtitle: string }> = {
   settings: {
     title: '设置',
-    subtitle: '端口与网卡相关项需重启应用生效'
+    // 副标题不再点名「端口与网卡」：分类栏上用圆点标出了哪一页需要重启，
+    // 这里改成解释那个圆点 —— 否则用户看到一个点也不知道它是什么意思。
+    subtitle: '标了圆点的分类（网络）改完需重启应用才生效'
   },
   debug: {
     title: '调试面板',

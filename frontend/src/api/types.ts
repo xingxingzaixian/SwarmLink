@@ -374,6 +374,31 @@ export interface SwarmApi {
    */
   clearedAt(convId: string): Promise<number>
 
+  // 历史搜索（ADR-013）
+  /**
+   * 搜索本机消息历史（新 → 旧，遵守会话清空点）。
+   *
+   * 四条契约必须原样传下去，界面【不能】自己在调用侧加工：
+   *   1. `text` 的空白由后端去掉，空串直接返回空数组（不查库）；
+   *   2. `convIds` 为空 = 后端派生的「可见会话集合」（与 conversations() 同源），
+   *      不是「全库」—— 本地已移除的对端因此不会出现在结果里。
+   *      传 `[convId]` 即收窄到某个会话（左栏筛选走它）；
+   *   3. `beforeMsgId` 是游标：传上一页最后一条的 msgId，首页传空串。
+   *      后端内部把它换算成写入序，因此不要拿 sentAt 自己造游标 ——
+   *      同一毫秒里连发几条时，按时间跳会漏掉边界上的命中。
+   *   4. 后端【不返回命中总数】（20 万条消息下 count(*) 是 213ms、
+   *      按会话分组是 1.9s），所以界面只能显示「还有更早的」，
+   *      不能显示「共 N 条」—— 那个数字没有便宜来源。
+   */
+  searchHistory(text: string, convIds: string[], limit: number, beforeMsgId: string): Promise<Message[]>
+  /**
+   * 取「以某条消息为中心」的一页（新 → 旧），用于点搜索结果后定位。
+   *
+   * 返回空数组表示该消息不存在 / 不属于该会话 / 已被清空点隐藏 ——
+   * 那是正常的用户路径（应回退到会话最新一页并提示），不是错误。
+   */
+  jumpContext(convId: string, msgId: string, before: number, after: number): Promise<Message[]>
+
   // 传输
   sendFile(peerId: string, path: string): Promise<string>
   /**

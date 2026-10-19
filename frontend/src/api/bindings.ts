@@ -33,6 +33,7 @@ import {
   GroupService,
   NotifyService,
   PeerService,
+  SearchService,
   SettingsService,
   ShareService,
   TransferService
@@ -108,6 +109,11 @@ export const realApi: SwarmApi = {
     await ChatService.RestoreConversation(convId)
   },
   clearedAt: async (convId) => ChatService.ClearedAt(convId),
+
+  searchHistory: async (text, convIds, limit, beforeMsgId) =>
+    list(await SearchService.Search(text, convIds, limit, beforeMsgId)),
+  jumpContext: async (convId, msgId, before, after) =>
+    list(await SearchService.JumpContext(convId, msgId, before, after)),
 
   sendFile: async (peerId, path) => TransferService.SendFile(peerId, path),
   sendFolder: async (peerId, path) => TransferService.SendFolder(peerId, path),

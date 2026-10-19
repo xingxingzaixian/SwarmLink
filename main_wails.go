@@ -306,6 +306,7 @@ func main() {
 			application.NewService(services.Group),
 			application.NewService(services.Share),
 			application.NewService(services.Notify),
+			application.NewService(services.Search),
 			application.NewService(sysNotify),
 		},
 		Assets: application.AssetOptions{

@@ -7,7 +7,7 @@
  *   2. 发消息 / 发文件（原生对话框 + 拖放）；
  *   3. 把「正在发文件」这件事通知右栏（面板形态由 ui store 统一裁决）。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import Avatar from '../components/Avatar.vue'
 import ChatBubble from '../components/ChatBubble.vue'
@@ -259,6 +259,53 @@ watch(
 
 onMounted(() => void toBottom())
 
+// ---------------------------------------------------------------- 跳转定位
+
+/**
+ * 消费「跳到这一条」：滚到视口中央 + 临时高亮 2s。
+ *
+ * 为什么在这里而不是在 store 的 openAt 里（§4.6 原写法是 store 内 querySelector）：
+ * 窗口要等下一次渲染才进 DOM，store 里同步查必然为空；而滚动本来就是视图职责。
+ * store 只置 anchorMsgId 这份意图，这里在渲染后执行，执行完（含高亮期）清掉它。
+ *
+ * 时序上有两处必须显式处理：
+ *   1. `atBottom` 要先置 false —— 会话历史那个 length 监听会在贴底时把视图
+ *      拽到底部，把刚定位好的位置毁掉；
+ *   2. 再让出一个宏任务 —— toBottom 走的是 nextTick 的微任务链，这里必须
+ *      排在它之后，否则「先滚到底」会在我们的滚动之后生效。
+ */
+let anchorTimer: number | undefined
+
+watch(
+  () => chat.anchorMsgId,
+  async (id) => {
+    if (anchorTimer) window.clearTimeout(anchorTimer)
+    if (!id) return
+
+    atBottom.value = false
+    await nextTick()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    // 再压一次：刚才那次「滚到底」会异步派发 scroll 事件、由 onScroll 把
+    // atBottom 置回 true。不压的话，紧接着来一条新消息就会把视图拽到底部。
+    atBottom.value = false
+
+    // 不用 `[data-msg-id="…"]` 属性选择器：msg_id 是外部数据，拼进选择器
+    // 得先做 CSS 转义（引号、反斜杠都会把语法写坏）。扫一遍再比对，
+    // 一屏最多百来条的代价可以忽略。
+    const target = Array.from(scroller.value?.querySelectorAll('[data-msg-id]') ?? []).find(
+      (n) => (n as HTMLElement).dataset.msgId === id
+    )
+    target?.scrollIntoView({ block: 'center' })
+
+    // 高亮是「你要找的是这条」的一次性指示，不是常驻状态 —— 2s 后撤掉。
+    anchorTimer = window.setTimeout(() => chat.clearAnchor(), 2000)
+  }
+)
+
+onBeforeUnmount(() => {
+  if (anchorTimer) window.clearTimeout(anchorTimer)
+})
+
 // ---------------------------------------------------------------- 发送
 
 function autoGrow(): void {
@@ -504,6 +551,9 @@ async function restoreView(): Promise<void> {
 
     <div v-if="chat.error" class="banner err">{{ chat.error }}</div>
     <div v-if="groupDissolved" class="banner warn">该群已由群主解散，不能再发送消息。</div>
+    <!-- 跳转失败的回退提示：这类事不报错（消息被清空是正常路径），
+         但绝不能静默 —— 否则用户点完搜索结果只会觉得「点错了」。 -->
+    <div v-if="chat.notice" class="banner warn">{{ chat.notice }}</div>
 
     <div ref="scroller" class="stream scroll" @scroll="onScroll">
       <div v-if="!conv" class="empty welcome">
@@ -543,8 +593,13 @@ async function restoreView(): Promise<void> {
         <div v-if="it.kind === 'day'" class="day-sep">
           <span class="micro">{{ dateLabel(it.at) }}</span>
         </div>
+        <!-- data-msg-id 是「跳转定位」的锚点：滚动时靠它在 DOM 里找回这条消息
+             （不能按顺序索引 —— 消息列表随时被 upsert/筛选改变）。
+             anchor 决定要不要上那 2s 的目标高亮。 -->
         <ChatBubble
           v-else
+          :data-msg-id="it.m.msgId"
+          :anchor="chat.anchorMsgId === it.m.msgId"
           :message="it.m"
           :out="it.m.direction === 'out'"
           :show-sender="isGroup"

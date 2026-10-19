@@ -35,8 +35,15 @@ const props = withDefaults(
     tail?: boolean
     /** 是否为连续消息的首条：只有首条显示说话人名字。 */
     first?: boolean
+    /**
+     * 是否是「搜索跳转」的目标消息：短暂高亮一下。
+     *
+     * 由 ChatView 按 store 的 anchorMsgId 比对后传入，2s 后自动撤回 ——
+     * 高亮本身不该由气泡自己计时，否则同一条消息被连点两次会留下两个定时器。
+     */
+    anchor?: boolean
   }>(),
-  { senderName: '', senderSeed: '', showSender: false, tail: true, first: true }
+  { senderName: '', senderSeed: '', showSender: false, tail: true, first: true, anchor: false }
 )
 
 const emit = defineEmits<{ (e: 'zoom', m: Message): void; (e: 'quote', m: Message): void }>()
@@ -346,7 +353,7 @@ async function openFileLocation() {
 </script>
 
 <template>
-  <div class="row" :class="{ out, tail }" :title="stateText">
+  <div class="row" :class="{ out, tail, anchor }" :title="stateText">
     <!-- 自己的消息显示"我"字头像 -->
     <div v-if="out" class="ava self-avatar" :class="{ hidden: !tail }">我</div>
     <Avatar
@@ -600,6 +607,39 @@ async function openFileLocation() {
   border-color: transparent;
   color: var(--accent-ink);
   box-shadow: 0 8px 24px -10px oklch(86% 0.19 140 / 0.55);
+}
+
+/* ---------------------------------------------------------------- 跳转高亮 */
+/*
+ * 搜索跳转到的目标消息：2s 的描边呼吸。
+ *
+ * 用 box-shadow 描边而不是改底色：气泡有三套底色（对方卡片 / 自己的绿渐变 /
+ * 图片无底），改底色就得写三份并各自调对比度；描边对三者都成立。
+ * 颜色全部走 var()，浅色主题下不用另写一份。
+ */
+.row.anchor .bubble {
+  animation: anchor-flash 2s var(--ease) both;
+}
+
+@keyframes anchor-flash {
+  0%,
+  55% {
+    box-shadow: 0 0 0 2px var(--accent), 0 0 0 7px var(--accent-soft);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent, 0 0 0 7px transparent;
+  }
+}
+
+/*
+ * 减少动态效果时「只变色不闪」：去掉动画，保留一圈静态描边，
+ * 2s 后随 anchor 类一起撤掉 —— 定位提示仍然看得见，但没有任何运动。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .row.anchor .bubble {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--accent), 0 0 0 7px var(--accent-soft);
+  }
 }
 
 .text {

@@ -123,6 +123,49 @@ type PeerDirectory interface {
 // 消息仓储
 // ---------------------------------------------------------------------------
 
+// DefaultSearchLimit 是搜索单页的默认条数（调用方给 0 时实现取此值）。
+const DefaultSearchLimit = 50
+
+// MessageSearchQuery 是「本机消息历史」的全局搜索参数（ADR-013）。
+//
+// 性能纪律（实测数据见 ADR-013，勿改）：
+//
+//	搜索 = LIKE 子串 + `ORDER BY id DESC LIMIT n` 的【尾优先倒扫】。
+//	20 万条消息 / 20 个会话下首屏 1.1ms（查询计划里没有 TEMP B-TREE：
+//	SQLite 从 rowid 尾部倒着扫，凑够 n 条即停）。
+//	因此实现【禁止】出现 count(*) 与 GROUP BY conv_id —— 它们在同样的
+//	数据量下分别是 213ms 与 1.9s，本方案的成立与否就压在这一点上。
+//
+// 另一条纪律：不要引入 FTS5 替代 LIKE。trigram 分词器要求查询词 >= 3 个字符，
+// 中文两字词（会议/照片/周报）会【静默返回 0 命中】；unicode61 对 CJK 无效
+// （整段当一个 token）。LIKE 子串是唯一同时支持「任意长度 / 两字中文 /
+// 英文大小写不敏感」的选择。
+type MessageSearchQuery struct {
+	// Text 是用户输入的待查子串（调用方负责去掉首尾空白；空串 = 无查询）。
+	//
+	// 实现【必须】转义 LIKE 的元字符（\ % _）并配 ESCAPE 使用：漏掉转义时
+	// 搜一个 "%" 会命中全库，而这是最容易漏、也最难在界面上看出错的一条。
+	Text string
+	// ConvIDs 是会话白名单（由调用方派生，见 wails.SearchService）。
+	//
+	// 空切片 = 【没有任何可见会话】→ 实现返回空结果，而不是退化成全库搜索：
+	// 已被本地移除的对端、已解散的群，其消息不应该因为调用方漏传白名单而
+	// 突然出现在搜索结果里。
+	ConvIDs []string
+	// Limit 是单页上限；<= 0 时实现取 DefaultSearchLimit。
+	Limit int
+	// BeforeMsgID 是分页游标：只返回比这条【更旧】的命中。空串 = 首页。
+	//
+	// 为什么游标是 msg_id 而不是 sent_at：同一毫秒内写入多条是常态（连发、
+	// 群发、入站消息共用发送方时间戳），按时间戳翻页会把边界上同毫秒的其它
+	// 命中整页丢掉（既不重复也不遗漏这条要求，只有按唯一且单调的写入序才能
+	// 满足）。实现内部把 msg_id 换算成自己的写入序（sqlite 的 rowid / mem 的
+	// 写入序号），因此游标不泄漏任何存储细节。
+	//
+	// 指向不存在的消息时返回空结果（绝不退化为首页）。
+	BeforeMsgID string
+}
+
 // MessageRepo 是消息持久化端口。
 type MessageRepo interface {
 	Append(m message.Message) error
@@ -134,6 +177,37 @@ type MessageRepo interface {
 	// Latest 按 conv 取最近 limit 条；before 为游标（毫秒时间戳，0 表示最新）。
 	Latest(convID string, limit int, before int64) ([]message.Message, error)
 	MarkDelivered(msgID string) error
+	// Search 全局搜索本机消息历史（跨会话，新→旧）。两个实现必须逐条一致：
+	//
+	//   - 只搜 content，且是【子串】匹配；ASCII 忽略大小写、非 ASCII 逐字节
+	//     精确 —— 这正是 SQLite LIKE 的默认语义，mem 实现不得使用
+	//     strings.ToLower（它会把 Unicode 也折叠，与生产实现分叉）；
+	//   - **遵守会话清空点**：sent_at <= cleared_at 的消息不出现在结果里。
+	//     判据与前端 activeMessages 逐字对齐（严格大于才可见）。
+	//     过滤必须发生在 SQL 里，不能取回后再过滤 —— 后者会让每页条数不定、
+	//     出现「翻了半天全是空白页」；
+	//   - ConvIDs 为空 / Text 为空：返回空切片（不是全库、不是 nil 报错）；
+	//   - BeforeMsgID 指向不存在的消息：返回空切片；
+	//   - 排序：写入序倒序（与「时间倒序」在正常写入路径下等价）；
+	//   - 不返回命中总数：调用方无法也不需要知道（见 MessageSearchQuery）。
+	Search(q MessageSearchQuery) ([]message.Message, error)
+	// Window 取「以某条消息为中心」的一页（含该消息本身），新→旧。
+	//
+	// 跳转定位专用（搜索命中 → 打开会话并停在那一条）。before / after 是命中
+	// 消息【前后各取多少条】；两数都 <= 0 时只有命中消息本身。
+	//
+	// 契约：
+	//   - 锚点不存在、或锚点已被会话清空点隐藏、或 convID 与锚点实际所属会话
+	//     不符：一律返回【空切片】，不返回错误 —— 「点了历史里一条已被清空的
+	//     消息」是正常的用户路径，调用方据此回退到 Latest 并给出提示；
+	//   - 窗口内的消息同样遵守清空点（与 Search 一致，界面不会看到被隐藏的
+	//     消息混在窗口里）；
+	//   - 返回新→旧，与 Latest 一致（前端 loadHistory 就是按这个方向 reverse）。
+	//
+	// 为什么不拆成 Latest(旧侧) + After(新侧) 由调用方拼：Latest 的游标是
+	// sent_at，与锚点同毫秒的其它消息会被整条跳过，两侧由此错位；而 Window
+	// 的锚点是内部写入序，两侧严丝合缝。
+	Window(convID, msgID string, before, after int) ([]message.Message, error)
 }
 
 // ---------------------------------------------------------------------------

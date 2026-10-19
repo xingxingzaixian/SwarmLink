@@ -54,6 +54,18 @@ func ToMessageDTO(m message.Message) MessageDTO {
 	}
 }
 
+// ToMessageDTOs 批量转换领域消息。
+//
+// 列表类返回值（历史、搜索结果、跳转窗口）统一走它，不要在调用点各写一遍
+// for 循环：那种重复在「消息新增一个字段」时是最典型的漏改点。
+func ToMessageDTOs(ms []message.Message) []MessageDTO {
+	out := make([]MessageDTO, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, ToMessageDTO(m))
+	}
+	return out
+}
+
 // ConversationDTO 是会话列表项。
 type ConversationDTO struct {
 	ConvID   string `json:"convId"`

@@ -29,5 +29,5 @@ frontend/dist/
 .DS_Store
 .idea/
 .vscode/
-plans/
 test/
+plan/

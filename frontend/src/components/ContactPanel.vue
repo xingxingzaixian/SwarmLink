@@ -83,6 +83,17 @@ const searchPlaceholder = computed(() =>
   tab.value === 'groups' ? '搜索群组…' : '搜索会话 / 节点…'
 )
 
+/**
+ * 打开「搜索聊天记录」弹层，带上当前关键词。
+ *
+ * 顶部这个输入框的本职是筛联系人，但用户想找的往往是「某句话」而不是「某个人」：
+ * 在联系人里搜不到时，回车（或点右侧那颗按钮）直接去聊天记录里搜是最短的出口，
+ * 与 Ctrl+K 等价（都是 ui.openSearch）。
+ */
+function openHistorySearch(): void {
+  ui.openSearch(query.value)
+}
+
 // ---------------------------------------------------------------- 行数据
 
 function peerConvId(p: Peer): string {
@@ -195,9 +206,12 @@ function toggleMenu(): void {
   menuOpen.value = !menuOpen.value
 }
 
-function pick(kind: 'settings' | 'debug' | 'transfers' | 'share'): void {
+function pick(kind: 'settings' | 'debug' | 'transfers' | 'share' | 'search'): void {
   menuOpen.value = false
-  ui.openPanel(kind)
+  // 从菜单进来是「从头找」：用空关键词。带着左栏那个筛选词会让人莫名其妙地
+  // 只搜到一小撮结果（而左栏输入框的回车走的才是「拿我刚打的词去找」）。
+  if (kind === 'search') ui.openSearch('')
+  else ui.openPanel(kind)
 }
 
 /** 点击别处收起菜单。用 capture 是为了在行点击之前就拿到事件。 */
@@ -247,24 +261,38 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
     </div>
 
     <header class="rail-head">
-      <label class="search">
-        <Icon name="search" :size="14" />
-        <input
-          v-model="query"
-          type="text"
-          :placeholder="searchPlaceholder"
-          spellcheck="false"
-        />
+      <div class="find">
+        <label class="search">
+          <Icon name="search" :size="14" />
+          <input
+            v-model="query"
+            type="text"
+            :placeholder="searchPlaceholder"
+            spellcheck="false"
+            @keydown.enter="openHistorySearch"
+          />
+          <button
+            v-if="query"
+            class="icon-btn clear"
+            title="清除"
+            aria-label="清除搜索"
+            @click="query = ''"
+          >
+            <Icon name="x" :size="13" />
+          </button>
+        </label>
+
+        <!-- 聊天记录搜索的入口。放在筛选框右侧而不是塞进页面菜单里：
+             用户「想找一句话」时手已经在输入框里了，就地回车/点一下最短。 -->
         <button
-          v-if="query"
-          class="icon-btn clear"
-          title="清除"
-          aria-label="清除搜索"
-          @click="query = ''"
+          class="icon-btn"
+          title="搜索聊天记录（Ctrl+K）"
+          aria-label="搜索聊天记录"
+          @click="openHistorySearch"
         >
-          <Icon name="x" :size="13" />
+          <Icon name="clock" :size="16" />
         </button>
-      </label>
+      </div>
 
       <!-- 视图切换：联系人与群组改成图标 + 标签两个页签，而不是在同一列表里纵向排布。
            两者是不同性质的条目（人 vs 会话容器），混排时用户得自己找分隔线；
@@ -452,7 +480,7 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
       <button
         class="icon-btn"
         :class="{ on: menuOpen }"
-        title="设置 / 共享 / 调试 / 传输"
+        title="搜索 / 设置 / 共享 / 调试 / 传输"
         aria-label="打开功能菜单"
         @click="toggleMenu"
       >
@@ -461,6 +489,9 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
     </footer>
 
     <div v-if="menuOpen" class="self-menu">
+      <button class="menu-item" @click="pick('search')">
+        <Icon name="clock" :size="15" />搜索聊天记录
+      </button>
       <button class="menu-item" @click="pick('settings')">
         <Icon name="sliders" :size="15" />设置
       </button>
@@ -553,7 +584,17 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
   padding: 4px 16px 8px;
 }
 
+/* 筛选框 + 聊天记录搜索入口并排。入口按钮与筛选框同为 34px 高，
+   让两者像一条完整的控件而不是「一个框旁边飘着一个小按钮」。 */
+.find {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .search {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;

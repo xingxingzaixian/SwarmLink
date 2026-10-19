@@ -14,6 +14,7 @@ import ChatView from './views/ChatView.vue'
 import ContactPanel from './components/ContactPanel.vue'
 import SidePanel from './components/SidePanel.vue'
 import TransferQueueBar from './components/TransferQueueBar.vue'
+import SearchPanel from './views/SearchPanel.vue'
 import SettingsDialog from './views/SettingsDialog.vue'
 import ShareDialog from './views/ShareDialog.vue'
 import { getApi, isMockMode } from './api'
@@ -76,8 +77,28 @@ watch(
   { immediate: true }
 )
 
+/**
+ * 全局快捷键：Ctrl/⌘ + K 打开「搜索聊天记录」。
+ *
+ * 挂在 window 而不是某个输入框上：它是全局动作，焦点在哪（包括正在写草稿）
+ * 都应该能用。`altKey` 要排除掉 —— macOS 的 ⌘⌥K 是别的意思，
+ * 抢过来会让用户觉得「这个应用乱吃快捷键」。
+ *
+ * preventDefault 不是可选的：WebView 里 Ctrl+K 在部分平台有默认行为
+ * （聚焦到浏览器层 / 清空当前行），不拦会出现「面板开了但焦点丢了」。
+ */
+function onShortcut(e: KeyboardEvent): void {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+  if (e.key.toLowerCase() !== 'k') return
+  e.preventDefault()
+  ui.openSearch('')
+}
+
+onMounted(() => window.addEventListener('keydown', onShortcut))
+
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
+  window.removeEventListener('keydown', onShortcut)
 })
 </script>
 
@@ -97,9 +118,15 @@ onUnmounted(() => {
     <TransferQueueBar />
   </div>
 
+  <!-- 搜索聊天记录也是独立弹框：它是「整窗两栏」（左筛选 + 右结果），
+       塞进设置那种页签组里没有意义；而且它需要一个初始关键词。 -->
+  <SearchPanel v-if="ui.panel === 'search'" />
+
   <!-- 共享中心是独立弹框：它的形态（左右分栏 + 文件表格 + 一排动作）与
        「设置 / 调试 / 传输」那种单列表单完全不同，塞进同一个页签组里只会两边都别扭。 -->
-  <ShareDialog v-if="ui.panel === 'share'" />
+  <ShareDialog v-else-if="ui.panel === 'share'" />
+  <!-- 兜底必须排在最后，且是「还有别的面板」而不是「panel 非空」：
+       SettingsDialog 自己不认 'search'，会把未知值当成 'settings' 渲染成一片设置页。 -->
   <SettingsDialog v-else-if="ui.panel" />
 </template>
 

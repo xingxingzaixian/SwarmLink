@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 /** 全局功能面板。它们与「当前会话」无关，因此不占右栏，改用弹层。 */
-export type PanelKind = '' | 'settings' | 'debug' | 'transfers' | 'share'
+export type PanelKind = '' | 'settings' | 'debug' | 'transfers' | 'share' | 'search'
 
 /** 右栏的两种形态。 */
 export type SideMode = 'info' | 'transfer'
@@ -87,6 +87,15 @@ export const useUiStore = defineStore('ui', () => {
   let toastTimer: number | undefined
 
   /**
+   * 历史搜索弹层的初始关键词。
+   *
+   * 左栏顶部那个输入框既是「联系人筛选」，也可以当作「去聊天记录里找」的入口
+   * （按回车）。两条路共用一个输入值，而弹层是 Teleport 到 body 的、与左栏没有
+   * 父子关系 —— 这个值只能从 store 递过去。
+   */
+  const searchSeed = ref('')
+
+  /**
    * 配置被「非设置页」的入口改过的次数。
    *
    * 存在的理由：提示开关有两个入口（设置页、托盘菜单）。托盘改完后端会推
@@ -103,6 +112,18 @@ export const useUiStore = defineStore('ui', () => {
 
   function openPanel(kind: Exclude<PanelKind, ''>): void {
     panel.value = kind
+  }
+
+  /**
+   * 打开「搜索聊天记录」弹层。
+   *
+   * 与 openPanel 分开是因为它需要一个初始关键词；而且所有入口（左栏搜索框回车、
+   * Ctrl+K、本人菜单）都必须走它 —— 只要有一个入口忘了给它，就会读到上一次
+   * 残留的关键词，表现为「按 Ctrl+K 出来的是上次搜的词」。
+   */
+  function openSearch(seed: string): void {
+    searchSeed.value = seed.trim()
+    panel.value = 'search'
   }
 
   function setTheme(next: Theme): void {
@@ -125,6 +146,9 @@ export const useUiStore = defineStore('ui', () => {
 
   function closePanel(): void {
     panel.value = ''
+    // 顺手清掉搜索的初始关键词：弹层已经卸载，留着它只会在下次
+    // 由别的入口打开时重新冒出来。
+    searchSeed.value = ''
   }
 
   /** 展示传输：由「发送文件」等主动行为触发，因此解除手动接管。 */
@@ -171,9 +195,11 @@ export const useUiStore = defineStore('ui', () => {
     toggleTheme,
     pathInputVisible,
     toast,
+    searchSeed,
     configRevision,
     bumpConfigRevision,
     openPanel,
+    openSearch,
     closePanel,
     focusTransfer,
     focusInfo,

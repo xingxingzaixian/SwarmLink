@@ -67,14 +67,9 @@ const quality = computed(() => {
 <template>
   <div class="card">
     <div class="profile">
-      <Avatar
-        :seed="group ? group.groupId : peer?.nodeId || convId"
-        :name="group ? group.name : peer?.displayName || ''"
-        :size="92"
-        :shape="group ? 'square' : 'circle'"
-        :online="group ? null : peer ? peer.connected || peer.online : null"
-        active
-      />
+      <Avatar :seed="group ? group.groupId : peer?.nodeId || convId"
+        :name="group ? group.name : peer?.displayName || ''" :size="92" :shape="group ? 'square' : 'circle'"
+        :online="group ? null : peer ? peer.connected || peer.online : null" active />
       <div class="profile__name">{{ group ? group.name : peer?.displayName || '未知节点' }}</div>
       <span class="profile__status" :class="presence.cls">
         <span class="dot dot--static" />
@@ -104,12 +99,7 @@ const quality = computed(() => {
         <span class="kv__k">节点 ID</span>
         <span class="kv__v">
           <span class="nowrap">{{ peer.nodeId }}</span>
-          <button
-            class="kv__copy"
-            :title="`复制节点 ID`"
-            :aria-label="`复制节点 ID`"
-            @click="copy(peer.nodeId, 'id')"
-          >
+          <button class="kv__copy" :title="`复制节点 ID`" :aria-label="`复制节点 ID`" @click="copy(peer.nodeId, 'id')">
             <Icon :name="copied === 'id' ? 'check' : 'copy'" :size="14" />
           </button>
         </span>
@@ -188,11 +178,6 @@ const quality = computed(() => {
         </div>
       </div>
     </template>
-
-    <p v-if="peer && !peer.connected" class="tip">
-      当前没有可用连接。发消息时会按需拨号（ADR-009：空闲连接会被回收，
-      因此首条消息可能多等一个 RTT）。
-    </p>
   </div>
 </template>
 

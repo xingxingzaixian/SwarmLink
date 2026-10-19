@@ -312,6 +312,15 @@ export interface TransferDTO {
     "completed": number;
     "totalChunks": number;
     "percent": number;
+
+    /**
+     * ResumeFromPercent 是【本次尝试的起点】百分比：>0 表示这条是从上次的
+     * 半截续传的，界面显示「续传自 XX%」；0（omitempty 直接省掉）表示从头传。
+     * 
+     * 与 Percent 并列而不是塞进 percent：两者回答的是不同的问题 ——
+     * 「现在到哪儿了」与「这次从哪儿接上」。
+     */
+    "resumeFromPercent"?: number;
     "status": string;
 
     /**

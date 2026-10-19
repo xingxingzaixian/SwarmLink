@@ -195,6 +195,19 @@ func (a *ChatApp) History(convID string, limit int, before int64) ([]message.Mes
 	return a.store.Latest(convID, limit, before)
 }
 
+// Search 搜索本机消息历史（语义见 ports.MessageRepo.Search）。
+//
+// 这里只把端口转出去：会话白名单（哪些会话对用户可见）由入站适配器派生 ——
+// 那需要节点目录与群名册，而 ChatApp 刻意只认识消息。
+func (a *ChatApp) Search(q ports.MessageSearchQuery) ([]message.Message, error) {
+	return a.store.Search(q)
+}
+
+// Window 取以某条消息为中心的一页（语义见 ports.MessageRepo.Window）。
+func (a *ChatApp) Window(convID, msgID string, before, after int) ([]message.Message, error) {
+	return a.store.Window(convID, msgID, before, after)
+}
+
 // HandleChat 处理入站消息：幂等入库 + 无条件回 ACK。
 func (a *ChatApp) HandleChat(sess ports.Session, f protocol.Frame) error {
 	var c protocol.Chat

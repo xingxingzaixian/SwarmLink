@@ -24,6 +24,26 @@ export const useChatStore = defineStore('chat', () => {
   const error = ref('')
 
   /**
+   * 跳转定位的目标消息（由搜索弹层触发，见 openAt）。
+   *
+   * 为什么只存一个「意图」、而不是在 openAt 里直接 scrollIntoView：
+   *   - 滚动需要 DOM，store 拿不到 ChatView 的滚动容器；
+   *   - 更要紧的是【时机】—— 跳转窗口要到下一次渲染才进 DOM，
+   *     在 openAt 里同步 querySelector 必然查不到（拿到 null 而静默不滚）。
+   * 所以由 ChatView 在渲染后消费，消费完（含 2s 高亮）调 clearAnchor 撤掉。
+   */
+  const anchorMsgId = ref('')
+
+  /**
+   * 会话内的提示条：「不是错误，但不能静默」的那类事。
+   *
+   * 与 error 分开的理由是生命周期：error 会被下一次 loadHistory 开头清空，
+   * 而这条提示恰恰是在 loadHistory【之后】才成立的（「跳转失败 → 已回退最新」），
+   * 塞进同一个字段必然互相踩。
+   */
+  const notice = ref('')
+
+  /**
    * 每个会话的「清空点」（毫秒；缺省/0 = 未清空）。
    *
    * 这是【视图规则】，不参与任何后端查询：被清空的消息仍在
@@ -108,8 +128,69 @@ export const useChatStore = defineStore('chat', () => {
   async function open(conv: Conversation): Promise<void> {
     activeConvId.value = conv.convId
     delete unread.value[conv.convId]
+    notice.value = ''
+    anchorMsgId.value = ''
     // 两件事都要等：只等历史会让「已清空的会话」先闪一下全部消息再消失
     await Promise.all([loadHistory(conv), loadClearedAt(conv.convId)])
+  }
+
+  /**
+   * 跳转窗口的取数范围：向上多取、向下少取。
+   *
+   * 不对称是有意的 —— 锚点会被滚到视口中央，上方那 40 条是「前情提要」，
+   * 下方 20 条是「后来怎样了」。取成对称的话，用户想看前情就得先往上翻。
+   */
+  const JUMP_BEFORE = 40
+  const JUMP_AFTER = 20
+
+  /**
+   * 打开会话并定位到某条消息（搜索结果点击、P3）。
+   *
+   * 与 open 的区别只有一处：历史不是「最新 100 条」，而是 JumpContext 给的
+   * 【以该条为中心的一页】—— 消息可能在几千条之前，靠 Latest 翻不到。
+   *
+   * 这条路径有两个必须守住的边界：
+   *   1. 空窗口 = 后端约定的「正常用户路径」（不存在 / 不属于该会话 /
+   *      已被清空点隐藏），此时回退到最新一页并【明确提示】，不静默失败；
+   *   2. 失败也要让会话可用 —— 否则用户点完搜索结果面对的是一个空聊天区，
+   *      而他连「我在哪个会话里」都看不出来。
+   */
+  async function openAt(conv: Conversation, msgId: string): Promise<void> {
+    if (!conv || !msgId) return
+    activeConvId.value = conv.convId
+    delete unread.value[conv.convId]
+    error.value = ''
+    notice.value = ''
+    anchorMsgId.value = ''
+    loading.value = true
+    try {
+      const api = await getApi()
+      const win = await api.jumpContext(conv.convId, msgId, JUMP_BEFORE, JUMP_AFTER)
+      // 清空点要一起取：窗口已被后端按清空点过滤，但 activeMessages 还会按
+      // 本地这份再过滤一次（撤销清空后要能立刻看到更多）。两边不同步时，
+      // 表现是「跳过去只看到一个洞」—— 而这条消息其实就在窗口里。
+      await loadClearedAt(conv.convId)
+
+      if (!win.length) {
+        await loadHistory(conv)
+        notice.value = '这条消息已不在了（可能已被清空），已回到最新消息'
+        return
+      }
+      // 后端返回「新→旧」，界面按时间正序渲染 —— 与 loadHistory 同一条方向约定
+      messagesByConv.value[conv.convId] = [...win].reverse()
+      anchorMsgId.value = msgId
+    } catch (e: any) {
+      // 失败也把会话加载出来（见上「边界 2」），再报错
+      await loadHistory(conv)
+      error.value = String(e?.message ?? e)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /** 锚点已被 ChatView 消费（滚完 + 高亮结束）后撤掉。 */
+  function clearAnchor(): void {
+    anchorMsgId.value = ''
   }
 
   async function loadHistory(conv: Conversation): Promise<void> {
@@ -388,12 +469,16 @@ export const useChatStore = defineStore('chat', () => {
     activeConvId,
     loading,
     error,
+    notice,
+    anchorMsgId,
     activeMessages,
     activeConversation,
     activePeerId,
     activeIsGroup,
     loadConversations,
     open,
+    openAt,
+    clearAnchor,
     openPeer,
     loadHistory,
     clearedAt,

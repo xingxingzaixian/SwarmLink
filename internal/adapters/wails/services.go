@@ -89,6 +89,7 @@ type ServiceSet struct {
 	Group    *GroupService
 	Notify   *NotifyService
 	Share    *ShareService
+	Search   *SearchService
 }
 
 // NewServices 构造服务集合。
@@ -101,6 +102,7 @@ func NewServices(d Deps) *ServiceSet {
 		Group:    &GroupService{d: d},
 		Notify:   &NotifyService{d: d},
 		Share:    &ShareService{d: d},
+		Search:   &SearchService{d: d},
 	}
 }
 
@@ -1373,6 +1375,85 @@ func (s *ShareService) Browse(shareID string) ([]ShareItemDTO, error) {
 		out = append(out, ToShareItemDTO(it))
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// SearchService
+// ---------------------------------------------------------------------------
+
+// SearchService 暴露「本机消息历史搜索」（ADR-013）。
+//
+// 为什么是独立服务而不是挂在 ChatService 上：搜索是【跨会话】的全局能力，
+// 与「当前打开的那个会话」无关 —— 它因此不占右栏，而是整窗弹层。
+// 这与 Conversations() 留在 ChatService 上不冲突：那个本来就是会话列表本身。
+type SearchService struct{ d Deps }
+
+// Search 搜索本机消息历史（新→旧，遵守会话清空点）。
+//
+//   - text 的首尾空白会被去掉；空串直接返回空数组（不查库）；
+//   - convIDs 为空时改用 visibleConvIDs()：与 Conversations() 同源，因此
+//     「本地已移除的对端」不会出现在结果里（目录的 List 默认排除 blocked）；
+//   - beforeMsgID 是分页游标：传上一页最后一条的 msgId，首页传空串。
+//     游标为什么用消息 ID 而不是时间戳，见 ports.MessageSearchQuery。
+//
+// 不返回命中总数：20 万条消息下 count(*) 是 213ms、每会话计数是 1.9s，
+// 而左栏本来就不显示数字（按已加载结果派生「最近命中时间」）。
+func (s *SearchService) Search(text string, convIDs []string, limit int, beforeMsgID string) ([]MessageDTO, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return []MessageDTO{}, nil
+	}
+	if len(convIDs) == 0 {
+		convIDs = visibleConvIDs(s.d)
+	}
+	if len(convIDs) == 0 {
+		// 一个可见会话都没有（全新安装 / 全部被移除）：不必麻烦存储层。
+		return []MessageDTO{}, nil
+	}
+	ms, err := s.d.Chat.Search(ports.MessageSearchQuery{
+		Text:        text,
+		ConvIDs:     convIDs,
+		Limit:       limit,
+		BeforeMsgID: beforeMsgID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ToMessageDTOs(ms), nil
+}
+
+// JumpContext 取「以某条消息为中心」的一页（新→旧），用于「点搜索结果 → 定位」。
+//
+// 返回空数组表示该消息不存在、不属于 convID、或已被会话清空点隐藏 —— 前端
+// 据此回退到会话最新一页并给出提示，不把它当成错误（那是正常的用户路径）。
+func (s *SearchService) JumpContext(convID string, msgID string, before int, after int) ([]MessageDTO, error) {
+	ms, err := s.d.Chat.Window(convID, msgID, before, after)
+	if err != nil {
+		return nil, err
+	}
+	return ToMessageDTOs(ms), nil
+}
+
+// visibleConvIDs 返回「可见会话集合」：单聊取节点目录里未被本地移除的对端，
+// 群聊取本地已知的全部群。
+//
+// 它必须与 Conversations() 同源 —— 两处各派生一次，早晚会分叉成
+// 「左栏里有这个名字，点进去一条都搜不到」。
+//
+// 已解散的群【仍然计入】：会话列表也仍然列出它，历史也仍然打得开，把它的历史
+// 从搜索里抹掉会让「我记得那条消息」变成找不回来。真正要挡住的只有「被本地
+// 移除的对端」，而 List 默认就排除了 blocked 的条目。
+func visibleConvIDs(d Deps) []string {
+	peers := d.PeerDir.List(ports.PeerFilter{})
+	groups := d.GroupRepo.List()
+	out := make([]string, 0, len(peers)+len(groups))
+	for _, p := range peers {
+		out = append(out, message.DirectConvID(d.Self.NodeID, p.NodeID))
+	}
+	for _, g := range groups {
+		out = append(out, message.GroupConvID(g.ID))
+	}
+	return out
 }
 
 // Download 请共享方把指定文件推过来（异步传输：返回即代表已受理）。

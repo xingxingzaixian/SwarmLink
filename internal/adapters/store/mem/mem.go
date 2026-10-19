@@ -37,6 +37,14 @@ type Messages struct {
 	jobs     map[string]transfer.Job
 	// cleared 是会话「清空点」：早于它的消息不显示（消息不删除）。
 	cleared map[string]time.Time
+	// seq 是「写入序号」：Search / Window 需要一个唯一且单调的排序键
+	// （见 ports.MessageSearchQuery.BeforeMsgID）。
+	//
+	// sqlite 侧这个角色由 rowid 扮演，内存里没有等价物 —— 不显式维护一份，
+	// 内存实现就只能退化成按 sent_at 分页，而那正是「与锚点同毫秒的其它消息
+	// 会被整条跳过」的写法。两个实现对等是本仓的测试策略，所以这里补上它。
+	seq     map[string]int64
+	nextSeq int64
 }
 
 var (
@@ -52,14 +60,32 @@ func NewMessages(clk ports.Clock) *Messages {
 		outbox:   make(map[string]ports.OutboxEntry),
 		jobs:     make(map[string]transfer.Job),
 		cleared:  make(map[string]time.Time),
+		seq:      make(map[string]int64),
 	}
+}
+
+// put 写入消息并分配写入序号（调用方必须已持有写锁）。
+func (s *Messages) put(m message.Message) {
+	s.nextSeq++
+	s.messages[m.MsgID] = m
+	s.seq[m.MsgID] = s.nextSeq
+}
+
+// visible 报告消息是否未被会话清空点隐藏（调用方必须已持有读锁）。
+//
+// 判据必须与 sqlite 实现（messages_search.go 的 visibleClause）以及前端
+// stores/chat.ts 的 activeMessages 逐字一致：sent_at 严格大于 cleared_at
+// 才可见。差一个等号就是「界面上没有、搜索能搜到」。
+func (s *Messages) visible(m message.Message) bool {
+	at, ok := s.cleared[m.ConvID]
+	return !ok || m.SentAt.After(at)
 }
 
 // Append 追加消息（不判重）。
 func (s *Messages) Append(m message.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.messages[m.MsgID] = m
+	s.put(m)
 	return nil
 }
 
@@ -70,7 +96,7 @@ func (s *Messages) AppendIfAbsent(m message.Message) (bool, error) {
 	if _, ok := s.messages[m.MsgID]; ok {
 		return false, nil
 	}
-	s.messages[m.MsgID] = m
+	s.put(m)
 	return true, nil
 }
 
@@ -97,6 +123,188 @@ func (s *Messages) Latest(convID string, limit int, before int64) ([]message.Mes
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// Search 实现 ports.MessageRepo.Search（语义见端口注释）。
+func (s *Messages) Search(q ports.MessageSearchQuery) ([]message.Message, error) {
+	if q.Text == "" || len(q.ConvIDs) == 0 {
+		return []message.Message{}, nil
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = ports.DefaultSearchLimit
+	}
+	allow := make(map[string]struct{}, len(q.ConvIDs))
+	for _, id := range q.ConvIDs {
+		allow[id] = struct{}{}
+	}
+
+	s.mu.RLock()
+	cursor := int64(0)
+	if q.BeforeMsgID != "" {
+		c, ok := s.seq[q.BeforeMsgID]
+		if !ok {
+			// 游标指向不存在的消息：返回空，绝不退化成首页（否则前端会以为
+			// 「又翻出了一批结果」而把第一页重复贴一遍）。
+			s.mu.RUnlock()
+			return []message.Message{}, nil
+		}
+		cursor = c
+	}
+	hits := make([]seqMessage, 0, limit)
+	for id, m := range s.messages {
+		seq := s.seq[id]
+		if cursor > 0 && seq >= cursor {
+			continue
+		}
+		if _, ok := allow[m.ConvID]; !ok {
+			continue
+		}
+		if !s.visible(m) {
+			continue
+		}
+		if !likeContains(m.Content, q.Text) {
+			continue
+		}
+		hits = append(hits, seqMessage{seq: seq, msg: m})
+	}
+	s.mu.RUnlock()
+
+	// 写入序倒序 = sqlite 侧的 ORDER BY id DESC（见端口注释里的排序契约）。
+	sort.Slice(hits, func(i, j int) bool { return hits[i].seq > hits[j].seq })
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	out := make([]message.Message, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.msg)
+	}
+	return out, nil
+}
+
+// Window 实现 ports.MessageRepo.Window（语义见端口注释）。
+func (s *Messages) Window(convID, msgID string, before, after int) ([]message.Message, error) {
+	if convID == "" || msgID == "" {
+		return []message.Message{}, nil
+	}
+	if before < 0 {
+		before = 0
+	}
+	if after < 0 {
+		after = 0
+	}
+
+	s.mu.RLock()
+	anchor, ok := s.messages[msgID]
+	if !ok || anchor.ConvID != convID || !s.visible(anchor) {
+		// 不存在 / 不属于这个会话 / 已被清空：都是「回退到最新」的信号，
+		// 与 sqlite 实现返回同一种结果（空切片 + 无错误）。
+		s.mu.RUnlock()
+		return []message.Message{}, nil
+	}
+	anchorEntry := seqMessage{seq: s.seq[msgID], msg: anchor}
+
+	// 比较键是 (sent_at, 写入序号)，与 sqlite 侧的 (sent_at, rowid) 逐字对应
+	//（那边用的索引就是 (conv_id, sent_at DESC, id DESC)）。用行值比较是为了
+	// 让锚点唯一：同一毫秒里的其它消息不能与锚点互踩，否则命中会被挤出窗口。
+	older := make([]seqMessage, 0, before+1)
+	newer := make([]seqMessage, 0, after)
+	for id, m := range s.messages {
+		if m.ConvID != convID || !s.visible(m) {
+			continue
+		}
+		e := seqMessage{seq: s.seq[id], msg: m}
+		if lessByDisplay(anchorEntry, e) {
+			newer = append(newer, e) // 显示序上晚于锚点
+			continue
+		}
+		older = append(older, e) // 含锚点本身
+	}
+	s.mu.RUnlock()
+
+	// 旧侧取紧邻锚点之前的 before 条（含锚点本身，故 +1）；新侧取紧邻锚点
+	// 之后的 after 条 —— 「紧邻」二字是窗口语义的全部，取成整段尾部就错了。
+	sort.Slice(older, func(i, j int) bool { return lessByDisplay(older[j], older[i]) })
+	if len(older) > before+1 {
+		older = older[:before+1]
+	}
+	sort.Slice(newer, func(i, j int) bool { return lessByDisplay(newer[i], newer[j]) })
+	if len(newer) > after {
+		newer = newer[:after]
+	}
+
+	out := make([]message.Message, 0, len(older)+len(newer))
+	for i := len(newer) - 1; i >= 0; i-- {
+		out = append(out, newer[i].msg)
+	}
+	for _, e := range older {
+		out = append(out, e.msg)
+	}
+	return out, nil
+}
+
+// seqMessage 把消息与它的写入序号绑在一起排序用。
+type seqMessage struct {
+	seq int64
+	msg message.Message
+}
+
+// lessByDisplay 报告 a 是否排在 b 之前（显示序：(sent_at, 写入序号) 升序）。
+//
+// 这与 sqlite 侧 `ORDER BY sent_at, id` 是同一条规则；写入序号就是内存实现里的
+// rowid 替身。两个实现必须逐字一致，否则对拍测试会（也应该）失败。
+func lessByDisplay(a, b seqMessage) bool {
+	if !a.msg.SentAt.Equal(b.msg.SentAt) {
+		return a.msg.SentAt.Before(b.msg.SentAt)
+	}
+	return a.seq < b.seq
+}
+
+// likeContains 报告 haystack 是否包含 needle（子串），大小写规则与 SQLite 的
+// LIKE 一致：只对 ASCII 字母忽略大小写，其余字节逐字精确。
+//
+// 为什么不用 strings.Contains(strings.ToLower(...))：ToLower 会折叠 Unicode
+// （西里尔字母、'İ'、希腊字母…），而生产实现（SQLite LIKE）不会 —— 用 mem 跑
+// 的单测与跑 sqlite 的线上就会在这些边界上给出不同的答案。
+//
+// 逐字节比较在这里是安全的：needle 是合法 UTF-8，其首字节不可能是续字节
+// （0x80~0xBF），因此匹配只可能落在字符边界上。
+func likeContains(haystack, needle string) bool {
+	n, h := len(needle), len(haystack)
+	if n == 0 {
+		return true
+	}
+	if n > h {
+		return false
+	}
+	for i := 0; i+n <= h; i++ {
+		matched := true
+		for j := 0; j < n; j++ {
+			if !equalFoldASCII(haystack[i+j], needle[j]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// equalFoldASCII 逐字节比较，仅 ASCII 字母忽略大小写。
+func equalFoldASCII(a, b byte) bool {
+	if a == b {
+		return true
+	}
+	return foldASCII(a) == foldASCII(b)
+}
+
+func foldASCII(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + 'a' - 'A'
+	}
+	return c
 }
 
 // MarkDelivered 置为已送达。
@@ -189,7 +397,7 @@ func (s *Messages) AppendOutgoing(m message.Message, nextTry time.Time) error {
 	if m.State == "" {
 		m.State = message.StatePending
 	}
-	s.messages[m.MsgID] = m
+	s.put(m)
 	s.outbox[m.MsgID] = ports.OutboxEntry{MsgID: m.MsgID, ConvID: m.ConvID, NextTryAt: nextTry}
 	return nil
 }

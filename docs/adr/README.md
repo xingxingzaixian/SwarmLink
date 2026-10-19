@@ -17,6 +17,7 @@
 | [ADR-010](ADR-010-full-directory-sync.md) | 全量节点目录同步，不做增量 | §4.5 | `test/scale` 目录 19/19 条 |
 | [ADR-011](ADR-011-cross-subnet-seeds.md) | 每网段多种子 + 单跳目录拉取 | §4.5.1 | `e2e.TestCrossSubnetConvergenceViaSeed` |
 | [ADR-012](ADR-012-group-membership-token-crdt.md) | 群成员「发票 / 撕票」：退出权归本人、准入权归群主 | §4.6（部分替代 ADR-003） | `group.TestMerge*` / `group.TestReAddAfterLeaveWins` / `e2e.TestOfflineMemberLearnsGroupOnRejoin` |
+| [ADR-013](ADR-013-local-message-search.md) | 本机消息历史搜索用 LIKE 尾优先倒扫，不用 FTS5 | —（新需求，架构书未覆盖） | `sqlite.TestSearch*` / `store/parity.TestSearchAndWindowParity` / `wails.TestSearchService*`；前端为 `make ci` + 手工清单（本仓约定前端不写自动化测试） |
 
 ## 本仓库相对架构书的实现偏差
 
