@@ -471,9 +471,24 @@ type DiscoveryStrategy interface {
 // 若这里出现 "Relay" / "Authoritative" 之类的方法，说明设计已经走形。
 type SeedRegistry interface {
 	// Pick 返回本轮该问的 N 颗种子（随机，避免 200 节点集中打同一颗）。
+	//
+	// 注意它【会跳过正在退避的种子】：这份结果用于「这一轮问谁」，
+	// 不能拿来当「配置了哪些种子」用。
 	Pick(n int) []peer.SeedAddr
+	// List 返回全部配置的种子（含正在退避的）。
+	//
+	// 展示与自检必须用这份：用 Pick 代替会让失败中的种子从界面上消失，
+	// 界面上的「种子 0/0」于是被读成「一颗都没配」，而真实情况是
+	// 「配了两颗，都连不上」—— 这两种故障的修法完全不同。
+	List() []peer.SeedAddr
 	// Report 回填探测/拉取结果；learned == nil 表示失败，据此累计 fail_cnt。
 	Report(addr peer.SeedAddr, learned *peer.Announcement, err error)
+	// Replace 用新清单替换注册表内容（设置页保存后热生效，见 D-15）。
+	//
+	// 语义要求：**保留同一地址的历史状态**（失败计数、退避期限、学到的身份）。
+	// 只改一条清单就把全部退避清零，会让「刚恢复的种子」和「刚挂掉的种子」
+	// 同时被立刻重探一遍 —— 用户看到的是「保存设置之后网络抖了一下」。
+	Replace(addrs []peer.SeedAddr)
 }
 
 // SeedProber 执行种子第一跳（UDP 探测 → 种子单播回 ANNOUNCE）。

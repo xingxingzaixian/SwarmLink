@@ -359,8 +359,20 @@ type DiagnosticsDTO struct {
 	ActiveSessions   int       `json:"activeSessions"`
 	ActiveTransfers  int       `json:"activeTransfers"`
 	SeedCount        int       `json:"seedCount"`
+	SeedAvailable    int       `json:"seedAvailable"`
 	SeedDetails      []SeedDTO `json:"seedDetails"`
 	InterfaceSummary []string  `json:"interfaceSummary"`
+
+	// SameSubnetPeers 是同网段、且发得出消息的邻居数（只计广播/组播来源）。
+	//
+	// 与 PeersOnline 的区别必须看清：后者包含「经种子学到的跨网段节点」，
+	// 因此 PeersOnline > SameSubnetPeers 是正常的。状态灯要回答的是
+	// 「我这一段是否通」与「跨网段是否通」两个独立问题。
+	SameSubnetPeers int `json:"sameSubnetPeers"`
+
+	// DiscoveryState 是状态灯结论：live / partial / limited
+	// （判定规则在 app.ClassifyDiscovery，前端只负责翻译文案）。
+	DiscoveryState string `json:"discoveryState"`
 }
 
 // SeedDTO 是种子状态项（含退避信息）。
@@ -370,6 +382,14 @@ type SeedDTO struct {
 	NodeID    string `json:"nodeId"`
 	TCPPort   int    `json:"tcpPort"`
 	Subnet    string `json:"subnet"`
+
+	// LastSeen 是最近一次探测成功的时间（毫秒，0 = 还没探过）。
+	// 界面用它区分「可用」与「可用但很久没刷新」——种子列表按随机顺序探，
+	// 一颗种子可能几十分钟才轮到一次，这是正常的，不该画成异常。
+	LastSeen int64 `json:"lastSeen"`
+
+	// Available 表示这颗种子当前可用（无连续失败，见 udp.SeedState.Available）。
+	Available bool `json:"available"`
 }
 
 // SettingsDTO 是设置项。
@@ -453,6 +473,23 @@ type UpdateStateDTO struct {
 	// 关于信息：出问题时运维第一个要问的三件事（版本 / 数据在哪 / 日志在哪）。
 	DataDir string `json:"dataDir"`
 	LogPath string `json:"logPath"`
+}
+
+// SeedTestDTO 是「测试一颗种子」的结果（D-14）。
+//
+// UDPOK / TCPOK 分开给：用户最常撞到的是「UDP 通、TCP 被防火墙挡」，
+// 一句笼统的「连接失败」会把他引到错误的方向去改。
+type SeedTestDTO struct {
+	Addr        string `json:"addr"`
+	OK          bool   `json:"ok"`
+	UDPOK       bool   `json:"udpOk"`
+	TCPOK       bool   `json:"tcpOk"`
+	RTTMs       int64  `json:"rttMs"`
+	NodeID      string `json:"nodeId"`
+	DisplayName string `json:"displayName"`
+	Subnet      string `json:"subnet"`
+	TCPPort     int    `json:"tcpPort"`
+	Error       string `json:"error"`
 }
 
 // SelfCheckDTO 是部署前置条件（P-1 / P-2）自检结果。

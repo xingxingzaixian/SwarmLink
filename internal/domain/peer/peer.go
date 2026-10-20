@@ -100,6 +100,40 @@ func (p Peer) Expired(now time.Time, ttl time.Duration) bool {
 	return now.Sub(p.LastSeen) > ttl
 }
 
+// LocallyDiscovered 报告这条目录条目能否证明「本网段有邻居」。
+//
+// 只有广播与组播两条通道算：它们的报文从本网段链路进来，且 ObservedIP 由
+// 本地网络栈给出。种子学来的条目（SourceSeed）与第三方转述（SourceGossip）
+// 只能证明「别人告诉我他是谁」，证明不了他和我同网段 ——
+// 若把两者混进同一个计数，「同网段已连接」就成了一句谎话，
+// 而这恰恰是跨网段故障时用户第一个会看的地方。
+func (p Peer) LocallyDiscovered() bool {
+	return p.Source == SourceBroadcast || p.Source == SourceMulticast
+}
+
+// Reachable 报告这个节点当前「发得出消息」。
+//
+// 必须与前端 stores/peers.ts 的 reachable() 同口径：状态灯上的数字与左栏
+// 的「在线」分组用的是同一批节点，两处判据不一致时用户会看到
+// 「同网段 3」但列表里只有 1 个在线，而这种不一致最难解释。
+//
+// 三档可达性（ADR-009）：
+//   - 已有 TCP 会话：首条消息零跳数，立刻发得出；
+//   - state == online：握手过；
+//   - state == discovered：只有新鲜的广播、地址已知，首条消息多一个 RTT。
+func (p Peer) Reachable(connected bool) bool {
+	if connected {
+		return true
+	}
+	switch p.State {
+	case StateOnline:
+		return true
+	case StateDiscovered:
+		return p.LastAddr != ""
+	}
+	return false
+}
+
 // Announcement 是 UDP ANNOUNCE / 种子探测回包携带的节点通告。
 type Announcement struct {
 	NodeID      identity.NodeID

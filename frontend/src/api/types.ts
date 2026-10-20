@@ -259,7 +259,19 @@ export interface SeedDetail {
   nodeId: string
   tcpPort: number
   subnet: string
+  /** 最近一次探测成功的时间（毫秒，0 = 还没探过）。 */
+  lastSeen: number
+  /** 当前可用（无连续失败）。未探过的种子也算可用，见 udp.SeedState.Available。 */
+  available: boolean
 }
+
+/**
+ * 发现层的状态灯结论。
+ *
+ * 由后端判定（app.ClassifyDiscovery），前端只做文案翻译 —— 同一组数字在
+ * 状态灯、诊断面板、自检结果三处出现，口径散在组件里一定会分叉。
+ */
+export type DiscoveryState = 'live' | 'partial' | 'limited'
 
 export interface Diagnostics {
   peersTotal: number
@@ -267,8 +279,13 @@ export interface Diagnostics {
   activeSessions: number
   activeTransfers: number
   seedCount: number
+  /** 可用种子数（状态灯的 N）。 */
+  seedAvailable: number
   seedDetails: SeedDetail[]
   interfaceSummary: string[]
+  /** 同网段且发得出消息的邻居数（只计广播/组播来源）。 */
+  sameSubnetPeers: number
+  discoveryState: DiscoveryState
 }
 
 /** 部署前置条件（P-1 / P-2）自检结果。 */
@@ -283,6 +300,27 @@ export interface SelfCheck {
   p2Overlap: boolean
   p2Detail: string
   seeds: SeedDetail[]
+}
+
+/**
+ * 单颗种子的「测试连接」结果（D-14）。
+ *
+ * `udpOk` 与 `tcpOk` 分开是刻意的：现场最常见的是「UDP 通、TCP 被防火墙挡」，
+ * 一句笼统的「连接失败」会把人引到错误的方向去改。
+ */
+export interface SeedTest {
+  addr: string
+  /** UDP 与 TCP 两跳都通。 */
+  ok: boolean
+  udpOk: boolean
+  tcpOk: boolean
+  rttMs: number
+  nodeId: string
+  displayName: string
+  subnet: string
+  tcpPort: number
+  /** 中文失败原因；空串 = 全通。 */
+  error: string
 }
 
 export interface Settings {
@@ -401,6 +439,14 @@ export interface SwarmApi {
    * 「跨网段发现不到人」的根因九成在这两条前提上，静态提示没用，必须实探。
    */
   runSelfCheck(): Promise<SelfCheck>
+
+  /**
+   * 测试单颗种子：真实走 UDP 探测 + TCP 建链，最坏等 5 秒。
+   *
+   * 副作用与正常刷新一致：成功会把该节点并入目录，失败会累计退避 ——
+   * 测试不该伪造一个与真实运行不同的世界。
+   */
+  testSeed(addr: string): Promise<SeedTest>
 
   // 局域网更新
   /** 读取更新状态（设置页打开时拉一次；之后靠 update:state 事件推送）。 */

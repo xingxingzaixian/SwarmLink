@@ -18,12 +18,14 @@
 import { computed, onMounted, ref, watch } from 'vue'
 
 import Icon from '../components/Icon.vue'
-import { getApi, type SelfCheck, type Settings } from '../api'
+import { getApi, type SeedTest, type SelfCheck, type Settings } from '../api'
+import { usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { useUpdateStore } from '../stores/update'
 
 const ui = useUiStore()
 const update = useUpdateStore()
+const peers = usePeersStore()
 
 type CatKey =
   | 'general'
@@ -111,15 +113,38 @@ const interfaces = ref<string[]>([])
 /** 保存/自检的**失败**信息。成功反馈走轻提示（弹层会关闭，见 save）。 */
 const notice = ref('')
 const saving = ref(false)
-const seedsText = ref('')
 const selfCheck = ref<SelfCheck | null>(null)
 const checking = ref(false)
+
+/**
+ * 种子编辑器的一行（D-14）。
+ *
+ * 不再用 textarea：跨网段是「一台台机器分别配」的场景，纯文本里删错一个字符
+ * 就会让那颗种子静默失效，而用户看不出哪一行坏了。结构化之后每一行都能
+ * 单独测试、单独删除。
+ */
+interface SeedRow {
+  /** 稳定 key：用下标当 key 时删行会让输入框焦点错位到下一行。 */
+  id: number
+  addr: string
+  testing: boolean
+  /** 本行的即时测试结果（null = 还没测过，显示后台刷新记录的常态）。 */
+  result: SeedTest | null
+}
+
+const seedRows = ref<SeedRow[]>([])
+let seedSeq = 0
+
+function newSeedRow(addr = ''): SeedRow {
+  seedSeq += 1
+  return { id: seedSeq, addr, testing: false, result: null }
+}
 
 async function load(): Promise<void> {
   const api = await getApi()
   settings.value = await api.getSettings()
   interfaces.value = await api.listInterfaces()
-  seedsText.value = (settings.value.seeds ?? []).join('\n')
+  seedRows.value = (settings.value.seeds ?? []).map((a) => newSeedRow(a))
   // 更新状态单独拉一次：事件只在变化时推，打开设置页时可能已经错过了
   // 「下载完成」那一帧（比如应用启动时就已经 ready）。
   void update.refresh().catch(() => {
@@ -221,9 +246,10 @@ async function save(): Promise<void> {
     const api = await getApi()
     const payload: Settings = {
       ...settings.value,
-      seeds: seedsText.value
-        .split('\n')
-        .map((s) => s.trim())
+      // 空行直接丢掉：用户在最后一行按回车留下空串是常态，
+      // 而空串会让后端把整次保存判成「第 N 条格式不对」。
+      seeds: seedRows.value
+        .map((r) => r.addr.trim())
         .filter(Boolean)
     }
     const needRestart = await api.saveSettings(payload)
@@ -262,6 +288,85 @@ async function runSelfCheck(): Promise<void> {
   } finally {
     checking.value = false
   }
+}
+
+// ---------------------------------------------------------------- 种子编辑器
+
+function addSeedRow(): void {
+  seedRows.value.push(newSeedRow())
+}
+
+function removeSeedRow(id: number): void {
+  seedRows.value = seedRows.value.filter((r) => r.id !== id)
+}
+
+/**
+ * 测试单颗种子（真实两跳：UDP 探测 + TCP 建链，最坏 5 秒）。
+ *
+ * 结果按【地址】归属：测完再改这一行的地址，旧结果就会失效
+ * （见 seedStatus 里的 addr 比对），不会出现「地址都改了还显示上次的绿」。
+ */
+async function testSeedRow(row: SeedRow): Promise<void> {
+  const addr = row.addr.trim()
+  if (!addr || row.testing) return
+  row.testing = true
+  row.result = null
+  try {
+    const api = await getApi()
+    row.result = await api.testSeed(addr)
+  } catch (e: any) {
+    row.result = {
+      addr,
+      ok: false,
+      udpOk: false,
+      tcpOk: false,
+      rttMs: 0,
+      nodeId: '',
+      displayName: '',
+      subnet: '',
+      tcpPort: 0,
+      error: String(e?.message ?? e)
+    }
+  } finally {
+    row.testing = false
+  }
+}
+
+type SeedRowKind = 'ok' | 'warn' | 'bad' | 'idle'
+
+/**
+ * 一行的状态徽标。
+ *
+ * 优先级：本次测试结果 > 后台刷新记录的常态 > 未探测。
+ * 常态数据来自 peers.diag（App.vue 每 3 秒拉一次），因此保存之后不用
+ * 手动点任何东西，下一轮就能看到「可用 / 失败 N 次」。
+ */
+function seedStatus(row: SeedRow): { kind: SeedRowKind; label: string; title: string } {
+  if (row.testing) return { kind: 'idle', label: '测试中…', title: '' }
+
+  const addr = row.addr.trim()
+  if (row.result && row.result.addr === addr) {
+    const r = row.result
+    if (r.ok) {
+      const who = r.displayName || r.nodeId.slice(0, 8)
+      return {
+        kind: 'ok',
+        label: `${r.rttMs}ms`,
+        title: `${who} · ${r.subnet} · TCP ${r.tcpPort}`
+      }
+    }
+    return { kind: 'bad', label: r.udpOk ? 'TCP 不通' : 'UDP 不通', title: r.error }
+  }
+
+  const d = peers.diag?.seedDetails?.find((s) => s.addr === addr)
+  if (!d) return { kind: 'idle', label: '未探测', title: '保存后由后台刷新探测' }
+  if (d.available && d.lastSeen) {
+    return { kind: 'ok', label: '可用', title: `上次探测成功：${formatTime(d.lastSeen)}` }
+  }
+  if (d.available) {
+    return { kind: 'idle', label: '待探测', title: '还没轮到它（每轮随机探 N 颗，属正常）' }
+  }
+  return { kind: 'bad', label: `失败 ${d.failCount} 次`, title: '正在退避，稍后自动重试' }
 }
 
 /** 把种子列表压成一行（失败次数只在 >0 时才值得占版面）。 */
@@ -305,14 +410,8 @@ onMounted(load)
   <div v-else class="settings">
     <!-- 左：分类。只有一层导航，每一项都是一个「页面」。 -->
     <nav class="cats" aria-label="设置分类">
-      <button
-        v-for="c in CATS"
-        :key="c.key"
-        class="cat"
-        :class="{ on: cat === c.key }"
-        :aria-current="cat === c.key ? 'page' : undefined"
-        @click="cat = c.key"
-      >
+      <button v-for="c in CATS" :key="c.key" class="cat" :class="{ on: cat === c.key }"
+        :aria-current="cat === c.key ? 'page' : undefined" @click="cat = c.key">
         <Icon :name="c.icon" :size="15" class="cat__icon" />
         <span class="cat__label">{{ c.label }}</span>
         <!-- 需重启的点只做提示、不改文字：分类名里塞不下「需重启」，
@@ -362,10 +461,6 @@ onMounted(load)
           <input v-model="settings.autoStart" type="checkbox" />
           <span>开机自启动</span>
         </label>
-        <p class="note">
-          右键托盘图标也有提示音和托盘设置，与这里是同一份配置，改哪边都一样。
-          关掉提示音只影响声音，托盘图标闪烁与未读计数照常工作。
-        </p>
       </section>
 
       <section v-else-if="cat === 'network'">
@@ -446,13 +541,51 @@ onMounted(load)
         <p class="note">
           每网段至少 2 颗、共 6–10 条，格式 <code>IP:UDP端口</code>。
           被选为种子的机器必须固定 UDP 端口（不允许回退），否则跨网段节点的
-          第一个报文就石沉大海。
+          第一个报文就石沉大海。保存后立即生效，无需重启。
         </p>
-        <label>
-          <span>种子清单（每行一条）</span>
-          <textarea v-model="seedsText" rows="5" class="mono" />
-        </label>
-        <div class="pair">
+
+        <div class="seed-list">
+          <div v-for="row in seedRows" :key="row.id" class="seed-row">
+            <input
+              v-model="row.addr"
+              class="mono seed-row__addr"
+              placeholder="192.168.2.10:2425"
+              spellcheck="false"
+              :disabled="row.testing"
+            />
+            <span
+              class="seed-row__state"
+              :class="`seed-row__state--${seedStatus(row).kind}`"
+              :title="seedStatus(row).title"
+            >
+              {{ seedStatus(row).label }}
+            </span>
+            <button
+              class="btn btn-soft seed-row__test"
+              :disabled="row.testing || !row.addr.trim()"
+              @click="testSeedRow(row)"
+            >
+              {{ row.testing ? '测试中…' : '测试' }}
+            </button>
+            <button
+              class="icon-btn mini"
+              title="删除这颗种子"
+              aria-label="删除这颗种子"
+              @click="removeSeedRow(row.id)"
+            >
+              <Icon name="trash" :size="13" />
+            </button>
+          </div>
+          <p v-if="!seedRows.length" class="note seed-list__empty">
+            还没有配置种子。单网段部署不需要种子。
+          </p>
+        </div>
+
+        <button class="btn btn-soft" @click="addSeedRow">
+          <Icon name="plus" :size="14" />添加种子
+        </button>
+
+        <div class="pair seed-tuning">
           <label>
             <span>每轮拉取种子数</span>
             <input v-model.number="settings.seedsPerRefresh" type="number" min="1" max="8" />
@@ -470,10 +603,6 @@ onMounted(load)
           <input v-model="settings.updateEnabled" type="checkbox" />
           <span>允许从局域网里版本更高的机器更新</span>
         </label>
-        <p class="note">
-          关闭后本机不再下载安装包、也不再提示；但仍可以把本机的安装包提供给别人
-          —— 否则只要有一台机器关了开关，全网版本就会卡在它身上。
-        </p>
 
         <div class="urows">
           <div class="urow">
@@ -523,16 +652,11 @@ onMounted(load)
 
         <label>
           <span>无人值守时</span>
-          <input
-            v-model.number="settings.updateAutoInstallHours"
-            type="number"
-            min="0"
-            max="72"
-          />
+          <input v-model.number="settings.updateAutoInstallHours" type="number" min="0" max="72" />
         </label>
         <p class="note">
           下载完成后这么久仍没有任何操作，就自动安装并重启（对应夜间无人值守）。
-          填 <b>0</b> 表示永不自动安装 —— 那样没人点的机器会一直停在旧版本。
+          填 <b>0</b> 表示永不自动安装
         </p>
 
         <div class="uacts">
@@ -880,6 +1004,62 @@ label.check>span {
   flex-wrap: wrap;
   gap: 8px;
   margin: 10px 0 4px;
+}
+
+/* ---------------------------------------------------------------- 种子编辑器 */
+.seed-list {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.seed-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.seed-row__addr {
+  min-width: 0;
+}
+
+/* 状态徽标固定最小宽度：三行不同的文案（未探测 / 12ms / 失败 3 次）
+   不换行，输入框也就不会在测完一颗种子后左右跳一格。 */
+.seed-row__state {
+  min-width: 56px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.seed-row__state--ok {
+  color: var(--accent);
+}
+
+.seed-row__state--warn {
+  color: var(--warn);
+}
+
+.seed-row__state--bad {
+  color: var(--danger);
+}
+
+/* 行内按钮要贴合 32px 的输入框高度，直接用 .btn 会高出半行 */
+.seed-row__test {
+  height: 30px;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+}
+
+.seed-list__empty {
+  margin: 0;
+}
+
+.seed-tuning {
+  margin-top: 10px;
 }
 
 /* ---------------------------------------------------------------- 吸底条 */

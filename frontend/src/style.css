@@ -491,6 +491,12 @@ textarea {
   background: var(--text-muted);
 }
 
+/* 部分可用（发现层有缺口）：警示色但不算错误 —— 消息仍然发得出去，
+   只是跨网段或同网段其中一条通路不可用。用 danger 会让人以为完全断网。 */
+.dot.warn {
+  background: var(--warn);
+}
+
 /* 静态状态点：只留实心圆点，不要扩散环。
    必须显式 display + 关掉 ::after —— 原型里这个坑踩过一次：
    ::after 是绝对定位的，父元素若算成 position:static，
@@ -701,8 +707,25 @@ textarea {
 }
 
 .netstat__right {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* 左栏只有 232px，两段数字必须能压在一行：不许换行，也不许撑破卡片 */
+  min-width: 0;
+  white-space: nowrap;
   color: var(--accent);
   font-weight: 500;
+}
+
+/* 分隔点用 muted：它只是排版符号，不该和数字抢注意力 */
+.netstat__sep {
+  color: var(--text-muted);
+}
+
+/* 种子 0/M 时这一段转警示色。跨网段断了而灯还是绿的，是这套系统里
+   最难被发现的故障 —— 用户只会觉得「隔壁网段的人怎么都不见了」。 */
+.netstat__bad {
+  color: var(--warn);
 }
 
 /* ---------------------------------------------------------------- 标签页 */

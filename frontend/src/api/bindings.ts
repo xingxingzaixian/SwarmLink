@@ -50,6 +50,7 @@ import type {
 
 import type {
   Diagnostics,
+  DiscoveryState,
   Group,
   SelfCheck,
   Settings,
@@ -76,8 +77,23 @@ function toGroup(g: GroupDTO): Group {
   return { ...g, members: list(g.members) }
 }
 
+/**
+ * 生成的绑定把 discoveryState 声明成 string（Go 侧是 string 类型的命名常量）。
+ *
+ * 收敛到联合类型时，未知值一律当 limited：状态灯宁可少报一条通路，
+ * 也不能把没见过的状态画成绿色。
+ */
+function toDiscoveryState(v: string): DiscoveryState {
+  return v === 'live' || v === 'partial' ? v : 'limited'
+}
+
 function toDiagnostics(d: DiagnosticsDTO): Diagnostics {
-  return { ...d, seedDetails: list(d.seedDetails), interfaceSummary: list(d.interfaceSummary) }
+  return {
+    ...d,
+    seedDetails: list(d.seedDetails),
+    interfaceSummary: list(d.interfaceSummary),
+    discoveryState: toDiscoveryState(d.discoveryState)
+  }
 }
 
 function toSelfCheck(s: SelfCheckDTO): SelfCheck {
@@ -99,6 +115,7 @@ export const realApi: SwarmApi = {
   listInterfaces: async () => list(await SettingsService.ListInterfaces()),
   downloadDir: async () => SettingsService.DownloadDir(),
   runSelfCheck: async () => toSelfCheck(await SettingsService.RunSelfCheck()),
+  testSeed: async (addr) => SettingsService.TestSeed(addr),
   setActiveConversation: async (convId) => {
     await NotifyService.SetActiveConversation(convId)
   },

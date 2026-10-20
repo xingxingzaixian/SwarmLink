@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,11 @@ type DiscoveryApp struct {
 	SeedTCPPortFallback uint16
 
 	mu sync.Mutex
+
+	// reload 用来叫醒刷新循环：设置页保存新的种子清单/刷新周期后，
+	// 循环可能正睡在旧周期的 ticker 上。不叫醒的话「保存即时生效」只是
+	// 半句话 —— 用户要等旧周期到点才看到变化（最长 5 分钟）。
+	reload chan struct{}
 }
 
 // NewDiscoveryApp 构造发现应用。
@@ -69,48 +75,111 @@ func NewDiscoveryApp(
 		RefreshInterval: 300 * time.Second,
 		SeedsPerRefresh: 2,
 		MaxEntries:      256,
+		reload:          make(chan struct{}, 1),
 	}
+}
+
+// seedSnapshot 一次性取走刷新循环需要的可变状态（全部在 d.mu 下）。
+//
+// 为什么不在循环里直接读字段：ApplySeeds 会在运行中改它们，
+// 无锁读写在 -race 下是明确的 data race，而这类竞态的表现是
+// 「偶尔用旧周期再跑一轮」，最难复现。
+func (d *DiscoveryApp) seedSnapshot() (ports.SeedRegistry, ports.SeedProber, int, time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.registry, d.prober, d.SeedsPerRefresh, d.RefreshInterval
 }
 
 // Start 启动种子刷新循环（跨网段目录刷新周期，同时也是可见性收敛上界）。
 func (d *DiscoveryApp) Start(ctx context.Context) {
-	if d.registry == nil || d.prober == nil || d.RefreshInterval <= 0 {
+	registry, prober, _, interval := d.seedSnapshot()
+	if registry == nil || prober == nil || interval <= 0 {
 		return
 	}
-	go func() {
-		d.RefreshSeeds(ctx)
+	go d.loop(ctx)
+}
 
-		t := d.clk.NewTicker(d.RefreshInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C():
-				d.RefreshSeeds(ctx)
-			}
+// loop 是刷新循环。
+//
+// 每轮都【重建 ticker】而不是复用一个：只有这样才能让「改刷新周期」
+// 立刻生效（ApplySeeds 通过 reload 通道把它叫醒）。代价是每次多一个
+// 定时器对象，而它 5 分钟才出现一次。
+func (d *DiscoveryApp) loop(ctx context.Context) {
+	d.RefreshSeeds(ctx)
+
+	for {
+		_, _, _, interval := d.seedSnapshot()
+		if interval <= 0 {
+			interval = 300 * time.Second
 		}
-	}()
+
+		t := d.clk.NewTicker(interval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-d.reload:
+			// 保存了新清单：立刻按新配置拉一轮，别等下一次到点。
+			t.Stop()
+			d.RefreshSeeds(ctx)
+		case <-t.C():
+			t.Stop()
+			d.RefreshSeeds(ctx)
+		}
+	}
+}
+
+// ApplySeeds 热更新种子配置（设置页保存后由服务层调用）。
+//
+// 做了三件事，缺一件「即时生效」都是假的：
+//  1. 替换注册表内容（保留同址种子的失败计数与退避，见 udp.Registry.Replace）；
+//  2. 更新每轮拉取数与刷新周期；
+//  3. 叫醒刷新循环 —— 它可能正睡在旧周期的 ticker 上。
+func (d *DiscoveryApp) ApplySeeds(addrs []peer.SeedAddr, perRefresh int, interval time.Duration) {
+	d.mu.Lock()
+	registry := d.registry
+	if perRefresh > 0 {
+		d.SeedsPerRefresh = perRefresh
+	}
+	if interval > 0 {
+		d.RefreshInterval = interval
+	}
+	reload := d.reload
+	d.mu.Unlock()
+
+	if registry != nil {
+		registry.Replace(addrs)
+	}
+	if reload != nil {
+		select {
+		case reload <- struct{}{}:
+		default:
+			// 已经有一个待处理的唤醒信号，丢掉这次即可（同一次保存不需要两次）
+		}
+	}
 }
 
 // RefreshSeeds 每轮随机挑 N 颗可达种子：UDP 探测 → 学 ANNOUNCE → TCP 拉全量目录。
 //
 // 随机 2 颗而非全部：既保证单颗种子宕机仍能拿到跨网段目录，又天然分散负载。
 func (d *DiscoveryApp) RefreshSeeds(ctx context.Context) {
-	n := d.SeedsPerRefresh
+	registry, prober, n, _ := d.seedSnapshot()
+	if registry == nil || prober == nil {
+		return
+	}
 	if n <= 0 {
 		n = 2
 	}
-	for _, addr := range d.registry.Pick(n) {
-		an, err := d.prober.Probe(ctx, addr)
+	for _, addr := range registry.Pick(n) {
+		an, err := prober.Probe(ctx, addr)
 		if err != nil {
-			d.registry.Report(addr, nil, err)
+			registry.Report(addr, nil, err)
 			if d.lg != nil {
 				d.lg.Debug("seed probe failed", "seed", addr.String(), "err", err)
 			}
 			continue
 		}
-		d.registry.Report(addr, an, nil)
+		registry.Report(addr, an, nil)
 
 		// 种子产出的就是普通 Announcement，与广播完全同构 → 同一条 Upsert 路径。
 		if d.peers != nil {
@@ -272,12 +341,16 @@ func (d *DiscoveryApp) entries() []protocol.PeerListEntry {
 	return out
 }
 
-// SeedSnapshot 暴露种子状态（诊断面板用）。
+// SeedSnapshot 暴露「配置了哪些种子」（自检与诊断用）。
+//
+// 用 List 而不是 Pick：Pick 会跳过正在退避的种子，于是「配了两颗、都连不上」
+// 会表现为「一颗都没配」，而这两者的修法完全不同。
 func (d *DiscoveryApp) SeedSnapshot() []peer.SeedAddr {
-	if d.registry == nil {
+	registry, _, _, _ := d.seedSnapshot()
+	if registry == nil {
 		return nil
 	}
-	return d.registry.Pick(1 << 10)
+	return registry.List()
 }
 
 // SetRegistry 替换种子注册表。
@@ -287,5 +360,99 @@ func (d *DiscoveryApp) SeedSnapshot() []peer.SeedAddr {
 func (d *DiscoveryApp) SetRegistry(r ports.SeedRegistry) {
 	d.mu.Lock()
 	d.registry = r
+	reload := d.reload
 	d.mu.Unlock()
+	if reload != nil {
+		select {
+		case reload <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// SeedTestResult 是「测试一颗种子」的结果（设置页逐颗测试用）。
+type SeedTestResult struct {
+	// Addr 是规范化后的地址（"ip:udp_port"）。
+	Addr string
+	// UDPOK：种子应答了探测，且签名与 node_id 自洽。
+	UDPOK bool
+	// TCPOK：探测学到的 TCP 端口能建立会话（证明三层可达）。
+	TCPOK bool
+	// RTT 是 UDP 探测往返耗时。
+	RTT         time.Duration
+	NodeID      string
+	DisplayName string
+	Subnet      string
+	TCPPort     uint16
+	// Err 是给用户看的中文失败原因（空串 = 全通）。
+	//
+	// 分开描述 UDP / TCP 两跳是刻意的：用户最常撞到的是「UDP 通、TCP 被防火墙挡」，
+	// 一句笼统的「连接失败」会把他引到错误的方向去改。
+	Err string
+}
+
+// TestSeed 对单颗种子做一次真实的双跳探测（UDP 通告 + TCP 目录拉取）。
+//
+// 与自检（SelfCheck）的区别：自检只看「整批能不能学到东西」，它无法回答
+// 「这一颗到底通不通」；而部署现场最需要的就是这个定位能力。
+//
+// 副作用与正常刷新一致：探测成功会 Report 并把该节点 Upsert 进目录
+// （测试通过即可在列表里看到它），失败会累计退避 —— 测试不该伪造一个
+// 与真实运行不同的世界。
+func (d *DiscoveryApp) TestSeed(ctx context.Context, raw string) SeedTestResult {
+	res := SeedTestResult{Addr: strings.TrimSpace(raw)}
+
+	addr, err := peer.ParseSeedAddr(raw)
+	if err != nil {
+		res.Err = "地址格式不对，应写成 IP:UDP端口（例如 192.168.2.10:2425）"
+		return res
+	}
+	res.Addr = addr.String()
+
+	registry, prober, _, _ := d.seedSnapshot()
+	if prober == nil {
+		res.Err = "发现服务未启动"
+		return res
+	}
+
+	start := d.clk.Now()
+	an, err := prober.Probe(ctx, addr)
+	res.RTT = d.clk.Now().Sub(start)
+	if err != nil {
+		if registry != nil {
+			registry.Report(addr, nil, err)
+		}
+		res.Err = "UDP 探测无应答：" + err.Error()
+		return res
+	}
+	if registry != nil {
+		registry.Report(addr, an, nil)
+	}
+	res.UDPOK = true
+	res.NodeID = an.NodeID.String()
+	res.DisplayName = an.DisplayName
+	res.Subnet = an.Subnet
+	res.TCPPort = an.TCPPort
+
+	if d.peers != nil {
+		if err := d.peers.OnAnnouncement(*an); err != nil && d.lg != nil {
+			d.lg.Warn("seed test upsert failed", "seed", addr.String(), "err", err)
+		}
+	}
+
+	port := an.TCPPort
+	if port == 0 {
+		port = d.SeedTCPPortFallback
+	}
+	if port == 0 || d.conns == nil {
+		res.Err = "对方没有公布 TCP 端口，无法建立会话"
+		return res
+	}
+	target := net.JoinHostPort(addr.IP, strconv.Itoa(int(port)))
+	if _, err := d.conns.Dial(ctx, an.NodeID, target); err != nil {
+		res.Err = "UDP 通了，但 TCP " + target + " 连不上：跨网段目录拉不到，检查防火墙与路由"
+		return res
+	}
+	res.TCPOK = true
+	return res
 }

@@ -54,3 +54,16 @@ export function RunSelfCheck(): $CancellablePromise<$models.SelfCheckDTO> {
 export function Save($in: $models.SettingsDTO): $CancellablePromise<string[] | null> {
     return $Call.ByID(3816168166, $in);
 }
+
+/**
+ * TestSeed 测试一颗种子是否真的可用（逐颗「测试连接」，D-14）。
+ * 
+ * 为什么要逐颗：整批自检只能回答「整批能不能学到东西」，
+ * 而现场最需要的是「哪一颗坏了、坏在 UDP 还是 TCP」——
+ * 一次真实的两跳探测比任何静态提示都有用。
+ * 
+ * 最坏等 5 秒（UDP 探测超时 + TCP 建链），与自检同量级。
+ */
+export function TestSeed(addr: string): $CancellablePromise<$models.SeedTestDTO> {
+    return $Call.ByID(3838571794, addr);
+}

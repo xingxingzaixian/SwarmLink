@@ -71,6 +71,61 @@ func TestRegistryPickReturnsNilWhenAllBackingOff(t *testing.T) {
 	}
 }
 
+// 状态灯的「可用数」直接取这里：未失败（含还没轮到探测）算可用，
+// 一次探测失败立刻算不可用 —— 否则跨网段已断而灯还是绿的。
+func TestSeedStateAvailable(t *testing.T) {
+	if !(SeedState{}).Available() {
+		t.Fatal("尚未探测过的种子必须算可用，否则刚填完清单就显示 0/M")
+	}
+	if (SeedState{FailCnt: 1}).Available() {
+		t.Fatal("探测失败过的种子不能算可用")
+	}
+	if !(SeedState{FailCnt: 0, LastSeen: time.Now()}).Available() {
+		t.Fatal("探测成功过的种子必须算可用")
+	}
+}
+
+// 热替换清单（设置页保存即时生效）必须保住同址种子的状态：
+// 否则改一行清单会让所有种子同时被重探一遍，退避全部清零。
+func TestRegistryReplaceKeepsStateForSameAddr(t *testing.T) {
+	fc := clock.NewFake(time.Unix(0, 0))
+	kept := peer.SeedAddr{IP: "10.0.0.1", UDPPort: 2425}
+	removed := peer.SeedAddr{IP: "10.0.0.2", UDPPort: 2425}
+	added := peer.SeedAddr{IP: "10.0.0.3", UDPPort: 2425}
+
+	r := NewRegistry([]peer.SeedAddr{kept, removed}, fc)
+	r.Report(kept, nil, errors.New("down"))
+	r.Report(kept, nil, errors.New("down"))
+
+	r.Replace([]peer.SeedAddr{kept, added})
+
+	snap := r.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("len=%d want 2（removed 应被删掉、added 应被加入）", len(snap))
+	}
+	var keptFail int
+	var seenAdded bool
+	for _, s := range snap {
+		switch s.Addr {
+		case kept:
+			keptFail = s.FailCnt
+		case added:
+			seenAdded = true
+			if s.FailCnt != 0 {
+				t.Fatalf("新种子 FailCnt=%d want 0", s.FailCnt)
+			}
+		case removed:
+			t.Fatal("被移除的种子不应还在清单里")
+		}
+	}
+	if !seenAdded {
+		t.Fatal("新增的种子没有进入清单")
+	}
+	if keptFail != 2 {
+		t.Fatalf("同址种子的失败计数被清零了（%d want 2）", keptFail)
+	}
+}
+
 func TestRegistrySkipsZeroAddrs(t *testing.T) {
 	fc := clock.NewFake(time.Unix(0, 0))
 	r := NewRegistry([]peer.SeedAddr{{}, {IP: "10.0.0.1", UDPPort: 2425}}, fc)

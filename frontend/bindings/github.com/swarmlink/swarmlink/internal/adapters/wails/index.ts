@@ -31,6 +31,7 @@ export type {
     MessageDTO,
     PeerDTO,
     SeedDTO,
+    SeedTestDTO,
     SelfCheckDTO,
     SelfDTO,
     SettingsDTO,

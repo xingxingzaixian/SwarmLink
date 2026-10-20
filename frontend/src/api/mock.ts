@@ -309,20 +309,40 @@ export function createMockApi(): SwarmApi {
     updateAutoInstallHours: 4
   }
 
+  // 种子 192.168.2.x 在 mock 里恒为失败：状态灯必须能演示出
+  // 「同网段通、跨网段断了」这个最容易被漏掉的状态。
+  const seedDetails = settings.seeds.map((s) => {
+    const failed = s.includes('192.168.2')
+    return {
+      addr: s,
+      failCount: failed ? 3 : 0,
+      nodeId: '',
+      tcpPort: 2425,
+      subnet: failed ? '192.168.2.0/24' : '192.168.1.0/24',
+      lastSeen: failed ? 0 : Date.now() - 60_000,
+      available: !failed
+    }
+  })
+  const sameSubnetPeers = peers.filter((p) => p.online).length
+  const seedAvailable = seedDetails.filter((s) => s.available).length
+
   const diagnostics: Diagnostics = {
     peersTotal: peers.length,
     peersOnline: peers.filter((p) => p.online).length,
     activeSessions: 1,
     activeTransfers: 0,
-    seedCount: settings.seeds.length,
-    seedDetails: settings.seeds.map((s) => ({
-      addr: s,
-      failCount: s.includes('192.168.2') ? 3 : 0,
-      nodeId: '',
-      tcpPort: 2425,
-      subnet: s.includes('192.168.2') ? '192.168.2.0/24' : '192.168.1.0/24'
-    })),
-    interfaceSummary: ['en0(192.168.1.0/24)']
+    seedCount: seedDetails.length,
+    seedAvailable,
+    seedDetails,
+    interfaceSummary: ['en0(192.168.1.0/24)'],
+    sameSubnetPeers,
+    // 与 Go 侧 app.ClassifyDiscovery 同规则；预览模式下不引后端，只能照抄一遍。
+    discoveryState:
+      sameSubnetPeers === 0 && seedAvailable === 0
+        ? 'limited'
+        : sameSubnetPeers > 0 && (seedDetails.length === 0 || seedAvailable > 0)
+          ? 'live'
+          : 'partial'
   }
 
   /** 直连本地事件通道（不 import events/index.ts，否则会形成循环依赖）。 */
@@ -878,6 +898,54 @@ export function createMockApi(): SwarmApi {
         p2Detail: n === 0 ? '' : '未观察到地址段重叠的迹象',
         seeds: [...diagnostics.seedDetails]
       }
+    },
+
+    async testSeed(addr) {
+      // 预览模式的拟真规则（与真机上的三种典型故障一一对应）：
+      //   缺端口 → 格式错误；192.168.9.x → UDP 不通；192.168.2.x → UDP 通但 TCP 被挡。
+      const raw = String(addr).trim()
+      const base = {
+        addr: raw,
+        ok: false,
+        udpOk: false,
+        tcpOk: false,
+        rttMs: 0,
+        nodeId: '',
+        displayName: '',
+        subnet: '',
+        tcpPort: 0,
+        error: ''
+      }
+      if (!/:\d+$/.test(raw)) {
+        return {
+          ...base,
+          error: '地址格式不对，应写成 IP:UDP端口（例如 192.168.2.10:2425）'
+        }
+      }
+      await sleep(300)
+      if (raw.includes('192.168.9')) {
+        return { ...base, error: 'UDP 探测无应答：i/o timeout' }
+      }
+      const ok = {
+        ...base,
+        udpOk: true,
+        tcpOk: true,
+        ok: true,
+        rttMs: 3 + Math.floor(Math.random() * 20),
+        nodeId: 'a1b2c3d4e5f60718',
+        displayName: 'seed-' + raw.split(':')[0].split('.').pop(),
+        subnet: raw.replace(/:\d+$/, '') + '.0/24',
+        tcpPort: 2425
+      }
+      if (raw.includes('192.168.2')) {
+        return {
+          ...ok,
+          ok: false,
+          tcpOk: false,
+          error: `UDP 通了，但 TCP ${raw.split(':')[0]}:2425 连不上：跨网段目录拉不到，检查防火墙与路由`
+        }
+      }
+      return ok
     },
 
     async sendMessage(peerId, text) {

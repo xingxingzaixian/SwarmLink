@@ -118,6 +118,16 @@ type SeedState struct {
 	LastEpoch uint64
 }
 
+// Available 报告这颗种子当前是否可用（状态灯的 N）。
+//
+// 「未失败即可用」：每轮只随机探 SeedsPerRefresh 颗，因此刚填进清单的种子
+// 在轮到它之前 LastSeen 还是零值。若把「还没探过」算成不可用，用户刚配完
+// 就会看到「0/4」并把这条配置当成错的 —— 而实际上什么都没坏。
+//
+// 反过来，一次探测失败就立刻算不可用：那是有证据的失败，此时把种子显示成
+// 健康会让「跨网段断了但灯是绿的」成为最难排查的状态。
+func (s SeedState) Available() bool { return s.FailCnt == 0 }
+
 // Registry 实现 ports.SeedRegistry。
 //
 // 关键：种子【不拥有任何特权接口】。它产出的就是普通的 peer.Announcement，
@@ -156,6 +166,17 @@ func (r *Registry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.seeds)
+}
+
+// List 返回全部配置的种子（含正在退避的），按配置顺序。
+func (r *Registry) List() []peer.SeedAddr {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]peer.SeedAddr, 0, len(r.seeds))
+	for _, s := range r.seeds {
+		out = append(out, s.addr)
+	}
+	return out
 }
 
 // Pick 返回本轮该问的 N 颗种子：先过滤仍在退避中的，再随机取。
@@ -256,6 +277,42 @@ func (r *Registry) Snapshot() []SeedState {
 		})
 	}
 	return out
+}
+
+// Replace 用新清单替换种子集合（设置页保存后热生效）。
+//
+// 保留同一地址的历史状态：用户改的是「清单」，不是「这些种子的健康状况」。
+// 若整体重建，所有种子会同时被立刻重探一遍（退避被清零），
+// 现象是「点保存之后网络抖了一下」，还会让本来在退避的坏种子立刻再打一次。
+func (r *Registry) Replace(addrs []peer.SeedAddr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	prev := make(map[peer.SeedAddr]*seedState, len(r.seeds))
+	for _, s := range r.seeds {
+		prev[s.addr] = s
+	}
+
+	next := make([]*seedState, 0, len(addrs))
+	seen := make(map[peer.SeedAddr]struct{}, len(addrs))
+	for _, a := range addrs {
+		if a.IsZero() {
+			continue
+		}
+		// 去重：同一地址写两遍会让 Report 永远回填到第一条，
+		// 第二份状态从此再也不会更新 —— 界面上就是「同一颗种子，两种状态」。
+		if _, dup := seen[a]; dup {
+			continue
+		}
+		seen[a] = struct{}{}
+
+		if s, ok := prev[a]; ok {
+			next = append(next, s)
+			continue
+		}
+		next = append(next, &seedState{addr: a})
+	}
+	r.seeds = next
 }
 
 func (r *Registry) find(addr peer.SeedAddr) *seedState {

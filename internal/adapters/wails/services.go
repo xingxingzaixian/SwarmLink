@@ -218,6 +218,21 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 		c.Update.Mode = in.UpdateMode
 	}
 
+	// 种子格式必须在【落盘之前】校验。
+	//
+	// 以前非法条目会被 config.SeedAddrs 静默跳过：用户在设置页看着自己填的
+	// 地址还在，实际它从未被使用过 —— 这是最难查的一类配置故障。
+	addrs := make([]peer.SeedAddr, 0, len(c.Discovery.Seeds.List))
+	for i, raw := range c.Discovery.Seeds.List {
+		addr, err := peer.ParseSeedAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"种子清单第 %d 条格式不对：%q（应写成 IP:UDP端口，例如 192.168.2.10:2425）",
+				i+1, raw)
+		}
+		addrs = append(addrs, addr)
+	}
+
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -234,6 +249,15 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	// 是比「没这个功能」更糟的体验。
 	if s.d.Update != nil {
 		s.d.Update.OnSettingsChanged()
+	}
+
+	// 种子清单/刷新参数同样热生效（D-15）。
+	//
+	// 种子 Registry 是在 bootstrap 里构造的，但 ApplySeeds 会就地 Replace
+	// 并叫醒刷新循环 —— 因此【不需要】把 seeds 加进下面的重启清单。
+	if s.d.Discovery != nil {
+		s.d.Discovery.ApplySeeds(addrs, c.Discovery.Seeds.SeedsPerRefresh,
+			c.Discovery.Seeds.RefreshInterval.Std())
 	}
 
 	// 端口/网卡类改动无法热生效
@@ -306,6 +330,36 @@ func (s *SettingsService) RunSelfCheck() SelfCheckDTO {
 		out.Seeds = s.d.SeedSnapshot()
 	}
 	return out
+}
+
+// TestSeed 测试一颗种子是否真的可用（逐颗「测试连接」，D-14）。
+//
+// 为什么要逐颗：整批自检只能回答「整批能不能学到东西」，
+// 而现场最需要的是「哪一颗坏了、坏在 UDP 还是 TCP」——
+// 一次真实的两跳探测比任何静态提示都有用。
+//
+// 最坏等 5 秒（UDP 探测超时 + TCP 建链），与自检同量级。
+func (s *SettingsService) TestSeed(addr string) SeedTestDTO {
+	if s.d.Discovery == nil {
+		return SeedTestDTO{Addr: addr, Error: "发现服务未启动"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	r := s.d.Discovery.TestSeed(ctx, addr)
+	return SeedTestDTO{
+		Addr:        r.Addr,
+		OK:          r.UDPOK && r.TCPOK,
+		UDPOK:       r.UDPOK,
+		TCPOK:       r.TCPOK,
+		RTTMs:       r.RTT.Milliseconds(),
+		NodeID:      r.NodeID,
+		DisplayName: r.DisplayName,
+		Subnet:      r.Subnet,
+		TCPPort:     int(r.TCPPort),
+		Error:       r.Err,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1046,31 @@ func (s *PeerService) Diagnostics() DiagnosticsDTO {
 		dto.SeedDetails = s.d.SeedSnapshot()
 	}
 	dto.SeedCount = len(dto.SeedDetails)
+	for _, sd := range dto.SeedDetails {
+		if sd.Available {
+			dto.SeedAvailable++
+		}
+	}
+
+	// 同网段邻居：用【可见条目】统计。
+	//
+	// 不用上面那个 IncludeBlocked 的 all：被用户从列表移除的节点不该算进
+	// 「同网段已连接」，否则会出现「列表里一个都没有，状态灯却说有 2 个」。
+	// 判据（LocallyDiscovered + Reachable）放在 domain/peer 里，与前端
+	// stores/peers.ts 的 reachable() 同口径。
+	sameSubnet := 0
+	for _, p := range s.d.PeerDir.List(ports.PeerFilter{}) {
+		if !p.LocallyDiscovered() {
+			continue
+		}
+		_, connected := s.d.Conns.SessionOf(p.NodeID)
+		if p.Reachable(connected) {
+			sameSubnet++
+		}
+	}
+	health := app.NewDiscoveryHealth(sameSubnet, dto.SeedCount, dto.SeedAvailable)
+	dto.SameSubnetPeers = health.SameSubnet
+	dto.DiscoveryState = string(health.State)
 	return dto
 }
 

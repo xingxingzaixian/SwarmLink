@@ -252,6 +252,58 @@ const self = computed(() => peers.self)
  * 「右上写着 3 NODES 但列表里只有 1 个在线」，那种不一致最难解释。
  */
 const reachableCount = computed(() => peers.peers.filter(reachable).length)
+
+// ---------------------------------------------------------------- 发现状态灯
+
+/**
+ * 顶部状态灯：把「同网段通不通」和「跨网段通不通」分开说（规格 1.2）。
+ *
+ * 数字全部来自后端 `PeerService.Diagnostics()`，这里【不自己数】：
+ * 诊断面板、状态灯、部署自检三处展示的是同一组事实，组件里各算一遍
+ * 迟早会出现「灯说 2 个，诊断面板说 3 个」这种没法解释的分歧。
+ *
+ * 两类数字的口径差异必须记住：
+ *   - sameSubnetPeers 只统计广播/组播来源（同网段邻居）；
+ *   - peersOnline 还包含经种子学到的跨网段节点 —— 所以「在线 4 / 同网段 2」
+ *     不是 bug，而是跨网段正常工作的样子。
+ */
+const light = computed<'live' | 'partial' | 'limited'>(() => {
+  // 首次刷新落地前没有 diag：退回「有没有邻居」这一条判据，
+  // 不假装 LIMITED（那会在启动瞬间闪一下红灯）。
+  if (!peers.diag) return reachableCount.value > 0 ? 'live' : 'limited'
+  return peers.diag.discoveryState
+})
+
+const lightText = computed(
+  () =>
+    ({
+      live: 'LIVE',
+      partial: 'PARTIAL',
+      limited: 'LIMITED'
+    })[light.value]
+)
+
+const sameSubnet = computed(() => peers.diag?.sameSubnetPeers ?? reachableCount.value)
+const seedCount = computed(() => peers.diag?.seedCount ?? 0)
+const seedAvailable = computed(() => peers.diag?.seedAvailable ?? 0)
+
+/** 悬停说明：把「为什么是这个颜色」讲清楚，否则红点只会让人以为软件坏了。 */
+const lightTip = computed(() => {
+  const lines = [`同网段邻居：${sameSubnet.value} 个（广播/组播发现且可达）`]
+  lines.push(
+    seedCount.value > 0
+      ? `跨网段种子：可用 ${seedAvailable.value}/${seedCount.value}`
+      : '未配置种子（单网段部署无需种子）'
+  )
+  if (light.value === 'partial') {
+    lines.push('发现能力有缺口：同网段或跨网段其中一条通路不可用')
+    lines.push('详情：设置 → 部署自检')
+  }
+  if (light.value === 'limited') {
+    lines.push('没有任何可用的发现通路：检查网卡/防火墙，或配置跨网段种子')
+  }
+  return lines.join('\n')
+})
 </script>
 
 <template>
@@ -266,14 +318,26 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
       </div>
     </div>
 
-    <!-- 网络状态条：第一眼说明「这是个网络工具」。
-         文案随真实状态走 —— 一个节点都没有时还说 LIVE 就是撒谎。 -->
-    <div class="netstat">
+    <!-- 网络状态条：第一眼说明「这是个网络工具」，并回答两个独立问题 ——
+         我这一段通不通、跨网段通不通。颜色与数字随真实状态走，
+         一个可用通路都没有时还说 LIVE 就是撒谎。 -->
+    <div class="netstat" :title="lightTip">
       <span class="netstat__left">
-        <span class="dot dot--static" :class="{ online: reachableCount > 0 }" />
-        {{ reachableCount > 0 ? 'NETWORK LIVE' : 'NETWORK IDLE' }}
+        <span
+          class="dot dot--static"
+          :class="light === 'live' ? 'online' : light === 'partial' ? 'warn' : 'offline'"
+        />
+        {{ lightText }}
       </span>
-      <span class="netstat__right">{{ reachableCount }} NODES</span>
+      <span class="netstat__right">
+        <span>同网段 {{ sameSubnet }}</span>
+        <template v-if="seedCount > 0">
+          <span class="netstat__sep">·</span>
+          <span :class="{ 'netstat__bad': seedAvailable === 0 }">
+            种子 {{ seedAvailable }}/{{ seedCount }}
+          </span>
+        </template>
+      </span>
     </div>
 
     <header class="rail-head">

@@ -269,12 +269,20 @@ func main() {
 			snap := node.Registry.Snapshot()
 			out := make([]wadapter.SeedDTO, 0, len(snap))
 			for _, s := range snap {
+				// 可用性只在这里定：判定规则在 udp.SeedState.Available，
+				// 服务层只数个数（app.NewDiscoveryHealth 会再收口一次）。
+				var lastSeen int64
+				if !s.LastSeen.IsZero() {
+					lastSeen = s.LastSeen.UnixMilli()
+				}
 				out = append(out, wadapter.SeedDTO{
 					Addr:      s.Addr.String(),
 					FailCount: s.FailCnt,
 					NodeID:    s.NodeID,
 					TCPPort:   int(s.TCPPort),
 					Subnet:    s.Subnet,
+					LastSeen:  lastSeen,
+					Available: s.Available(),
 				})
 			}
 			return out
