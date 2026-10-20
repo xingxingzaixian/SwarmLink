@@ -86,29 +86,31 @@ type Deps struct {
 
 // ServiceSet 是注册给 Wails 的服务集合。
 type ServiceSet struct {
-	Settings *SettingsService
-	Chat     *ChatService
-	Transfer *TransferService
-	Peer     *PeerService
-	Group    *GroupService
-	Notify   *NotifyService
-	Share    *ShareService
-	Search   *SearchService
-	Update   *UpdateService
+	Settings   *SettingsService
+	Chat       *ChatService
+	Transfer   *TransferService
+	Peer       *PeerService
+	Group      *GroupService
+	Notify     *NotifyService
+	Share      *ShareService
+	Search     *SearchService
+	Update     *UpdateService
+	Appearance *AppearanceService
 }
 
 // NewServices 构造服务集合。
 func NewServices(d Deps) *ServiceSet {
 	return &ServiceSet{
-		Settings: &SettingsService{cfg: d.Cfg, dir: d.ConfigDir, d: d},
-		Chat:     &ChatService{d: d},
-		Transfer: &TransferService{d: d},
-		Peer:     &PeerService{d: d},
-		Group:    &GroupService{d: d},
-		Notify:   &NotifyService{d: d},
-		Share:    &ShareService{d: d},
-		Search:   &SearchService{d: d},
-		Update:   &UpdateService{d: d},
+		Settings:   &SettingsService{cfg: d.Cfg, dir: d.ConfigDir, d: d},
+		Chat:       &ChatService{d: d},
+		Transfer:   &TransferService{d: d},
+		Peer:       &PeerService{d: d},
+		Group:      &GroupService{d: d},
+		Notify:     &NotifyService{d: d},
+		Share:      &ShareService{d: d},
+		Search:     &SearchService{d: d},
+		Update:     &UpdateService{d: d},
+		Appearance: NewAppearanceService(d),
 	}
 }
 

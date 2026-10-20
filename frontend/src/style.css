@@ -175,6 +175,66 @@ body {
   transition: background-color 0.4s var(--ease), color 0.4s var(--ease);
 }
 
+/* ---------------------------------------------------------------- 自定义背景
+   用户设了背景图时，body 上会多一个 has-app-bg（由 stores/appearance 加），
+   并把三个变量写在行内样式上：
+     --app-bg-image   url("data:image/...;base64,...")
+     --app-bg-dim     0..1（黑色遮罩强度）
+     --app-bg-blur    如 6px
+
+   实现要点（改之前先看这三条）：
+     1. 图片放在 body::before、遮罩放在 body::after，两者 z-index:-1。
+        body 的背景色是画在画布上的，负 z-index 的伪元素正好落在
+        「画布之上、所有内容之下」，不需要给任何组件加 position。
+     2. 模糊只作用于 ::before，所以正文一点都不会糊。inset 必须外扩：
+        否则模糊会把四边晕出一圈透明边。
+     3. 面板必须跟着半透明（改 --bg-* 变量即可），否则「设了背景图
+        却什么都看不见」—— 面板默认是不透明的。 */
+body.has-app-bg {
+  /* 去掉默认的 mesh 光晕：叠在照片上只会变成两块脏色 */
+  background: oklch(10% 0.012 255);
+}
+
+body.has-app-bg::before {
+  content: '';
+  position: fixed;
+  /* 外扩幅度要大于最大模糊半径（40px），否则边缘会露出未模糊的底 */
+  inset: -64px;
+  z-index: -1;
+  background: var(--app-bg-image) center / cover no-repeat;
+  filter: blur(var(--app-bg-blur, 6px));
+  pointer-events: none;
+}
+
+body.has-app-bg::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: rgb(0 0 0 / var(--app-bg-dim, 0.45));
+  pointer-events: none;
+}
+
+/* 半透明表面：面板、气泡、弹层全部消费 --bg-*，改这一处等于整窗生效。
+   两组数值分别对应深/浅主题，因为暗底与白底的「半透明」需要的 L 不同
+   （同一组 alpha 在白底上会糊成一片灰）。 */
+body.has-app-bg {
+  --bg-base: oklch(15% 0.018 255 / 0.55);
+  --bg-panel: oklch(19% 0.02 255 / 0.74);
+  --bg-elevated: oklch(24% 0.022 255 / 0.84);
+  --bg-hover: oklch(28% 0.022 255 / 0.88);
+  --bg-sunken: oklch(12% 0.015 255 / 0.64);
+}
+
+html[data-theme='light'] body.has-app-bg {
+  background: oklch(96% 0.005 255);
+  --bg-base: oklch(97% 0.006 255 / 0.6);
+  --bg-panel: oklch(100% 0 0 / 0.8);
+  --bg-elevated: oklch(100% 0 0 / 0.88);
+  --bg-hover: oklch(94% 0.008 255 / 0.9);
+  --bg-sunken: oklch(91% 0.01 255 / 0.68);
+}
+
 ::selection {
   background: var(--accent-soft);
   color: var(--text-primary);

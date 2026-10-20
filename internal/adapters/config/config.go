@@ -145,6 +145,25 @@ type Config struct {
 		AutoStart bool `toml:"auto_start"`
 	} `toml:"startup"`
 
+	// Appearance 是外观设置（自定义背景图）。
+	//
+	// Background 存的是 backgrounds/ 目录下的【文件名】而不是绝对路径：
+	// 用户把数据目录搬走、或者换机器整体拷贝时，绝对路径立刻失效，
+	// 而文件名跟着目录走。空串表示没有自定义背景。
+	Appearance struct {
+		Background string `toml:"background"`
+		// BackgroundDim 是压在背景图上的黑色遮罩百分比（0-100）。
+		//
+		// 没有它，文字压在照片上会出现「某些位置读不清」—— 而这类问题
+		// 只在特定图片上出现，用户根本不知道该调什么。默认值 45 由
+		// Default() 给出；【不要】在 applyDefaults 里回填，0 是合法选择
+		// （与 Notify/Update 那几个开关同一个陷阱）。
+		BackgroundDim int `toml:"background_dim"`
+		// BackgroundBlur 是背景图的模糊半径（px，0 = 不模糊）。
+		// 模糊能让照片退成纹理，正文对比度更稳，所以默认给一点点（6px）。
+		BackgroundBlur int `toml:"background_blur"`
+	} `toml:"appearance"`
+
 	// Update 是局域网更新（从局域网里版本更高的节点拉取安装包）。
 	//
 	// 注意 LANEnabled 的默认值是 true，且【不能】在 applyDefaults 里用
@@ -217,6 +236,12 @@ func Default() *Config {
 
 	// 开机自启动默认关闭：避免用户第一次启动就被系统启动吓到
 	c.Startup.AutoStart = false
+
+	// 外观：默认没有自定义背景（空串）。遮罩 45% + 轻模糊是「照片能认出来、
+	// 文字仍然读得清」的折中值；用户觉得太闷可以往 0 拖，觉得花可以往 80 拖。
+	c.Appearance.Background = ""
+	c.Appearance.BackgroundDim = 45
+	c.Appearance.BackgroundBlur = 6
 
 	// 局域网更新默认开启：产品需求就是「局域网里有更高版本就拉齐」。
 	// 默认模式是「下载完再问」，这也是 Windows 更新的做法 —— 用户点「立即」
@@ -341,6 +366,23 @@ func Path(dir string) string { return filepath.Join(dir, "config.toml") }
 
 // DBPath 返回数据库文件路径。
 func DBPath(dir string) string { return filepath.Join(dir, "data", "app.db") }
+
+// BackgroundsDir 返回自定义背景图的存放目录。
+//
+// 放在数据目录下而不是用户当初选图的位置：选图位置随时可能被移动、
+// 删除或清理，而背景是「配置的一部分」，必须跟着配置一起存活。
+func BackgroundsDir(dir string) string { return filepath.Join(dir, "backgrounds") }
+
+// BackgroundPath 返回背景文件的完整路径。
+//
+// name 来自 [appearance].background，只取 Base 名：即使配置文件被手工改成
+// "../../secret"，也只会落在 backgrounds/ 内。
+func BackgroundPath(dir, name string) string {
+	if name == "" {
+		return ""
+	}
+	return filepath.Join(BackgroundsDir(dir), filepath.Base(name))
+}
 
 // Load 读取配置；文件不存在时返回默认值并落盘，保证用户能看到可编辑的样例。
 func Load(dir string) (*Config, error) {

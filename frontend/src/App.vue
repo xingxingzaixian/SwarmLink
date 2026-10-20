@@ -25,6 +25,7 @@ import { usePeersStore } from './stores/peers'
 import { useTransferStore } from './stores/transfer'
 import { useUiStore } from './stores/ui'
 import { useUpdateStore } from './stores/update'
+import { useAppearanceStore } from './stores/appearance'
 
 const peers = usePeersStore()
 const chat = useChatStore()
@@ -32,6 +33,7 @@ const transfers = useTransferStore()
 const groups = useGroupStore()
 const ui = useUiStore()
 const update = useUpdateStore()
+const appearance = useAppearanceStore()
 
 const mock = ref(false)
 
@@ -50,7 +52,10 @@ onMounted(async () => {
     // 更新状态主动拉一次：事件只在变化时推，而「下载在上次运行时就完成了、
     // 用户刚打开应用」这种情况不会有事件 —— 不拉就永远不弹框。
     // 失败静默：更新是附加能力，不能挡住启动。
-    update.refresh().catch(() => {})
+    update.refresh().catch(() => {}),
+    // 背景图要在首帧之后尽快贴上，否则用户会看到「先灰底、再跳到图片」。
+    // 失败静默：没有背景图是正常状态，不是错误。
+    appearance.load().catch(() => {})
   ])
 
   // 节点目录的变化主体靠 peer:updated 事件推送，这里只做兜底轮询：

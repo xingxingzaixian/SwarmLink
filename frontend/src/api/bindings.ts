@@ -37,7 +37,8 @@ import {
   SettingsService,
   ShareService,
   TransferService,
-  UpdateService
+  UpdateService,
+  AppearanceService
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/index.js'
 import type {
   DiagnosticsDTO,
@@ -116,6 +117,11 @@ export const realApi: SwarmApi = {
   downloadDir: async () => SettingsService.DownloadDir(),
   runSelfCheck: async () => toSelfCheck(await SettingsService.RunSelfCheck()),
   testSeed: async (addr) => SettingsService.TestSeed(addr),
+
+  getBackground: async () => AppearanceService.Get(),
+  saveBackground: async (dataBase64, ext) => AppearanceService.Save(dataBase64, ext),
+  clearBackground: async () => AppearanceService.Clear(),
+  setBackgroundLook: async (dim, blur) => AppearanceService.SetLook(dim, blur),
   setActiveConversation: async (convId) => {
     await NotifyService.SetActiveConversation(convId)
   },

@@ -318,6 +318,7 @@ func main() {
 			application.NewService(services.Notify),
 			application.NewService(services.Search),
 			application.NewService(services.Update),
+			application.NewService(services.Appearance),
 			application.NewService(sysNotify),
 		},
 		Assets: application.AssetOptions{

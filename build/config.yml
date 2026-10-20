@@ -11,7 +11,7 @@ info:
   description: "无中心内网 P2P 聊天与文件分享工具" # The application description
   copyright: "(c) 2026, SwarmLink" # Copyright text
   comments: "Local-first, peer-to-peer LAN chat and file transfer" # Comments
-  version: "1.0.0" # The application version
+  version: "0.1.4" # The application version
   # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)
   #                               # Should match the name of your .icon file without the extension
   #                               # If not set and Assets.car exists, defaults to "appicon"

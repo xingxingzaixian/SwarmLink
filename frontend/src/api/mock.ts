@@ -14,6 +14,7 @@ import type {
   Settings,
   Share,
   ShareDownload,
+  Background,
   ShareItem,
   SwarmApi,
   TransferJob,
@@ -796,6 +797,28 @@ export function createMockApi(): SwarmApi {
   }
 
   // -------------------------------------------------------------------------
+  // 外观（预览模式）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 背景图在预览模式下只存在内存里 —— 浏览器没有「数据目录」可写。
+   *
+   * 与真机不同的是：预览模式刷新页面就丢，这正好也提示了真机上「背景必须
+   * 落盘」的必要性（localStorage 只有 5MB，而用户选的图常常比这更大）。
+   */
+  const mockAppearance: Background = {
+    dataUrl: '',
+    fileName: '',
+    dim: 45,
+    blur: 6,
+    maxBytes: 8 << 20
+  }
+
+  function cloneAppearance(): Background {
+    return { ...mockAppearance }
+  }
+
+  // -------------------------------------------------------------------------
   // 局域网更新（预览模式）
   // -------------------------------------------------------------------------
 
@@ -1345,6 +1368,26 @@ export function createMockApi(): SwarmApi {
       const picked = itemsOf(shareId).filter((i) => paths.includes(i.path))
       if (!picked.length) throw new Error('共享方没有受理任何文件（清单可能已过期，请刷新后重试）')
       return simulateShareDownload(s.ownerId, s.name, picked)
+    },
+
+    async getBackground() {
+      return cloneAppearance()
+    },
+    async saveBackground(dataBase64, ext) {
+      const mime = ext.replace('.', '').toLowerCase()
+      mockAppearance.dataUrl = `data:image/${mime === 'jpg' ? 'jpeg' : mime};base64,${dataBase64}`
+      mockAppearance.fileName = `background.${ext.replace('.', '')}`
+      return cloneAppearance()
+    },
+    async clearBackground() {
+      mockAppearance.dataUrl = ''
+      mockAppearance.fileName = ''
+      return cloneAppearance()
+    },
+    async setBackgroundLook(dim, blur) {
+      mockAppearance.dim = Math.min(100, Math.max(0, Math.round(dim)))
+      mockAppearance.blur = Math.min(40, Math.max(0, Math.round(blur)))
+      return cloneAppearance()
     },
 
     async getUpdateState() {

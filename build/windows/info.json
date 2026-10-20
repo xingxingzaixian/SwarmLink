@@ -1,10 +1,10 @@
 {
 	"fixed": {
-		"file_version": "1.0.0"
+		"file_version": "0.1.4"
 	},
 	"info": {
 		"0000": {
-			"ProductVersion": "1.0.0",
+			"ProductVersion": "0.1.4",
 			"CompanyName": "SwarmLink",
 			"FileDescription": "无中心内网 P2P 聊天与文件分享工具",
 			"LegalCopyright": "(c) 2026, SwarmLink",

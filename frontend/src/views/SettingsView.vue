@@ -15,10 +15,11 @@
  *     视口高，保证不滚动也能落盘；
  *   - 保存成功即关闭弹层、结果交给全局轻提示（见 save 的注释）。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import Icon from '../components/Icon.vue'
 import { getApi, type SeedTest, type SelfCheck, type Settings } from '../api'
+import { useAppearanceStore } from '../stores/appearance'
 import { usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { useUpdateStore } from '../stores/update'
@@ -26,6 +27,7 @@ import { useUpdateStore } from '../stores/update'
 const ui = useUiStore()
 const update = useUpdateStore()
 const peers = usePeersStore()
+const appearance = useAppearanceStore()
 
 type CatKey =
   | 'general'
@@ -150,6 +152,90 @@ async function load(): Promise<void> {
   void update.refresh().catch(() => {
     /* 拉不到就显示「—」，不影响其它设置项 */
   })
+}
+
+// ---------------------------------------------------------------- 外观 / 背景图
+
+const bgInput = ref<HTMLInputElement | null>(null)
+const bgError = ref('')
+const previewEl = ref<HTMLElement | null>(null)
+
+/**
+ * 预览里用的模糊半径。
+ *
+ * 同一个 px 值，在更小的框里相对更重（模糊是按屏幕像素算的，覆盖的是
+ * 画面的更大一块）。所以预览要按「预览宽 / 窗口宽」折算，才是整窗里的
+ * 真实观感 —— 否则用户会以为 6px 很重，实际在整窗里几乎看不出来。
+ *
+ * 代价是预览里的模糊总是「比看起来轻」，所以滑杆旁边那句话必须说清楚：
+ * 预览是缩略图，模糊在整窗里更明显。
+ */
+const viewportW = ref(window.innerWidth)
+
+function onResize(): void {
+  viewportW.value = window.innerWidth
+}
+
+onMounted(() => window.addEventListener('resize', onResize))
+onUnmounted(() => window.removeEventListener('resize', onResize))
+
+/** 预览里的模糊半径（已按比例折算）。 */
+const previewBlur = computed(() => {
+  const w = previewEl.value?.clientWidth ?? 0
+  if (!w) return appearance.state.blur
+  return Math.max(0, appearance.state.blur * (w / Math.max(1, viewportW.value)))
+})
+
+const previewLayerStyle = computed(() => ({
+  backgroundImage: `url("${appearance.state.dataUrl}")`,
+  filter: `blur(${previewBlur.value}px)`
+}))
+
+const previewScrimStyle = computed(() => ({
+  opacity: String(appearance.state.dim / 100)
+}))
+
+function pickBackground(): void {
+  bgError.value = ''
+  bgInput.value?.click()
+}
+
+/**
+ * 选中文件后交给 store 处理。
+ *
+ * 立刻清空 input.value：否则用户「选同一张图」时不会触发 change
+ * （文件对象没变），看起来像按钮失灵。
+ */
+async function onBgFile(e: Event): Promise<void> {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  bgError.value = ''
+  try {
+    await appearance.chooseFile(file)
+  } catch (err: any) {
+    bgError.value = String(err?.message ?? err) || '设置背景失败'
+  }
+}
+
+async function removeBackground(): Promise<void> {
+  bgError.value = ''
+  try {
+    await appearance.clear()
+  } catch (err: any) {
+    bgError.value = String(err?.message ?? err) || '移除背景失败'
+  }
+}
+
+/** 拖滑杆只改本地样式，落盘由 store 防抖（每帧都发 RPC 会一直重写 config.toml）。 */
+function onDimInput(e: Event): void {
+  appearance.setLook(Number((e.target as HTMLInputElement).value), appearance.state.blur)
+}
+
+function onBlurInput(e: Event): void {
+  appearance.setLook(appearance.state.dim, Number((e.target as HTMLInputElement).value))
 }
 
 // ---------------------------------------------------------------- 局域网更新
@@ -446,6 +532,82 @@ onMounted(load)
           <input v-model="settings.autoOpen" type="checkbox" />
           <span>接收完成后自动打开</span>
         </label>
+
+        <!-- 外观：背景图。改动立即生效，不走「保存」（它不在这张表单里） -->
+        <div class="appearance">
+          <div class="appearance__head">
+            <span class="appearance__title">背景图</span>
+            <div class="appearance__actions">
+              <button class="btn btn-soft appearance__btn" :disabled="appearance.busy" @click="pickBackground">
+                {{ appearance.hasBackground ? '更换图片' : '选择图片' }}
+              </button>
+              <button
+                v-if="appearance.hasBackground"
+                class="btn btn-soft appearance__btn"
+                :disabled="appearance.busy"
+                @click="removeBackground"
+              >
+                移除
+              </button>
+            </div>
+          </div>
+
+          <!-- 预览 = 整窗背景的缩略：图片 + 遮罩 + 模糊，拖滑杆时实时变。
+               里面那颗「文字」用的是真正的 --bg-panel（此时已是半透明），
+               所以用户能直接看出「文字压在背景上还读不读得清」，
+               不用关掉弹框去猜。 -->
+          <div v-if="appearance.hasBackground" ref="previewEl" class="appearance__preview">
+            <div class="appearance__preview__layer" :style="previewLayerStyle" />
+            <div class="appearance__preview__scrim" :style="previewScrimStyle" />
+            <div class="appearance__preview__chip">文字压在背景上</div>
+          </div>
+
+          <p class="note appearance__hint">
+            {{
+              appearance.hasBackground
+                ? '图片铺满整个窗口，面板会自动转为半透明，文字依然压在遮罩之上。'
+                : '默认使用内置的渐变底。选一张照片，整个窗口都会以它为背景。'
+            }}
+          </p>
+
+          <label v-if="appearance.hasBackground" class="appearance__slider">
+            <span>遮罩 {{ appearance.state.dim }}%</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              :value="appearance.state.dim"
+              @input="onDimInput"
+            />
+          </label>
+
+          <label v-if="appearance.hasBackground" class="appearance__slider">
+            <span>模糊 {{ appearance.state.blur }}px</span>
+            <input
+              type="range"
+              min="0"
+              max="40"
+              step="1"
+              :value="appearance.state.blur"
+              @input="onBlurInput"
+            />
+          </label>
+
+          <p v-if="appearance.hasBackground" class="note appearance__hint appearance__hint--tight">
+            预览是缩略图，模糊在整窗里比这里更明显 —— 4–12px 通常就够把照片退成纹理而不糊掉正文。
+          </p>
+
+          <p v-if="bgError" class="appearance__err">{{ bgError }}</p>
+
+          <input
+            ref="bgInput"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            class="appearance__file"
+            @change="onBgFile"
+          />
+        </div>
       </section>
 
       <section v-else-if="cat === 'notify'">
@@ -1060,6 +1222,122 @@ label.check>span {
 
 .seed-tuning {
   margin-top: 10px;
+}
+
+/* ---------------------------------------------------------------- 外观 / 背景图 */
+/* 用上分割线把它与上方的表单字段分开：它是「立即生效」的，不参与底部保存 */
+.appearance {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--divider);
+}
+
+.appearance__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.appearance__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.appearance__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.appearance__btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+}
+
+/* 预览是「整窗背景的缩略」：图层 + 遮罩 + 文字样本，三层顺序与真实
+   窗口一致（照片 → 遮罩 → 面板）。所以这里看到的就是整窗的样子。 */
+.appearance__preview {
+  position: relative;
+  margin-top: 10px;
+  height: 150px;
+  overflow: hidden;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+}
+
+/* 图层要外扩：模糊会把边缘晕成半透明，不外扩就会看到一圈亮边 */
+.appearance__preview__layer {
+  position: absolute;
+  inset: -16px;
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+.appearance__preview__scrim {
+  position: absolute;
+  inset: 0;
+  background: #000;
+}
+
+/* 文字样本用真正的 --bg-panel：设了背景图之后它已经是半透明的了，
+   于是这一小块就是「面板压在照片上」的真实观感。 */
+.appearance__preview__chip {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  padding: 4px 9px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-xs);
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.appearance__hint {
+  margin: 8px 0 0;
+}
+
+.appearance__hint--tight {
+  margin-top: 4px;
+}
+
+.appearance__slider {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.appearance__slider > span {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* 原生 range 在深色主题下默认是浅灰轨道，accent-color 一条就够对齐品牌色 */
+.appearance__slider input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.appearance__err {
+  margin: 8px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--danger);
+}
+
+/* 真正的文件选择器：display:none 在部分 WebView 上会让 click() 失效 */
+.appearance__file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* ---------------------------------------------------------------- 吸底条 */

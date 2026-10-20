@@ -475,6 +475,24 @@ type UpdateStateDTO struct {
 	LogPath string `json:"logPath"`
 }
 
+// BackgroundDTO 是自定义背景图的当前状态。
+//
+// DataURL 用 data: URL 而不是文件路径：WebView 里从 wails:// 源直接引用
+// file:/// 会被拦，绕开它要么加自定义协议、要么加本地 HTTP 服务 ——
+// 为一张背景图引入一个常驻服务不值得。
+type BackgroundDTO struct {
+	// DataURL 形如 data:image/jpeg;base64,...；空串 = 没有自定义背景。
+	DataURL string `json:"dataUrl"`
+	// FileName 是 backgrounds/ 下的文件名（排障用，界面不展示）。
+	FileName string `json:"fileName"`
+	// Dim 是压在图片上的黑色遮罩百分比（0-100）。
+	Dim int `json:"dim"`
+	// Blur 是背景图的模糊半径（px，0 = 不模糊）。
+	Blur int `json:"blur"`
+	// MaxBytes 是允许的图片大小上限，供前端在选择前就给出提示。
+	MaxBytes int64 `json:"maxBytes"`
+}
+
 // SeedTestDTO 是「测试一颗种子」的结果（D-14）。
 //
 // UDPOK / TCPOK 分开给：用户最常撞到的是「UDP 通、TCP 被防火墙挡」，

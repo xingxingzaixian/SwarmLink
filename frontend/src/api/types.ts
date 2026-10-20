@@ -303,6 +303,22 @@ export interface SelfCheck {
 }
 
 /**
+ * 自定义背景图的当前状态。
+ *
+ * `dataUrl` 为空串表示没有自定义背景（回到默认的 mesh 渐变底）。
+ */
+export interface Background {
+  dataUrl: string
+  fileName: string
+  /** 黑色遮罩百分比（0-100）：照片越花，这个值越要往大调。 */
+  dim: number
+  /** 背景图模糊半径（px）：让照片退成纹理，正文对比度更稳。 */
+  blur: number
+  /** 允许的图片大小上限（字节），由后端给出，前端在选择前就提示。 */
+  maxBytes: number
+}
+
+/**
  * 单颗种子的「测试连接」结果（D-14）。
  *
  * `udpOk` 与 `tcpOk` 分开是刻意的：现场最常见的是「UDP 通、TCP 被防火墙挡」，
@@ -447,6 +463,18 @@ export interface SwarmApi {
    * 测试不该伪造一个与真实运行不同的世界。
    */
   testSeed(addr: string): Promise<SeedTest>
+
+  // 外观（自定义背景图）
+  getBackground(): Promise<Background>
+  /**
+   * 保存一张背景图。
+   *
+   * `dataBase64` 是图片原始字节的 base64（服务端也接受带 `data:` 前缀的形式）；
+   * `ext` 只是提示，真正的类型由服务端按文件头判定。
+   */
+  saveBackground(dataBase64: string, ext: string): Promise<Background>
+  clearBackground(): Promise<Background>
+  setBackgroundLook(dim: number, blur: number): Promise<Background>
 
   // 局域网更新
   /** 读取更新状态（设置页打开时拉一次；之后靠 update:state 事件推送）。 */
