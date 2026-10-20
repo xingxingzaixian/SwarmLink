@@ -51,6 +51,13 @@ type Config struct {
 	//
 	// 为 nil 时不携带任何摘要（旧行为）。
 	Shares func() []share.Summary
+
+	// AppVersion 是本机应用版本，随 ANNOUNCE 广播出去（局域网更新用）。
+	//
+	// 这里是【值】而不是回调：版本在一次进程生命周期内不可能变化，
+	// 与 Shares 那种会随用户操作变的东西不同。
+	// 空串时字段被 omitempty 省略，对端按 0.0.0 处理（永不作为更新源）。
+	AppVersion string
 }
 
 // DefaultConfig 返回默认配置。
@@ -408,6 +415,8 @@ func (b *Broadcaster) buildAnnounce(subnet string) peer.Announcement {
 		Timestamp:   b.clk.Now().Unix(),
 		Epoch:       b.epoch.Load(),
 		Source:      peer.SourceBroadcast,
+		// 版本号在签名【之前】填入但不参与签名域（见 peer.Announcement.AppVersion）。
+		AppVersion: b.cfg.AppVersion,
 	}
 	// 摘要在签名【之前】填好但【不参与】签名域（见 peer.Announcement.Shares）：
 	// 这样旧版本收到它照常验签通过，新版本能读到它。

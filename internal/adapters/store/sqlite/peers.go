@@ -25,7 +25,7 @@ var _ ports.PeerDirectory = (*Peers)(nil)
 func NewPeers(db *DB, clk ports.Clock) *Peers { return &Peers{db: db, clk: clk} }
 
 const peerColumns = `node_id, display_name, pub_key, last_addr, caps, proto_ver,
-                     first_seen, last_seen, subnet, state, source, shares`
+                     first_seen, last_seen, subnet, state, source, shares, app_version`
 
 // Upsert 写入/更新节点条目。
 //
@@ -35,8 +35,8 @@ func (p *Peers) Upsert(in peer.Peer) error {
 	return p.db.Write(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
 INSERT INTO peers(node_id, display_name, pub_key, last_addr, caps, proto_ver,
-                  first_seen, last_seen, subnet, state, source, shares)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                  first_seen, last_seen, subnet, state, source, shares, app_version)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(node_id) DO UPDATE SET
   display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name ELSE peers.display_name END,
   pub_key      = CASE WHEN excluded.pub_key      <> '' THEN excluded.pub_key      ELSE peers.pub_key      END,
@@ -55,11 +55,14 @@ ON CONFLICT(node_id) DO UPDATE SET
   -- shares 【刻意不沿用】上面「空值不覆盖」的规则：摘要是对方周期性通告的
   -- 全量状态，对方取消发布后正文就是空的。保留旧值会让取消掉的共享一直
   -- 挂在别人列表里，直到 TTL 过期 —— 用户看到的是「点了提示共享不存在」。
-  shares       = excluded.shares`,
+  shares       = excluded.shares,
+  -- 版本与 shares 相反，沿用「空值不覆盖」：空串只表示「这条通告没说」
+  -- （老版本客户端），而版本不会随时间被"取消"。
+  app_version  = CASE WHEN excluded.app_version <> '' THEN excluded.app_version ELSE peers.app_version END`,
 			in.NodeID.String(), in.DisplayName, pubKeyString(in.PublicKey), in.LastAddr,
 			uint32(in.Caps), in.ProtoVer,
 			msOf(in.FirstSeen), msOf(in.LastSeen), in.Subnet, string(in.State), in.Source,
-			encodeShares(in.Shares),
+			encodeShares(in.Shares), in.AppVersion,
 		)
 		return err
 	})
@@ -207,9 +210,10 @@ func scanPeer(s rowScanner) (peer.Peer, error) {
 		state     sql.NullString
 		source    sql.NullString
 		shares    sql.NullString
+		appVer    sql.NullString
 	)
 	if err := s.Scan(&nodeID, &dispName, &pubKey, &lastAddr, &caps, &protoVer,
-		&firstSeen, &lastSeen, &subnet, &state, &source, &shares); err != nil {
+		&firstSeen, &lastSeen, &subnet, &state, &source, &shares, &appVer); err != nil {
 		return out, err
 	}
 
@@ -229,6 +233,7 @@ func scanPeer(s rowScanner) (peer.Peer, error) {
 	out.State = peer.State(nullString(state))
 	out.Source = nullString(source)
 	out.Shares = decodeShares(nullString(shares))
+	out.AppVersion = nullString(appVer)
 	return out, nil
 }
 

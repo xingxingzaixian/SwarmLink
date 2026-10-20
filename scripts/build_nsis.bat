@@ -1,1 +1,1 @@
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\pack.ps1 windows package
+pack.ps1 windows package

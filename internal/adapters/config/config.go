@@ -144,6 +144,26 @@ type Config struct {
 		// AutoStart 控制是否开机自启动。
 		AutoStart bool `toml:"auto_start"`
 	} `toml:"startup"`
+
+	// Update 是局域网更新（从局域网里版本更高的节点拉取安装包）。
+	//
+	// 注意 LANEnabled 的默认值是 true，且【不能】在 applyDefaults 里用
+	// `if !c.Update.LANEnabled { ... }` 回填 —— false 是用户的合法选择，
+	// 那样写会让「关掉开关」重启后自己打开（与 Notify 那段注释同一个陷阱）。
+	Update struct {
+		// LANEnabled 是总开关。关闭 = 本机不再拉取（停止检查、取消排期、
+		// 删除已下载的包），但仍可作为分发源 —— 否则只要有一台机器关了开关，
+		// 全网「拉齐」就会卡在它身上。
+		LANEnabled bool `toml:"lan_enabled"`
+		// Mode 决定发现新版本后的行为：
+		//   prompt —— 下载完成后弹框询问（默认）
+		//   auto   —— 自动安装并重启，不询问
+		//   notify —— 只提示，不安装（要用户在设置页手动点）
+		Mode string `toml:"mode"`
+		// AutoInstallAfter 是 prompt 模式下的兜底：弹框后这么久没有任何操作
+		// 就自动安装（对应凌晨无人值守）。"0s" 表示永不自动安装。
+		AutoInstallAfter Duration `toml:"auto_install_after"`
+	} `toml:"update"`
 }
 
 // Default 返回带默认值的配置。
@@ -197,6 +217,13 @@ func Default() *Config {
 
 	// 开机自启动默认关闭：避免用户第一次启动就被系统启动吓到
 	c.Startup.AutoStart = false
+
+	// 局域网更新默认开启：产品需求就是「局域网里有更高版本就拉齐」。
+	// 默认模式是「下载完再问」，这也是 Windows 更新的做法 —— 用户点「立即」
+	// 之后不必再等 40MB。
+	c.Update.LANEnabled = true
+	c.Update.Mode = "prompt"
+	c.Update.AutoInstallAfter = Duration(4 * time.Hour)
 
 	return c
 }
@@ -411,6 +438,19 @@ func (c *Config) Validate() error {
 	if c.Discovery.Seeds.SeedsPerRefresh > 8 {
 		// 见 4.5.1：拉更多种子只是成倍增加流量，可靠性并不提高
 		return fmt.Errorf("config: seeds_per_refresh=%d 过大（建议 2，见 ADR-011）", c.Discovery.Seeds.SeedsPerRefresh)
+	}
+
+	// 局域网更新的模式：空串按默认（询问）处理而不是报错 —— 老配置文件里
+	// 根本没有 [update] 段，把它判成非法会让升级后的机器起不来。
+	switch c.Update.Mode {
+	case "", "prompt":
+		c.Update.Mode = "prompt"
+	case "auto", "notify":
+	default:
+		return fmt.Errorf("config: invalid update.mode %q (want prompt|auto|notify)", c.Update.Mode)
+	}
+	if c.Update.AutoInstallAfter < 0 {
+		c.Update.AutoInstallAfter = 0
 	}
 	return nil
 }

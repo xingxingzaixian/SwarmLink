@@ -217,6 +217,8 @@ func (d *DiscoveryApp) HandlePeerListResp(sess ports.Session, f protocol.Frame) 
 			// 转述来的摘要照单全收（与其它字段同一条路径）：
 			// 它只用于展示「去哪儿问」，真伪由共享方在收到请求时校验。
 			Shares: share.NormalizeSummaries(e.Shares),
+			// 版本同样是转述：只用于候选排序，真值以会话内 UPDATE_INFO_RESP 为准。
+			AppVersion: e.AppVersion,
 		}
 		if e.PublicKey != "" {
 			if pub, err := identity.ParsePublic(e.PublicKey); err == nil {
@@ -260,6 +262,7 @@ func (d *DiscoveryApp) entries() []protocol.PeerListEntry {
 			Caps:        uint32(p.Caps),
 			ProtoVer:    p.ProtoVer,
 			Shares:      p.Shares,
+			AppVersion:  p.AppVersion,
 		}
 		if len(p.PublicKey) == ed25519.PublicKeySize {
 			entry.PublicKey = identity.MarshalPublic(p.PublicKey)

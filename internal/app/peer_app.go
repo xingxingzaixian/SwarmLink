@@ -160,8 +160,14 @@ func (a *PeerApp) OnAnnouncement(an peer.Announcement) error {
 		// 全量状态，对方取消发布后摘要就该立刻变空 —— 沿用空值保留规则
 		// 会让取消掉的共享在别人列表里挂到 TTL 过期。
 		Shares: share.NormalizeSummaries(an.Shares),
+		// 应用版本：旧版本客户端不带这个字段（空串），此时保留上一次学到的值。
+		// 与 Shares 相反 —— 版本不会「取消」，空只表示「这条通告没说」。
+		AppVersion: an.AppVersion,
 	}
 	if exists {
+		if p.AppVersion == "" {
+			p.AppVersion = prev.AppVersion
+		}
 		if p.DisplayName == "" {
 			p.DisplayName = prev.DisplayName
 		}

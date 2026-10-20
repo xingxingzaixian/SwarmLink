@@ -198,6 +198,16 @@ wails3 CLI 版本不匹配。
         Write-Host "    makensis: $((Get-Command makensis).Source)"
     }
 
+    # ------------------------------------------------------- 版本号回写
+    # 运行时只认 internal/version.Version，而安装包元数据在 config.yml /
+    # info.json / Info.plist / nfpm.yaml 里。不同步的后果不是「显示不一致」
+    # 而是升级死循环：广播 1.0.1，安装包里却是 1.0.0。
+    $ErrorActionPreference = 'Continue'
+    & go run ./scripts/vergen
+    $vcode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($vcode -ne 0) { throw "版本号同步失败（exit $vcode）：先修 internal/version/version.go 再打包" }
+
     # 直接调平台任务，绕开根任务按 {{.GOOS}} 分发的这一层 ——
     # 我们要的目标平台是显式参数，不该再依赖宿主机 OS 推断。
     #

@@ -31,6 +31,13 @@ export interface Peer {
    * 界面必须把 0 显示成「测量中」—— 把「没测到」显示成「0ms」是编造数据。
    */
   rttMs: number
+  /**
+   * 对方自述的应用版本，缺省表示「对方没报」（旧版本客户端）。
+   *
+   * 只用于「局域网更新」判断谁更新，不可当真：它随 UDP 广播传播、不参与签名，
+   * 真正的包版本由会话内的 UPDATE_INFO_RESP 给出。
+   */
+  appVersion?: string
 }
 
 export interface Message {
@@ -305,6 +312,70 @@ export interface Settings {
   notifyMinimizeToTray: boolean
   /** 开机自启动。 */
   autoStart: boolean
+
+  /** 局域网更新总开关（关闭 = 本机不再拉取，但仍可作为别人的更新源）。 */
+  updateEnabled: boolean
+  /** `prompt` 下载完弹框询问 | `auto` 自动装 | `notify` 只提示不装。 */
+  updateMode: string
+  /** 弹框后多少小时无操作自动安装；**0 = 永不**。 */
+  updateAutoInstallHours: number
+}
+
+/**
+ * 局域网更新的阶段。
+ *
+ * 与后端 app.UpdatePhase 一一对应。前端按它决定显示什么，
+ * 不要自己从 percent / scheduledAt 反推阶段 —— 两个判据迟早不一致。
+ */
+export type UpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'downloading'
+  | 'ready'
+  | 'scheduled'
+  | 'applying'
+  | 'failed'
+  | 'unsupported'
+
+/** 一个版本更高的候选更新源。 */
+export interface UpdatePeer {
+  peerId: string
+  displayName: string
+  addr: string
+  version: string
+}
+
+/** 局域网更新的完整状态快照（后端只有这一个更新事件）。 */
+export interface UpdateState {
+  phase: UpdatePhase | string
+  currentVersion: string
+  targetVersion?: string
+  sourcePeerId?: string
+  sourceName?: string
+  sourceAddr?: string
+  size?: number
+  downloaded?: number
+  percent?: number
+  sha256?: string
+  /** 排定的安装时刻（毫秒）；0/缺省表示没有排期。 */
+  scheduledAt?: number
+  /** 到点自动安装的时刻（毫秒）；0/缺省表示不会自动安装。 */
+  autoInstallAt?: number
+  /** 为真时前端应弹「立即更新 / 选择时间」确认框。 */
+  promptPending: boolean
+  error?: string
+  /** 当前平台是否支持自动安装（目前仅 Windows）。 */
+  platformSupported: boolean
+  /** 本机是否持有与当前版本一致的安装包（能否作为别人的更新源）。 */
+  canDistribute: boolean
+  installerPath?: string
+  lastCheckAt?: number
+  /** 局域网里版本更高的节点。 */
+  higherPeers?: UpdatePeer[]
+  /** 数据目录（关于信息）。 */
+  dataDir: string
+  /** 日志文件路径（关于信息）。 */
+  logPath: string
 }
 
 /** 前端可调用的后端能力。 */
@@ -330,6 +401,25 @@ export interface SwarmApi {
    * 「跨网段发现不到人」的根因九成在这两条前提上，静态提示没用，必须实探。
    */
   runSelfCheck(): Promise<SelfCheck>
+
+  // 局域网更新
+  /** 读取更新状态（设置页打开时拉一次；之后靠 update:state 事件推送）。 */
+  getUpdateState(): Promise<UpdateState>
+  /** 触发一次后台检查（不等结果，结果通过事件回来）。 */
+  checkUpdateNow(): Promise<UpdateState>
+  /**
+   * 立即安装并重启。
+   *
+   * 后端会拉起安装器并退出进程，因此这个 Promise 正常返回后大概率再也
+   * 收不到后续 —— 前端不要在这之后依赖任何状态。
+   */
+  applyUpdateNow(): Promise<UpdateState>
+  /** 把安装安排到 atMillis（毫秒时间戳）。 */
+  scheduleUpdate(atMillis: number): Promise<UpdateState>
+  /** 稍后提醒（30 分钟后重新弹框），不取消更新。 */
+  snoozeUpdate(): Promise<UpdateState>
+  /** 放弃本次更新（删除已下载的包）。 */
+  cancelUpdate(): Promise<UpdateState>
 
   // 单聊
   sendMessage(peerId: string, text: string): Promise<Message>
@@ -555,6 +645,13 @@ export const EV = {
    * 他人共享的变化不走它：那是目录条目的变化，已经由 peer:updated 承担。
    */
   shareUpdated: 'share:updated',
+  /**
+   * 局域网更新状态变化（载荷是完整快照 UpdateState）。
+   *
+   * 只有这一个更新事件：状态机有 8 个阶段，用增量事件拼装迟早会出现
+   * 「显示已下载完、后端已经进入安装」这种自相矛盾的画面。
+   */
+  updateState: 'update:state',
   debug: 'debug:event',
   /** 拖入窗口的文件路径（由桌面外壳转发，非领域事件）。 */
   fileDropped: 'file:dropped',

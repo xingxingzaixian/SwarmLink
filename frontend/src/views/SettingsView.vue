@@ -20,10 +20,20 @@ import { computed, onMounted, ref, watch } from 'vue'
 import Icon from '../components/Icon.vue'
 import { getApi, type SelfCheck, type Settings } from '../api'
 import { useUiStore } from '../stores/ui'
+import { useUpdateStore } from '../stores/update'
 
 const ui = useUiStore()
+const update = useUpdateStore()
 
-type CatKey = 'general' | 'notify' | 'network' | 'connect' | 'transfer' | 'seed' | 'diag'
+type CatKey =
+  | 'general'
+  | 'notify'
+  | 'network'
+  | 'connect'
+  | 'transfer'
+  | 'seed'
+  | 'update'
+  | 'diag'
 
 interface Cat {
   key: CatKey
@@ -80,6 +90,12 @@ const CATS: Cat[] = [
     desc: '跨网段发现只认种子清单；这里配错了，跨网段就等于断网。'
   },
   {
+    key: 'update',
+    label: '更新',
+    icon: 'download',
+    desc: '从局域网里版本更高的机器拉取安装包。默认开启，下载完成后再问你什么时候装。'
+  },
+  {
     key: 'diag',
     label: '部署自检',
     icon: 'activity',
@@ -104,6 +120,97 @@ async function load(): Promise<void> {
   settings.value = await api.getSettings()
   interfaces.value = await api.listInterfaces()
   seedsText.value = (settings.value.seeds ?? []).join('\n')
+  // 更新状态单独拉一次：事件只在变化时推，打开设置页时可能已经错过了
+  // 「下载完成」那一帧（比如应用启动时就已经 ready）。
+  void update.refresh().catch(() => {
+    /* 拉不到就显示「—」，不影响其它设置项 */
+  })
+}
+
+// ---------------------------------------------------------------- 局域网更新
+
+/** 是否有可立即安装的包（ready / scheduled 都算）。 */
+const canInstall = computed(
+  () => update.state?.phase === 'ready' || update.state?.phase === 'scheduled'
+)
+
+/** 「待安装」那一行的文案（没有待安装项时为空，整行不显示）。 */
+const pendingLabel = computed(() => {
+  const st = update.state
+  if (!st?.targetVersion || !canInstall.value) return ''
+  const size = st.size ? `，${formatBytes(st.size)}` : ''
+  if (st.phase === 'scheduled' && st.scheduledAt) {
+    return `v${st.targetVersion}，已安排在 ${formatTime(st.scheduledAt)}${size}`
+  }
+  return `v${st.targetVersion}，等待你确认${size}`
+})
+
+function formatBytes(n: number): string {
+  if (!n) return '—'
+  const mb = n / (1024 * 1024)
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb.toFixed(1)} MB`
+}
+
+function formatTime(ms: number): string {
+  const d = new Date(ms)
+  const pad = (v: number): string => String(v).padStart(2, '0')
+  return `${d.getMonth() + 1}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+async function checkUpdate(): Promise<void> {
+  notice.value = ''
+  try {
+    await update.checkNow()
+  } catch (e: any) {
+    notice.value = String(e?.message ?? e)
+  }
+}
+
+async function applyUpdate(): Promise<void> {
+  notice.value = ''
+  try {
+    await update.applyNow()
+    // 安装成功后进程会退出：这句提示给的是「正在发生什么」，
+    // 而不是「已经完成」—— 前端等不到完成的那一刻。
+    ui.notify('正在安装更新，应用会立即重启')
+  } catch (e: any) {
+    notice.value = String(e?.message ?? e)
+  }
+}
+
+/** 快捷排期：今晚 22:00（已过 22:00 则顺延到明天）。 */
+async function scheduleTonight(): Promise<void> {
+  const at = new Date()
+  at.setHours(22, 0, 0, 0)
+  if (at.getTime() <= Date.now()) at.setDate(at.getDate() + 1)
+  await scheduleAt(at)
+}
+
+/** 快捷排期：明天 02:00（凌晨无人值守的常规窗口）。 */
+async function scheduleTomorrowNight(): Promise<void> {
+  const at = new Date()
+  at.setDate(at.getDate() + 1)
+  at.setHours(2, 0, 0, 0)
+  await scheduleAt(at)
+}
+
+async function scheduleAt(at: Date): Promise<void> {
+  notice.value = ''
+  try {
+    await update.scheduleAt(at.getTime())
+    ui.notify(`已安排在 ${formatTime(at.getTime())} 安装`)
+  } catch (e: any) {
+    notice.value = String(e?.message ?? e)
+  }
+}
+
+async function cancelUpdate(): Promise<void> {
+  notice.value = ''
+  try {
+    await update.cancel()
+  } catch (e: any) {
+    notice.value = String(e?.message ?? e)
+  }
 }
 
 async function save(): Promise<void> {
@@ -356,6 +463,107 @@ onMounted(load)
           </label>
         </div>
         <p class="note">建议值 2：拉更多只是成倍增加流量，可靠性并不提高（ADR-011）。</p>
+      </section>
+
+      <section v-else-if="cat === 'update'">
+        <label class="check">
+          <input v-model="settings.updateEnabled" type="checkbox" />
+          <span>允许从局域网里版本更高的机器更新</span>
+        </label>
+        <p class="note">
+          关闭后本机不再下载安装包、也不再提示；但仍可以把本机的安装包提供给别人
+          —— 否则只要有一台机器关了开关，全网版本就会卡在它身上。
+        </p>
+
+        <div class="urows">
+          <div class="urow">
+            <span>当前版本</span>
+            <b class="mono">v{{ update.state?.currentVersion ?? '—' }}</b>
+          </div>
+          <div class="urow">
+            <span>局域网最新版本</span>
+            <b v-if="update.topPeer">
+              v{{ update.topPeer.version }}（{{
+                update.topPeer.displayName || update.topPeer.peerId.slice(0, 8)
+              }}）
+            </b>
+            <b v-else class="faint">暂无更高版本</b>
+          </div>
+          <div v-if="pendingLabel" class="urow">
+            <span>待安装</span>
+            <b>{{ pendingLabel }}</b>
+          </div>
+          <div v-if="update.state?.phase === 'downloading'" class="urow">
+            <span>下载进度</span>
+            <b>
+              {{ (update.state.percent ?? 0).toFixed(0) }}%（{{
+                formatBytes(update.state.downloaded ?? 0)
+              }}
+              / {{ formatBytes(update.state.size ?? 0) }}）
+            </b>
+          </div>
+          <div v-if="update.state?.error" class="urow">
+            <span>最近一次失败</span>
+            <b class="bad">{{ update.state.error }}</b>
+          </div>
+          <div v-if="!update.supported" class="urow">
+            <span>平台支持</span>
+            <b class="warn">当前平台暂不支持自动安装</b>
+          </div>
+        </div>
+
+        <label>
+          <span>发现新版本后</span>
+          <select v-model="settings.updateMode">
+            <option value="prompt">下载完成后询问我（推荐）</option>
+            <option value="auto">自动安装并重启</option>
+            <option value="notify">只提示，我自己决定</option>
+          </select>
+        </label>
+
+        <label>
+          <span>无人值守时</span>
+          <input
+            v-model.number="settings.updateAutoInstallHours"
+            type="number"
+            min="0"
+            max="72"
+          />
+        </label>
+        <p class="note">
+          下载完成后这么久仍没有任何操作，就自动安装并重启（对应夜间无人值守）。
+          填 <b>0</b> 表示永不自动安装 —— 那样没人点的机器会一直停在旧版本。
+        </p>
+
+        <div class="uacts">
+          <button class="btn btn-soft" :disabled="update.busy" @click="checkUpdate">
+            <Icon name="refresh" :size="14" />{{
+              update.state?.phase === 'checking' ? '检查中…' : '立即检查'
+            }}
+          </button>
+          <template v-if="canInstall">
+            <button class="btn btn-primary" @click="applyUpdate">立即更新并重启</button>
+            <button class="btn btn-soft" @click="scheduleTonight">今晚 22:00</button>
+            <button class="btn btn-soft" @click="scheduleTomorrowNight">明天 02:00</button>
+            <button class="btn btn-soft" @click="cancelUpdate">放弃本次</button>
+          </template>
+        </div>
+
+        <p v-if="update.state && !update.state.canDistribute" class="note">
+          本机目前没有缓存的安装包，因此不能作为别人的更新源。安装包会在安装本版本时
+          自动留存一份；从旧版本手工升级的机器需要重装一次才会具备。
+        </p>
+
+        <div class="urows about">
+          <div class="urow">
+            <span>数据目录</span>
+            <code class="mono">{{ update.state?.dataDir ?? '—' }}</code>
+          </div>
+          <div class="urow">
+            <span>日志文件</span>
+            <code class="mono">{{ update.state?.logPath ?? '—' }}</code>
+          </div>
+        </div>
       </section>
 
       <section v-else>
@@ -611,6 +819,67 @@ label.check>span {
 
 .line.warn {
   color: var(--warn);
+}
+
+/* ---------------------------------------------------------------- 局域网更新 */
+/* 只读信息用「左标题 + 右值」的表格行：它不参与编辑，成一列 input 反而会
+   让人以为可以改。 */
+.urows {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+}
+
+.urow {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+}
+
+.urow>span {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.urow>b,
+.urow>code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.urow>code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.urow .bad {
+  color: var(--danger);
+}
+
+.urow .warn {
+  color: var(--warn);
+}
+
+/* 「关于」那一段用虚线分隔：它是排障信息，不属于「更新」这条主流程。 */
+.urows.about {
+  margin-top: 14px;
+  border-style: dashed;
+  background: transparent;
+}
+
+.uacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 4px;
 }
 
 /* ---------------------------------------------------------------- 吸底条 */

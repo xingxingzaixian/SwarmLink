@@ -36,17 +36,27 @@ import {
   SearchService,
   SettingsService,
   ShareService,
-  TransferService
+  TransferService,
+  UpdateService
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/index.js'
 import type {
   DiagnosticsDTO,
   GroupDTO,
   SelfCheckDTO,
   SettingsDTO,
-  ShareDTO
+  ShareDTO,
+  UpdateStateDTO
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/models.js'
 
-import type { Diagnostics, Group, SelfCheck, Settings, Share, SwarmApi } from './types'
+import type {
+  Diagnostics,
+  Group,
+  SelfCheck,
+  Settings,
+  Share,
+  SwarmApi,
+  UpdateState
+} from './types'
 
 /** 把绑定的可空数组收敛成空数组。 */
 function list<T>(v: T[] | null | undefined): T[] {
@@ -76,6 +86,10 @@ function toSelfCheck(s: SelfCheckDTO): SelfCheck {
 
 function toShare(s: ShareDTO): Share {
   return { ...s, visibility: { ...s.visibility, allowed: list(s.visibility?.allowed) } }
+}
+
+function toUpdateState(s: UpdateStateDTO): UpdateState {
+  return { ...s, higherPeers: list(s.higherPeers) }
 }
 
 /** 真实后端实现（由 Wails 生成的服务绑定驱动）。 */
@@ -168,7 +182,14 @@ export const realApi: SwarmApi = {
   shareDownload: async (shareId, paths) => {
     const res = await ShareService.Download(shareId, paths)
     return { ...res, rejected: list(res.rejected) }
-  }
+  },
+
+  getUpdateState: async () => toUpdateState(await UpdateService.GetState()),
+  checkUpdateNow: async () => toUpdateState(await UpdateService.CheckNow()),
+  applyUpdateNow: async () => toUpdateState(await UpdateService.ApplyNow()),
+  scheduleUpdate: async (atMillis) => toUpdateState(await UpdateService.Schedule(atMillis)),
+  snoozeUpdate: async () => toUpdateState(await UpdateService.Snooze()),
+  cancelUpdate: async () => toUpdateState(await UpdateService.Cancel())
 }
 
 /**

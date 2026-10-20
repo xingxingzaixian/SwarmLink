@@ -64,6 +64,14 @@ type AnnounceWire struct {
 	// Shares 是共享摘要（FR-14）。不参与签名，见 peer.Announcement.Shares：
 	// 旧版本收到带该字段的报文会因为 encoding/json 忽略未知键而照常通过验签。
 	Shares []share.Summary `json:"shares,omitempty"`
+
+	// AppVersion 是应用版本（局域网更新用）。与 Shares 同一套兼容策略：
+	// 不参与签名，旧版本忽略未知键照常验签。
+	//
+	// 用 omitempty 而不是必填：1.0.x 及更早的客户端没有这个字段，
+	// 它们发出来的报文因此仍是「合法但无版本」—— 接收方按 0.0.0 处理，
+	// 永远不会把它们当成更新源。
+	AppVersion string `json:"app_version,omitempty"`
 }
 
 // NewAnnounceWire 把领域通告转为线上结构。
@@ -80,6 +88,7 @@ func NewAnnounceWire(a peer.Announcement) AnnounceWire {
 		Epoch:       a.Epoch,
 		Sig:         base64.StdEncoding.EncodeToString(a.Sig),
 		Shares:      share.NormalizeSummaries(a.Shares),
+		AppVersion:  a.AppVersion,
 	}
 }
 
@@ -120,6 +129,7 @@ func (w AnnounceWire) Announcement() (peer.Announcement, error) {
 	// 摘要归一化后再进领域：畸形摘要（空 id / 空名）在这里被丢掉，
 	// 而不是让它们一路传到 UI 才炸。
 	a.Shares = share.NormalizeSummaries(w.Shares)
+	a.AppVersion = w.AppVersion
 	return a, nil
 }
 
@@ -140,6 +150,9 @@ type PeerListEntry struct {
 	// 跨网段时共享就是靠这一条抵达另一侧：种子手里的目录里存着它学到的
 	// 摘要，拉取方据此知道「去哪儿问」。
 	Shares []share.Summary `json:"shares,omitempty"`
+	// AppVersion 是该条目的应用版本（原样转述，可能是别人写的）。
+	// 与 Shares 同理：只用于「谁可能更新」的候选排序，真值以会话内应答为准。
+	AppVersion string `json:"app_version,omitempty"`
 }
 
 // PeerListReqWire 是目录拉取请求。

@@ -6,6 +6,7 @@ import { usePeersStore } from '../stores/peers'
 import { useShareStore } from '../stores/share'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
+import { useUpdateStore } from '../stores/update'
 import { isImagePath } from '../utils/image'
 import { Events } from '@wailsio/runtime'
 
@@ -15,7 +16,8 @@ import {
   type FilesDroppedEvent,
   type Message,
   type Peer,
-  type SystemNotifyEvent
+  type SystemNotifyEvent,
+  type UpdateState
 } from '../api/types'
 
 /**
@@ -293,6 +295,13 @@ export function registerEvents(): void {
 
   on(EV.netError, (data: { op: string; peerId: string; error: string }) => {
     debug.push({ topic: `net.error(${data.op}): ${data.error}`, at: Date.now() })
+  })
+
+  // 局域网更新：只有这一个事件，载荷是完整快照（见 UADP「单一状态事件」）。
+  // 不在此处做任何过滤或合并 —— 更新事件的频率最高也就每 256 KiB 一次，
+  // 而漏掉一帧的后果是弹框不出现 / 进度卡住。
+  on(EV.updateState, (data: UpdateState) => {
+    if (data?.phase) useUpdateStore().apply(data)
   })
 
   on(EV.configChanged, () => {

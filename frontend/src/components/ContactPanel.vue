@@ -104,6 +104,22 @@ function isActive(convId: string): boolean {
   return chat.activeConvId === convId
 }
 
+/**
+ * 悬停提示里补一行对端版本。
+ *
+ * 只放 title 而不是加到列表行上：版本号是排障信息（「为什么这台没跟着升级」），
+ * 平时看一眼的价值远不如它占的那一行宽度。旧版本客户端没有这个字段，直接省略。
+ */
+function peerTitle(p: Peer): string {
+  const parts = [
+    `NodeID ${p.nodeId}`,
+    `地址 ${p.lastAddr || '未知'}`,
+    `子网 ${p.subnet || '未知'}`
+  ]
+  if (p.appVersion) parts.push(`版本 v${p.appVersion}`)
+  return parts.join('\n')
+}
+
 /** 有消息就显示消息，没有就显示地址 —— 空列表里「什么都没有」最没用。 */
 function peerSub(p: Peer): string {
   const m = chat.previewOf(peerConvId(p))
@@ -382,7 +398,7 @@ const reachableCount = computed(() => peers.peers.filter(reachable).length)
             :key="p.nodeId"
             class="list-row"
             :class="{ active: isActive(peerConvId(p)) }"
-            :title="`NodeID ${p.nodeId}\n地址 ${p.lastAddr || '未知'}\n子网 ${p.subnet || '未知'}`"
+            :title="peerTitle(p)"
             @click="openPeer(p)"
           >
             <!-- 在线点用 reachable：正在广播、还没握手的节点也算「在」，

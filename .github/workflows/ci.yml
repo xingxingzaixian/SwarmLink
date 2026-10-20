@@ -68,6 +68,12 @@ jobs:
       - name: build（不带 wails tag）
         run: go build ./...
 
+      - name: 版本号与打包元数据一致
+        # 打包元数据（config.yml / info.json / Info.plist / nfpm.yaml）与
+        # internal/version.Version 分叉时，局域网更新会出现「装完还是旧版」
+        # 的死循环 —— 这属于发布纪律问题，必须在 CI 里拦住。
+        run: go run ./scripts/vergen -check
+
       - name: vet
         run: go vet ./internal/...
 

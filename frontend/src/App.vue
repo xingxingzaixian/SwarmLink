@@ -14,6 +14,7 @@ import ChatView from './views/ChatView.vue'
 import ContactPanel from './components/ContactPanel.vue'
 import SidePanel from './components/SidePanel.vue'
 import TransferQueueBar from './components/TransferQueueBar.vue'
+import UpdatePrompt from './components/UpdatePrompt.vue'
 import SearchPanel from './views/SearchPanel.vue'
 import SettingsDialog from './views/SettingsDialog.vue'
 import ShareDialog from './views/ShareDialog.vue'
@@ -23,12 +24,14 @@ import { useGroupStore } from './stores/group'
 import { usePeersStore } from './stores/peers'
 import { useTransferStore } from './stores/transfer'
 import { useUiStore } from './stores/ui'
+import { useUpdateStore } from './stores/update'
 
 const peers = usePeersStore()
 const chat = useChatStore()
 const transfers = useTransferStore()
 const groups = useGroupStore()
 const ui = useUiStore()
+const update = useUpdateStore()
 
 const mock = ref(false)
 
@@ -43,7 +46,11 @@ onMounted(async () => {
     peers.refresh(),
     chat.loadConversations(),
     transfers.refresh(),
-    groups.refresh()
+    groups.refresh(),
+    // 更新状态主动拉一次：事件只在变化时推，而「下载在上次运行时就完成了、
+    // 用户刚打开应用」这种情况不会有事件 —— 不拉就永远不弹框。
+    // 失败静默：更新是附加能力，不能挡住启动。
+    update.refresh().catch(() => {})
   ])
 
   // 节点目录的变化主体靠 peer:updated 事件推送，这里只做兜底轮询：
@@ -128,6 +135,10 @@ onUnmounted(() => {
   <!-- 兜底必须排在最后，且是「还有别的面板」而不是「panel 非空」：
        SettingsDialog 自己不认 'search'，会把未知值当成 'settings' 渲染成一片设置页。 -->
   <SettingsDialog v-else-if="ui.panel" />
+
+  <!-- 更新确认框与其它弹层【并列】而不是二选一：它由后端状态驱动（下载完成），
+       而不是由 ui.panel 驱动；用户正在设置页里也可能收到它。 -->
+  <UpdatePrompt />
 </template>
 
 <style scoped>

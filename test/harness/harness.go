@@ -163,7 +163,9 @@ func New(name string, opts Options) (*Node, error) {
 	discApp.RefreshInterval = 300 * time.Second // 由测试显式调用 RefreshSeeds
 	discApp.SeedsPerRefresh = 2
 
-	router := app.NewRouter(chatApp, groupApp, transferApp, discApp, peerApp, shareApp, nil)
+	// 更新应用在 e2e 里不参与：传 nil 会让 Router 跳过 UPDATE_* 帧的分派
+	// （handleOf 对 nil 返回 nil），这正是「测试不关心这条链路」的写法。
+	router := app.NewRouter(chatApp, groupApp, transferApp, discApp, peerApp, shareApp, nil, nil)
 	conn.SetHandler(router.Handle)
 
 	peerApp.Start()

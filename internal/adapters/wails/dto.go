@@ -99,6 +99,10 @@ type PeerDTO struct {
 	// 界面必须把「0」显示成「测量中」而不是「0ms」—— 后者是神仙延迟，
 	// 拿没数据冒充 0 是编造。
 	RTTMs int64 `json:"rttMs"`
+
+	// AppVersion 是对方自述的应用版本，空串表示「对方没报」（旧版本客户端）。
+	// 它是「局域网更新」判断谁更新的唯一输入，因此必须给到界面。
+	AppVersion string `json:"appVersion,omitempty"`
 }
 
 // ToPeerDTO 转换领域节点；connected 与 rttMs 均由连接层提供（rttMs 无数据时传 0）。
@@ -123,6 +127,7 @@ func ToPeerDTO(p peer.Peer, connected bool, rttMs int64) PeerDTO {
 		Online:      p.State == peer.StateOnline,
 		Connected:   connected,
 		RTTMs:       rttMs,
+		AppVersion:  p.AppVersion,
 	}
 }
 
@@ -395,6 +400,59 @@ type SettingsDTO struct {
 	NotifySound          bool `json:"notifySound"`
 	NotifyMinimizeToTray bool `json:"notifyMinimizeToTray"`
 	AutoStart            bool `json:"autoStart"`
+
+	// 局域网更新。
+	//
+	// 模式用字符串而不是枚举：前端要显示三选一，而 Go 的绑定生成器
+	// 对自定义字符串类型不友好（会变成 any）。
+	UpdateEnabled bool   `json:"updateEnabled"`
+	UpdateMode    string `json:"updateMode"`
+	// UpdateAutoInstallHours 是「弹框后多久无操作自动安装」，0 表示永不。
+	// 用小时而不是 Duration：设置页是数字输入框，而 TOML 里写 "4h"
+	// 对运维更直观 —— 两个面各用各的自然单位，服务层做换算。
+	UpdateAutoInstallHours int `json:"updateAutoInstallHours"`
+}
+
+// UpdatePeerDTO 是「局域网里版本更高」的一个候选源。
+type UpdatePeerDTO struct {
+	PeerID      string `json:"peerId"`
+	DisplayName string `json:"displayName"`
+	Addr        string `json:"addr"`
+	Version     string `json:"version"`
+}
+
+// UpdateStateDTO 是局域网更新的完整状态快照。
+//
+// 前端只消费这一个结构（配合单一事件），而不是拼装多个增量事件：
+// 状态机有 8 个阶段，增量事件迟早会拼出「界面显示 ready 但后端已经 applying」
+// 这种自相矛盾的画面。
+type UpdateStateDTO struct {
+	Phase          string  `json:"phase"`
+	CurrentVersion string  `json:"currentVersion"`
+	TargetVersion  string  `json:"targetVersion,omitempty"`
+	SourcePeerID   string  `json:"sourcePeerId,omitempty"`
+	SourceName     string  `json:"sourceName,omitempty"`
+	SourceAddr     string  `json:"sourceAddr,omitempty"`
+	Size           int64   `json:"size,omitempty"`
+	Downloaded     int64   `json:"downloaded,omitempty"`
+	Percent        float64 `json:"percent,omitempty"`
+	SHA256         string  `json:"sha256,omitempty"`
+	// ScheduledAt / AutoInstallAt 是毫秒时间戳，0 表示没有。
+	ScheduledAt   int64  `json:"scheduledAt,omitempty"`
+	AutoInstallAt int64  `json:"autoInstallAt,omitempty"`
+	PromptPending bool   `json:"promptPending"`
+	Error         string `json:"error,omitempty"`
+	// PlatformSupported 为假时整页只展示说明（当前实现仅 Windows）。
+	PlatformSupported bool `json:"platformSupported"`
+	// CanDistribute 表示本机持有与当前版本一致的安装包，可被别人拉取。
+	CanDistribute bool            `json:"canDistribute"`
+	InstallerPath string          `json:"installerPath,omitempty"`
+	LastCheckAt   int64           `json:"lastCheckAt,omitempty"`
+	HigherPeers   []UpdatePeerDTO `json:"higherPeers,omitempty"`
+
+	// 关于信息：出问题时运维第一个要问的三件事（版本 / 数据在哪 / 日志在哪）。
+	DataDir string `json:"dataDir"`
+	LogPath string `json:"logPath"`
 }
 
 // SelfCheckDTO 是部署前置条件（P-1 / P-2）自检结果。

@@ -93,6 +93,20 @@ Section
     
     !insertmacro wails.files
 
+    # ---------------------------------------------------------------
+    # 局域网更新：把安装器自己留一份在数据目录下。
+    #
+    # 为什么必须在安装时做：用户装完就会把安装包删掉，而没有安装包的机器
+    # 只能「发现新版本」却永远拉不到包 —— 更新链路第一步就断了。
+    # 文件名里带版本号，接收端据此确认「源手上的包就是它广播的那个版本」，
+    # 否则会出现「装完还是旧版 → 再拉一次」的死循环。
+    #
+    # 放在 $APPDATA\SwarmLink\updates（与 config.Dir() 一致），卸载时只删
+    # 这一个子目录，不动 config.toml 与 data/。
+    # ---------------------------------------------------------------
+    CreateDirectory "$APPDATA\SwarmLink\updates"
+    CopyFiles /SILENT "$EXEPATH" "$APPDATA\SwarmLink\updates\swarmlink-${INFO_PRODUCTVERSION}-installer.exe"
+
     CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
     CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
 
@@ -106,6 +120,10 @@ Section "uninstall"
     !insertmacro wails.setShellContext
 
     RMDir /r "$AppData\${PRODUCT_EXECUTABLE}" # Remove the WebView2 DataPath
+
+    # 只删「局域网更新」的安装包缓存，保留 config.toml / data/：
+    # 卸载再装回来时，身份、聊天记录与用户的设置都还在，那才是用户预期。
+    RMDir /r "$APPDATA\SwarmLink\updates"
 
     RMDir /r $INSTDIR
 

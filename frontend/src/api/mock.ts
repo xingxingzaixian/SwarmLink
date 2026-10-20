@@ -16,7 +16,8 @@ import type {
   ShareDownload,
   ShareItem,
   SwarmApi,
-  TransferJob
+  TransferJob,
+  UpdateState
 } from './types'
 
 /**
@@ -302,7 +303,10 @@ export function createMockApi(): SwarmApi {
     encryption: 'off',
     notifySound: true,
     notifyMinimizeToTray: true,
-    autoStart: false
+    autoStart: false,
+    updateEnabled: true,
+    updateMode: 'prompt',
+    updateAutoInstallHours: 4
   }
 
   const diagnostics: Diagnostics = {
@@ -771,6 +775,74 @@ export function createMockApi(): SwarmApi {
     return { batchId, accepted: specs.length, rejected: [] }
   }
 
+  // -------------------------------------------------------------------------
+  // 局域网更新（预览模式）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 预览模式下的更新状态。
+   *
+   * 为什么不直接返回一个写死的 idle：这一页的核心交互是「下载完 → 弹框 →
+   * 选时间 / 立即装」，只靠真机才能走查的话，前端改动得等一台 Windows
+   * 机器才能验证。这里用定时器把整个状态机跑一遍（下载进度 → ready），
+   * 让 `npm run dev` 就能看到弹框。
+   */
+  const emptyUpdate = (): UpdateState => ({
+    phase: 'idle',
+    currentVersion: '1.0.0',
+    promptPending: false,
+    platformSupported: true,
+    canDistribute: true,
+    dataDir: '~/AppData/Roaming/SwarmLink',
+    logPath: '~/AppData/Roaming/SwarmLink/logs/swarmlink.log'
+  })
+
+  const mockUpdate: UpdateState = emptyUpdate()
+
+  function snapshotUpdate(): UpdateState {
+    return {
+      ...mockUpdate,
+      higherPeers: (mockUpdate.higherPeers ?? []).map((p) => ({ ...p }))
+    }
+  }
+
+  function publishUpdate(): void {
+    emit(EV.updateState, snapshotUpdate())
+  }
+
+  /** 走一遍「发现 1.1.0 → 下载 → 就绪」的模拟流程。 */
+  async function runMockUpdateCheck(): Promise<void> {
+    mockUpdate.phase = 'checking'
+    mockUpdate.higherPeers = [
+      { peerId: ALICE, displayName: 'alice', addr: '192.168.1.21:2425', version: '1.1.0' }
+    ]
+    mockUpdate.lastCheckAt = Date.now()
+    publishUpdate()
+
+    await sleep(600)
+    mockUpdate.phase = 'downloading'
+    mockUpdate.targetVersion = '1.1.0'
+    mockUpdate.sourcePeerId = ALICE
+    mockUpdate.sourceName = 'alice'
+    mockUpdate.sourceAddr = '192.168.1.21:2425'
+    mockUpdate.size = 38.2 * 1024 * 1024
+    mockUpdate.downloaded = 0
+    mockUpdate.percent = 0
+    publishUpdate()
+
+    for (let percent = 20; percent <= 100; percent += 20) {
+      await sleep(260)
+      mockUpdate.percent = percent
+      mockUpdate.downloaded = Math.round((mockUpdate.size ?? 0) * (percent / 100))
+      publishUpdate()
+    }
+
+    mockUpdate.phase = 'ready'
+    mockUpdate.promptPending = true
+    mockUpdate.autoInstallAt = Date.now() + 4 * 60 * 60 * 1000
+    publishUpdate()
+  }
+
   return {
     async getSettings() {
       return { ...settings }
@@ -1205,6 +1277,39 @@ export function createMockApi(): SwarmApi {
       const picked = itemsOf(shareId).filter((i) => paths.includes(i.path))
       if (!picked.length) throw new Error('共享方没有受理任何文件（清单可能已过期，请刷新后重试）')
       return simulateShareDownload(s.ownerId, s.name, picked)
+    },
+
+    async getUpdateState() {
+      return snapshotUpdate()
+    },
+    async checkUpdateNow() {
+      void runMockUpdateCheck()
+      return snapshotUpdate()
+    },
+    async applyUpdateNow() {
+      // 浏览器里没有安装器也没有可重启的进程：只把阶段推到 applying，
+      // 保证「点了立即更新 → 浮层收起 → 显示正在安装」这条链路能走查。
+      mockUpdate.phase = 'applying'
+      publishUpdate()
+      return snapshotUpdate()
+    },
+    async scheduleUpdate(atMillis) {
+      if (!(atMillis > 0)) throw new Error('请选择安装时间')
+      mockUpdate.phase = 'scheduled'
+      mockUpdate.scheduledAt = atMillis
+      mockUpdate.promptPending = false
+      publishUpdate()
+      return snapshotUpdate()
+    },
+    async snoozeUpdate() {
+      mockUpdate.promptPending = false
+      publishUpdate()
+      return snapshotUpdate()
+    },
+    async cancelUpdate() {
+      Object.assign(mockUpdate, emptyUpdate())
+      publishUpdate()
+      return snapshotUpdate()
     },
 
     async diagnostics() {

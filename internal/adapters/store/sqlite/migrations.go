@@ -308,6 +308,23 @@ ALTER TABLE peers ADD COLUMN shares TEXT NOT NULL DEFAULT '';
 ALTER TABLE transfer_jobs ADD COLUMN resume_from INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 9,
+		name:    "peer_app_version",
+		// 节点自述的应用版本（局域网更新用）。
+		//
+		// 为什么落库而不是只放内存：判断「局域网里最高版本是谁」要看整份目录，
+		// 而目录的权威副本就是这张表；只放内存会让「重启后界面显示没有新版本」
+		// 一直到对方下一次 ANNOUNCE（最多 60 秒），而更新提示恰好是在启动后
+		// 才最常被看到的那一次。
+		//
+		// 沿用 v3–v8 的既定做法：纯 ADD COLUMN，零重建。
+		// 默认空串 = 「不知道」（老版本客户端或从未收到过带版本的报文），
+		// 解析时按 0.0.0 处理，永不作为更新源。
+		sql: `
+ALTER TABLE peers ADD COLUMN app_version TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 func migrationChecksum(sql string) string {

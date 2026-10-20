@@ -1,4 +1,4 @@
-.PHONY: build test test-domain-cover test-e2e test-scale test-fuzz lint-arch frontend-install frontend-build frontend-typecheck ci bindings gui gui-dev package
+.PHONY: build test test-domain-cover test-e2e test-scale test-fuzz lint-arch fmt-check frontend-install frontend-build frontend-typecheck ci bindings gui gui-dev package vergen vergen-check
 
 # 桌面入口 main_wails.go 带 `//go:build wails`：不传这个 tag 时，根目录一个
 # 可编译的 Go 文件都没有（原先的占位入口已删除），`go build` 会【直接失败】。
@@ -69,6 +69,17 @@ frontend-typecheck:
 # 本地等价于 CI 的一条命令
 ci: build lint-arch test frontend-typecheck frontend-build
 
+# 版本同步：把 internal/version.Version 写进各平台的打包元数据。
+#
+# 为什么必须在打包前跑：运行时只认 Go 常量，而安装包元数据在另外几份文件里。
+# 两者不一致时，局域网更新会读到「广播 1.0.1、包里是 1.0.0」，于是装完还是
+# 旧版、再拉一次 —— 死循环。vergen 把它们拉平，-check 让 CI 拦住手误。
+vergen:
+	go run ./scripts/vergen
+
+vergen-check:
+	go run ./scripts/vergen -check
+
 # 绑定生成（服务注册在根目录 main_wails.go，因此从 . 扫描）
 #
 # -ts 不能省：省略时生成器输出 .js，而入库的是 .ts —— 混在一起后
@@ -86,7 +97,7 @@ gui: bindings
 # 注意这里【不】传 -tags：wails3 package 的参数里根本没有 tags
 # （internal/commands/task_wrapper.go 的 Package 签名忽略它），
 # 只能靠上面 export 的 EXTRA_TAGS 环境变量传下去。
-package: bindings
+package: vergen bindings
 	wails3 package
 
 # 开发模式（热重载）

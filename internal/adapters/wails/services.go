@@ -61,6 +61,7 @@ type Deps struct {
 	Peers     *app.PeerApp
 	Discovery *app.DiscoveryApp
 	Share     *app.ShareApp
+	Update    *app.UpdateApp
 
 	PeerDir      ports.PeerDirectory
 	TransferRepo ports.TransferRepo
@@ -78,6 +79,9 @@ type Deps struct {
 
 	Cfg       *config.Config
 	ConfigDir string
+	// LogPath 是落盘日志的位置（「关于」信息要展示它 —— 出问题时
+	// 运维第一个要问的就是这份文件在哪）。
+	LogPath string
 }
 
 // ServiceSet 是注册给 Wails 的服务集合。
@@ -90,6 +94,7 @@ type ServiceSet struct {
 	Notify   *NotifyService
 	Share    *ShareService
 	Search   *SearchService
+	Update   *UpdateService
 }
 
 // NewServices 构造服务集合。
@@ -103,6 +108,7 @@ func NewServices(d Deps) *ServiceSet {
 		Notify:   &NotifyService{d: d},
 		Share:    &ShareService{d: d},
 		Search:   &SearchService{d: d},
+		Update:   &UpdateService{d: d},
 	}
 }
 
@@ -156,6 +162,10 @@ func (s *SettingsService) Get() SettingsDTO {
 		NotifySound:          c.Notify.Sound,
 		NotifyMinimizeToTray: c.Notify.MinimizeToTray,
 		AutoStart:            c.Startup.AutoStart,
+
+		UpdateEnabled:          c.Update.LANEnabled,
+		UpdateMode:             c.Update.Mode,
+		UpdateAutoInstallHours: int(c.Update.AutoInstallAfter.Std() / time.Hour),
 	}
 }
 
@@ -195,6 +205,19 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	c.Notify.Sound = in.NotifySound
 	c.Notify.MinimizeToTray = in.NotifyMinimizeToTray
 
+	// 局域网更新：同样【无条件】赋值。
+	//
+	// 这里刻意没有沿用上面 tcp_port/udp_port 那种「>0 才写」的写法 ——
+	// 那种写法在这几个字段上会直接坏掉语义（0 小时 = 永不自动安装，
+	// 而不是「没填」）。
+	c.Update.LANEnabled = in.UpdateEnabled
+	if in.UpdateAutoInstallHours >= 0 {
+		c.Update.AutoInstallAfter = config.Duration(time.Duration(in.UpdateAutoInstallHours) * time.Hour)
+	}
+	if in.UpdateMode != "" {
+		c.Update.Mode = in.UpdateMode
+	}
+
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -205,6 +228,12 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	// 自动启动设置变更时同步到系统（配置文件已保存，这里只同步系统设置）
 	if err := s.syncAutostart(in.AutoStart); err != nil {
 		return nil, err
+	}
+
+	// 更新开关/模式改完必须立刻生效：关掉之后还在后台偷偷下载安装包，
+	// 是比「没这个功能」更糟的体验。
+	if s.d.Update != nil {
+		s.d.Update.OnSettingsChanged()
 	}
 
 	// 端口/网卡类改动无法热生效

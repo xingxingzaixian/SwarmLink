@@ -9,6 +9,7 @@ import * as SearchService from "./searchservice.js";
 import * as SettingsService from "./settingsservice.js";
 import * as ShareService from "./shareservice.js";
 import * as TransferService from "./transferservice.js";
+import * as UpdateService from "./updateservice.js";
 export {
     ChatService,
     GroupService,
@@ -17,7 +18,8 @@ export {
     SearchService,
     SettingsService,
     ShareService,
-    TransferService
+    TransferService,
+    UpdateService
 };
 
 export type {
@@ -36,5 +38,7 @@ export type {
     ShareDownloadDTO,
     ShareItemDTO,
     ShareVisibilityDTO,
-    TransferDTO
+    TransferDTO,
+    UpdatePeerDTO,
+    UpdateStateDTO
 } from "./models.js";

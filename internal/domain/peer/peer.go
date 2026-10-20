@@ -82,6 +82,17 @@ type Peer struct {
 	// 展示与「去哪儿问」。真正的访问控制一律由共享方在收到
 	// SHARE_INDEX_REQ / SHARE_PULL_REQ 时校验（ShareApp.HandleIndexReq）。
 	Shares []share.Summary
+
+	// AppVersion 是该节点自述的应用版本（"1.2.0"），空串表示「对方没报」。
+	//
+	// 与 ProtoVer 的区别必须分清：ProtoVer 是线协议版本（能不能对话），
+	// AppVersion 是产品版本（要不要升级成一样）。前者不匹配会导致断连，
+	// 后者只影响「局域网更新」这一个功能。
+	//
+	// 它同样【不参与 ANNOUNCE 签名】（见 Announcement.AppVersion），
+	// 因此只可用于「谁可能更新」的候选排序，真正的版本以
+	// UPDATE_INFO_RESP 的应答为准（那份应答由对端在会话内直接给出）。
+	AppVersion string
 }
 
 // Expired 判断条目是否超过 TTL。
@@ -120,6 +131,18 @@ type Announcement struct {
 	// 「有哪些共享可看」的展示，任何一次真实访问都要向共享方
 	// 单独发起请求，由共享方校验可见性（见 Peer.Shares 的说明）。
 	Shares []share.Summary
+
+	// AppVersion 是对方自述的应用版本（局域网更新用），可为空。
+	//
+	// 【刻意不参与签名】（SigningBytes），理由与 Shares 完全相同：
+	// 把它塞进签名域会让新旧版本的 SigningBytes 字节序列不同 ——
+	// 旧端 identity.Verify 失败后会丢弃新端的全部 ANNOUNCE，
+	// 也就是「升级一个节点，安静地孤立它」。
+	//
+	// 代价是版本号可被链路上的人篡改。接受它的前提是：这个字段只用于
+	// 「挑一个候选源」，真正的包版本由 UPDATE_INFO_RESP 给出，且安装后
+	// 还会做一次「版本真的变了吗」的自检（见 app.UpdateApp）。
+	AppVersion string
 
 	// Leaving 表示这是一条「我要下线了」的通告（BYE），而不是「我在线」。
 	//

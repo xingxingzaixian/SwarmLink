@@ -280,8 +280,10 @@ func main() {
 			return out
 		},
 		SetActiveConv: setActiveConv,
+		Update:        node.UpdateApp,
 		Cfg:           node.Cfg,
 		ConfigDir:     node.ConfigDir,
+		LogPath:       logPath,
 	})
 
 	// 系统通知：一个 Wails 服务，但在本文件里只用它自己的两个方法（Send / OnActivated）。
@@ -307,6 +309,7 @@ func main() {
 			application.NewService(services.Share),
 			application.NewService(services.Notify),
 			application.NewService(services.Search),
+			application.NewService(services.Update),
 			application.NewService(sysNotify),
 		},
 		Assets: application.AssetOptions{
@@ -353,6 +356,41 @@ func main() {
 		showWindow()
 		app.Event.Emit(wadapter.EventSystemNotifyActivated, map[string]any{"convId": convID})
 	})
+
+	// 局域网更新：把「状态变化 → 前端事件」与「安装完退出进程」接上。
+	//
+	// 这两件事必须由外壳注入：app 层不许 import Wails，也不该知道
+	// 「退出进程」长什么样（CLI 模式下根本没有 app.Quit）。
+	services.Update.SetEmitter(func(name string, data any) { app.Event.Emit(name, data) })
+	// 窗口收在托盘里时用一条系统通知提醒，否则「更新已就绪」这件事
+	// 只存在于一个用户看不见的窗口里，等到 4 小时兜底才被动安装。
+	// 点击通知会把窗口叫到前台 —— 确认框本来就已经渲染好了（由状态驱动），
+	// 因此这里不需要额外的跳转参数。
+	var lastUpdateNotify atomic.Value
+	node.UpdateApp.OnChange = func(st capp.UpdateState) {
+		services.Update.Publish(st)
+		if !st.PromptPending || st.TargetVersion == "" || win.IsVisible() {
+			return
+		}
+		if v, _ := lastUpdateNotify.Load().(string); v == st.TargetVersion {
+			return
+		}
+		lastUpdateNotify.Store(st.TargetVersion)
+		_ = sysNotify.Send(systemnotify.Message{
+			ID:    "update:" + st.TargetVersion,
+			Title: "蜂群有可用更新",
+			Body:  fmt.Sprintf("v%s 已下载完成，点击查看并选择安装时间", st.TargetVersion),
+		})
+	}
+	node.UpdateApp.Quit = func() {
+		// 给安装器的分离进程一点启动时间，再退出自己。
+		// 不 sleep 的话极少数情况下会在 cmd 被调度之前退出，
+		// 表现就是「点了立即更新，程序关了但没重装」。
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			app.Quit()
+		}()
+	}
 
 	// 注入自动启动适配器到服务层（用于自动启动功能）
 	autostart := &autostartAdapter{app: app}

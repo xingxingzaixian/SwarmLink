@@ -21,6 +21,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/adapters/keystore"
 	"github.com/swarmlink/swarmlink/internal/adapters/net/tcp"
 	"github.com/swarmlink/swarmlink/internal/adapters/net/udp"
+	"github.com/swarmlink/swarmlink/internal/adapters/selfupdate"
 	"github.com/swarmlink/swarmlink/internal/adapters/store/mem"
 	"github.com/swarmlink/swarmlink/internal/adapters/store/sqlite"
 	"github.com/swarmlink/swarmlink/internal/app"
@@ -30,6 +31,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/infra/clock"
 	"github.com/swarmlink/swarmlink/internal/infra/diskspace"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
+	"github.com/swarmlink/swarmlink/internal/version"
 )
 
 // Options 是装配参数。零值即「用配置文件的默认值」。
@@ -77,6 +79,7 @@ type Node struct {
 	TransferApp *app.TransferApp
 	ShareApp    *app.ShareApp
 	DiscApp     *app.DiscoveryApp
+	UpdateApp   *app.UpdateApp
 	Router      *app.Router
 
 	TCPPort    int
@@ -235,6 +238,8 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	bcCfg.DenyInterfaces = cfg.Network.DenyInterfaces
 	bcCfg.EnableMulticast = cfg.Network.EnableMulticast
 	bcCfg.SeedOnly = cfg.Network.InterfaceMode == "seed_only"
+	// 应用版本随通告传播（局域网更新用）。不参与签名，旧端忽略该字段。
+	bcCfg.AppVersion = version.Version
 
 	bc := udp.NewBroadcaster(kp, bcCfg, clk, lg)
 	n.BC = bc
@@ -311,8 +316,25 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	n.DiscApp.SeedsPerRefresh = cfg.Discovery.Seeds.SeedsPerRefresh
 	n.DiscApp.MaxEntries = cfg.Discovery.MaxPeerListSize
 
+	// 局域网更新：从版本更高的邻居拉安装包。
+	//
+	// 配置通过回调注入而不是快照：用户关掉开关后必须【立刻】停止拉取，
+	// 而不是等下次重启（那意味着他关掉之后机器还在偷偷下载安装包）。
+	n.UpdateApp = app.NewUpdateApp(kp.NodeID(), n.PeerDir, n.TransferApp, dir, clk, lg)
+	n.UpdateApp.Settings = func() app.UpdateSettings {
+		return app.UpdateSettings{
+			Enabled:          cfg.Update.LANEnabled,
+			Mode:             cfg.Update.Mode,
+			AutoInstallAfter: cfg.Update.AutoInstallAfter.Std(),
+		}
+	}
+	// 有传输在跑时不重启：更新最多晚半小时，而打断一次几十 MB 的传输
+	// 是用户无法接受的（尤其是「马上就好了」的那一刻）。
+	n.UpdateApp.Busy = func() bool { return n.TransferApp.ActiveJobs() > 0 }
+	n.UpdateApp.Launch = selfupdate.Launch
+
 	n.Router = app.NewRouter(
-		n.ChatApp, n.GroupApp, n.TransferApp, n.DiscApp, peerApp, n.ShareApp, lg)
+		n.ChatApp, n.GroupApp, n.TransferApp, n.DiscApp, peerApp, n.ShareApp, n.UpdateApp, lg)
 	conn.SetHandler(n.Router.Handle)
 
 	peerApp.Start()
@@ -338,6 +360,9 @@ func Start(ctx context.Context, opts Options) (*Node, error) {
 	// Recover 负责收尾上次运行留下的任务并立刻试一轮等待中的那些。
 	n.TransferApp.Start(ctx)
 	n.TransferApp.Recover(ctx)
+
+	// 更新的后台循环：结算「上次是不是装成功了」，然后按 60s / 10min 节奏检查。
+	n.UpdateApp.Start(ctx)
 
 	// 后台维护：目录 TTL、outbox 重发、空闲连接回收。
 	// 不用真实定时器驱动领域逻辑，而是让 App 暴露 Sweep() 由这里统一节拍。

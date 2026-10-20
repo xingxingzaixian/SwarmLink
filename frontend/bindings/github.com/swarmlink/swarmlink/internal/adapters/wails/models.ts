@@ -139,6 +139,12 @@ export interface PeerDTO {
      * 拿没数据冒充 0 是编造。
      */
     "rttMs": number;
+
+    /**
+     * AppVersion 是对方自述的应用版本，空串表示「对方没报」（旧版本客户端）。
+     * 它是「局域网更新」判断谁更新的唯一输入，因此必须给到界面。
+     */
+    "appVersion"?: string;
 }
 
 /**
@@ -215,6 +221,22 @@ export interface SettingsDTO {
     "notifySound": boolean;
     "notifyMinimizeToTray": boolean;
     "autoStart": boolean;
+
+    /**
+     * 局域网更新。
+     * 
+     * 模式用字符串而不是枚举：前端要显示三选一，而 Go 的绑定生成器
+     * 对自定义字符串类型不友好（会变成 any）。
+     */
+    "updateEnabled": boolean;
+    "updateMode": string;
+
+    /**
+     * UpdateAutoInstallHours 是「弹框后多久无操作自动安装」，0 表示永不。
+     * 用小时而不是 Duration：设置页是数字输入框，而 TOML 里写 "4h"
+     * 对运维更直观 —— 两个面各用各的自然单位，服务层做换算。
+     */
+    "updateAutoInstallHours": number;
 }
 
 /**
@@ -339,4 +361,61 @@ export interface TransferDTO {
     "isDir"?: boolean;
     "error"?: string;
     "updatedAt": number;
+}
+
+/**
+ * UpdatePeerDTO 是「局域网里版本更高」的一个候选源。
+ */
+export interface UpdatePeerDTO {
+    "peerId": string;
+    "displayName": string;
+    "addr": string;
+    "version": string;
+}
+
+/**
+ * UpdateStateDTO 是局域网更新的完整状态快照。
+ * 
+ * 前端只消费这一个结构（配合单一事件），而不是拼装多个增量事件：
+ * 状态机有 8 个阶段，增量事件迟早会拼出「界面显示 ready 但后端已经 applying」
+ * 这种自相矛盾的画面。
+ */
+export interface UpdateStateDTO {
+    "phase": string;
+    "currentVersion": string;
+    "targetVersion"?: string;
+    "sourcePeerId"?: string;
+    "sourceName"?: string;
+    "sourceAddr"?: string;
+    "size"?: number;
+    "downloaded"?: number;
+    "percent"?: number;
+    "sha256"?: string;
+
+    /**
+     * ScheduledAt / AutoInstallAt 是毫秒时间戳，0 表示没有。
+     */
+    "scheduledAt"?: number;
+    "autoInstallAt"?: number;
+    "promptPending": boolean;
+    "error"?: string;
+
+    /**
+     * PlatformSupported 为假时整页只展示说明（当前实现仅 Windows）。
+     */
+    "platformSupported": boolean;
+
+    /**
+     * CanDistribute 表示本机持有与当前版本一致的安装包，可被别人拉取。
+     */
+    "canDistribute": boolean;
+    "installerPath"?: string;
+    "lastCheckAt"?: number;
+    "higherPeers"?: UpdatePeerDTO[] | null;
+
+    /**
+     * 关于信息：出问题时运维第一个要问的三件事（版本 / 数据在哪 / 日志在哪）。
+     */
+    "dataDir": string;
+    "logPath": string;
 }

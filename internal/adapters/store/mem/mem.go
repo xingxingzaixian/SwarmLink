@@ -711,6 +711,11 @@ func (s *Peers) Upsert(p peer.Peer) error {
 		if !old.FirstSeen.IsZero() {
 			p.FirstSeen = old.FirstSeen
 		}
+		// 与 sqlite 实现对齐（那边是 SQL 里的 CASE）：空版本号不覆盖已知值。
+		// 两个互为替身的实现必须在同一条语义上一致，否则测试通过、生产分叉。
+		if p.AppVersion == "" {
+			p.AppVersion = old.AppVersion
+		}
 	}
 	if p.FirstSeen.IsZero() {
 		p.FirstSeen = s.clk.Now()

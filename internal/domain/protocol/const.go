@@ -106,6 +106,25 @@ const (
 	TypeShareIndexResp byte = 0x51
 	TypeSharePullReq   byte = 0x52
 	TypeSharePullResp  byte = 0x53
+
+	// 0x60–0x6F 局域网更新（分发安装包）
+	//
+	// 语义是「接收方拉」而不是「发送方推」：更新这件事的决定权必须落在
+	// 要重启的那台机器上，所以只有 UPDATE_INFO_REQ / UPDATE_PKG_REQ 两个
+	// 请求方向，其余都是应答。
+	//
+	// 不复用 FILE_* 帧：文件传输会把任务写进 transfer_jobs 并在用户界面
+	// 生成一张「传输卡片」，而更新包是临时产物、装完即弃，混进去会污染
+	// 用户的传输历史（也绕不开「接收侧单文件上限」那种面向用户文件的约束）。
+	//
+	// 兼容性：旧版本收到不认识的 Type 会直接丢弃并计数、不断连
+	// （规格 16.2 的未知 Type 规则），且旧版本永远不会发起这类请求。
+	TypeUpdateInfoReq  byte = 0x60
+	TypeUpdateInfoResp byte = 0x61
+	TypeUpdatePkgReq   byte = 0x62
+	TypeUpdatePkgChunk byte = 0x63
+	TypeUpdatePkgDone  byte = 0x64
+	TypeUpdateErr      byte = 0x65
 )
 
 // ---------------------------------------------------------------------------
@@ -199,6 +218,18 @@ func TypeName(t byte) string {
 		return "SHARE_PULL_REQ"
 	case TypeSharePullResp:
 		return "SHARE_PULL_RESP"
+	case TypeUpdateInfoReq:
+		return "UPDATE_INFO_REQ"
+	case TypeUpdateInfoResp:
+		return "UPDATE_INFO_RESP"
+	case TypeUpdatePkgReq:
+		return "UPDATE_PKG_REQ"
+	case TypeUpdatePkgChunk:
+		return "UPDATE_PKG_CHUNK"
+	case TypeUpdatePkgDone:
+		return "UPDATE_PKG_DONE"
+	case TypeUpdateErr:
+		return "UPDATE_ERR"
 	default:
 		return "UNKNOWN"
 	}

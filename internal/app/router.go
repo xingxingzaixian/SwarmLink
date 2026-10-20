@@ -19,6 +19,7 @@ type Router struct {
 	Discovery *DiscoveryApp
 	Peers     *PeerApp
 	Share     *ShareApp
+	Update    *UpdateApp
 	Log       *slog.Logger
 }
 
@@ -30,11 +31,12 @@ func NewRouter(
 	disc *DiscoveryApp,
 	peers *PeerApp,
 	sh *ShareApp,
+	up *UpdateApp,
 	lg *slog.Logger,
 ) *Router {
 	return &Router{
 		Chat: chat, Group: group, Transfer: tr, Discovery: disc,
-		Peers: peers, Share: sh, Log: lg,
+		Peers: peers, Share: sh, Update: up, Log: lg,
 	}
 }
 
@@ -90,6 +92,19 @@ func (r *Router) Handle(sess ports.Session, f protocol.Frame) {
 		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandlePullReq))
 	case protocol.TypeSharePullResp:
 		r.dispatch(sess, f, handleOf(r.Share, (*ShareApp).HandlePullResp))
+
+	case protocol.TypeUpdateInfoReq:
+		r.dispatch(sess, f, handleOf(r.Update, (*UpdateApp).HandleInfoReq))
+	case protocol.TypeUpdateInfoResp:
+		r.dispatch(sess, f, handleOf(r.Update, (*UpdateApp).HandleInfoResp))
+	case protocol.TypeUpdatePkgReq:
+		r.dispatch(sess, f, handleOf(r.Update, (*UpdateApp).HandlePkgReq))
+	case protocol.TypeUpdatePkgChunk:
+		r.dispatch(sess, f, handleOf(r.Update, (*UpdateApp).HandlePkgChunk))
+	case protocol.TypeUpdatePkgDone:
+		r.dispatch(sess, f, handleOf(r.Update, (*UpdateApp).HandlePkgDone))
+	case protocol.TypeUpdateErr:
+		r.dispatch(sess, f, handleOf(r.Update, (*UpdateApp).HandleErr))
 
 	default:
 		// 未知 Type：载荷已按 Length 读完，直接丢弃并计数，不得断连。

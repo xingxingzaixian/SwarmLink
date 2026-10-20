@@ -171,6 +171,12 @@ jobs:
 
       # -------------------------------------------------------------------- 打包
 
+      - name: 同步版本号到打包元数据
+        # 运行时只认 internal/version.Version，而安装包元数据在 config.yml /
+        # info.json / Info.plist / nfpm.yaml 里。两者不一致时局域网更新会
+        # 「广播 1.0.1、包里是 1.0.0」，装完还是旧版 → 再拉一次的死循环。
+        run: go run ./scripts/vergen
+
       - name: 打包
         # 不指定 shell：Windows 用 pwsh、Linux/macOS 用 bash，各取所长。
         # EXTRA_TAGS=wails 由作业级 env 继承下来。
