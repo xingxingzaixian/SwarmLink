@@ -489,9 +489,9 @@ type OverlayImageDTO struct {
 type PinImageDTO struct {
 	// MIME 是图片类型（PNG 或 JPEG，按字节头嗅探得出）。
 	MIME string `json:"mime"`
-	// Width / Height 是 1:1 显示时的窗口尺寸（DIP 逻辑像素）。
+	// Width / Height 是图片 1:1 显示时的尺寸（DIP 逻辑像素，不含阴影留白）。
 	//
-	// 贴图窗口用它做缩放基准：窗口尺寸 = 基准尺寸 × 缩放比。
+	// 贴图窗口用它做缩放基准：窗口尺寸 = 基准尺寸 × 缩放比 + 2 × 留白。
 	Width  int `json:"width"`
 	Height int `json:"height"`
 	// DataBase64 是图片字节的 base64。

@@ -191,7 +191,8 @@ func (h *WailsOverlayHost) CloseOverlays() error {
 // OpenPin 开一个贴图窗口。
 //
 // 与覆盖层的关键区别：
-//   - 尺寸就是图片尺寸（不铺满屏幕），位置就是刚才框选的位置；
+//   - 尺寸是图片尺寸加一圈阴影留白（不铺满屏幕），位置就是刚才框选的
+//     位置向外扩出留白量；
 //   - 立即可见（图已经在内存里，前端画出来只是一帧的事）；
 //   - 不抢焦点：贴图是用来「摆在旁边对照」的，抢焦点会打断用户
 //     正在打字的窗口。
@@ -214,8 +215,23 @@ func (h *WailsOverlayHost) OpenPin(opts PinOptions) error {
 		// 不可缩放：缩放由前端按固定的比例步进改窗口尺寸（SetSize），
 		// 拖边框缩放会让图片被拉伸变形，而那不是用户想要的。
 		DisableResize: true,
-		// 透明：图片之外的角落不该出现一块底色。
+		// 真透明：图片之外的留白必须透出底下的桌面。
+		//
+		// BackgroundType 默认是 Solid，那时 Wails 会用背景色把整块客户区刷
+		// 一遍（RGB 生效、alpha 被丢掉），只写 BackgroundColour{Alpha: 0}
+		// 是没用的 —— 结果是图片四周变成一圈不透明的黑色，「阴影」画在黑底
+		// 上完全看不见。只有设成 Transparent，窗口才按逐像素透明合成。
+		BackgroundType:   application.BackgroundTypeTransparent,
 		BackgroundColour: application.RGBA{Alpha: 0},
+		// 不要系统的「无边框窗口装饰」。
+		//
+		// Frameless 窗口默认仍会拿到 Aero 阴影和圆角，并且鼠标移上来 / 点击
+		// 激活时系统会画一圈亮边框 —— 贴图外面就会出现一道白色相框，把阴影
+		// 的观感彻底冲掉。Aero 阴影还会叠在我们的阴影外面，让阴影看起来比
+		// 设定的宽得多。
+		Windows: application.WindowsWindow{
+			DisableFramelessWindowDecorations: true,
+		},
 	})
 	win.SetPosition(opts.X, opts.Y)
 	win.SetSize(opts.Width, opts.Height)

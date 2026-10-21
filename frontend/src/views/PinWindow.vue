@@ -25,6 +25,16 @@ import { saveFile } from '../api/dialog'
 /** 贴图 id（后端开窗时写在 URL 上）。 */
 const id = Number(new URLSearchParams(window.location.search).get('id') ?? '0')
 
+/**
+ * 图片四周的阴影留白（DIP），必须与后端 pinShadowPad 一致。
+ *
+ * 贴图窗口是透明的，图片和桌面背景撞色时边界就糊掉了：这圈留白用来画
+ * 一圈窄阴影 —— 内侧约 2px 亮晕（深色背景下看得见），外侧约 3px 暗影
+ * （浅色背景下看得见）。
+ * 窗口尺寸 = 图片尺寸 × 缩放比 + 2 × 留白，图片始终贴在图的位置上。
+ */
+const SHADOW_PAD = 6
+
 /** 图片的 data URL（显示用）。 */
 const src = ref('')
 /** 图片原始 base64（另存为用；与 src 分开存，省掉一次字符串切割）。 */
@@ -56,14 +66,17 @@ function notify(msg: string): void {
  *
  * 为什么不缩放 <img> 的 CSS 尺寸而保持窗口不变：窗口比图大时，多出来的
  * 透明区域会挡住底下的点击（置顶窗口是「实心」的，透明不穿透）。
- * 让窗口始终贴合图片，才不会挡住无关的地方。
+ * 让窗口始终贴合图片（只多出那一圈阴影留白），才不会挡住无关的地方。
  */
 async function applyZoom(next: number): Promise<void> {
   if (!base.value.w || !base.value.h) return
   const z = Math.min(4, Math.max(0.2, Math.round(next * 100) / 100))
   if (z === zoom.value) return
   try {
-    await Window.SetSize(Math.round(base.value.w * z), Math.round(base.value.h * z))
+    await Window.SetSize(
+      Math.round(base.value.w * z) + 2 * SHADOW_PAD,
+      Math.round(base.value.h * z) + 2 * SHADOW_PAD,
+    )
     zoom.value = z
   } catch (e: any) {
     notify(String(e?.message ?? e) || '调整大小失败')
@@ -139,9 +152,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="pin" @pointerenter="hover = true" @pointerleave="hover = false">
+  <div class="pin" @pointerenter="hover = true" @pointerleave="hover = false" @wheel.prevent="onWheel">
     <!-- 图片本身就是拖动区：--wails-draggable 由 Wails 运行时识别。 -->
-    <img v-if="src" class="pin__img" :src="src" alt="贴图" style="--wails-draggable: drag" @wheel.prevent="onWheel" />
+    <img v-if="src" class="pin__img" :src="src" alt="贴图" style="--wails-draggable: drag" />
 
     <!-- 工具条：只在鼠标移上来时出现，平时让图片独占窗口。 -->
     <div v-if="src" class="pin__bar" :class="{ 'is-on': hover }">
@@ -166,9 +179,14 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .pin {
+  /* 图片四周的阴影留白，与脚本里的 SHADOW_PAD 保持一致。 */
+  --pin-pad: 6px;
   position: relative;
+  box-sizing: border-box;
   width: 100vw;
   height: 100vh;
+  /* 留白不是装饰：窗口比图片大一圈，图片才能在外面画出阴影。 */
+  padding: var(--pin-pad);
   overflow: hidden;
   /* 贴图只是一张图：不选中文字、不出现光标。 */
   user-select: none;
@@ -181,13 +199,22 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: fill;
   cursor: move;
+  /* 一圈窄阴影，总宽约 5px：内侧 2px 亮晕 + 外侧 3px 暗影。
+     全部用 blur 而不是 0 0 0 Npx 的实心环 —— 实心环是硬边，看起来像相框。
+     亮晕叠在最上层：黑色壁纸 / 深色窗口上黑色阴影看不见，靠它勾出边界；
+     暗影从图边就开始铺（不是从 2px 之外开始），否则浅色桌面上图与阴影之间
+     会空出一道缝，像图浮在半空。 */
+  box-shadow:
+    0 0 2px rgba(255, 255, 255, 0.8),
+    0 0 4px 1px rgba(0, 0, 0, 0.65);
 }
 
-/* 工具条：贴在右上角，半透明底，不抢图片的注意力。 */
+/* 工具条：贴在图片右上角，半透明底，不抢图片的注意力。 */
 .pin__bar {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  /* 相对窗口定位，所以要跳过四周的阴影留白。 */
+  top: calc(var(--pin-pad) + 6px);
+  right: calc(var(--pin-pad) + 6px);
   display: flex;
   align-items: center;
   gap: 2px;
@@ -239,7 +266,7 @@ onBeforeUnmount(() => {
 .pin__err {
   position: absolute;
   left: 50%;
-  bottom: 8px;
+  bottom: calc(var(--pin-pad) + 8px);
   transform: translateX(-50%);
   max-width: 90%;
   padding: 4px 10px;

@@ -25,6 +25,16 @@ const pinWindowPrefix = "screenshot-pin-"
 // 无上限意味着一次误调用就能把几 GB 的字符串解进内存。
 const maxHandoffImageBytes = 32 << 20
 
+// pinShadowPad 是贴图窗口里「图片外那圈阴影」的宽度（DIP）。
+//
+// 贴图窗口尺寸若正好等于图片尺寸，阴影就没有地方画（会被窗口边缘裁掉，
+// 或被画进图片里）。因此四周留一圈透明留白，前端在那里画一圈窄阴影：
+// 约 2px 亮晕（深色背景下看得见）+ 3px 暗影（浅色背景下看得见）。
+//
+// 不能留太宽：置顶窗口的透明区域并不穿透点击，这圈留白会挡住底下窗口
+// 边缘的点击；而且阴影越宽，贴图看起来越像被扣在一个框里。
+const pinShadowPad = 6
+
 // pinSession 是一张已经贴到桌面上的图。
 //
 // 图片字节存在 Go 侧、由窗口按 id 取，而不是塞进窗口 URL：
@@ -37,8 +47,8 @@ type pinSession struct {
 	mime string
 	// dataB64 是图片原始字节的 base64。
 	dataB64 string
-	// width / height 是 1:1 显示时的窗口尺寸（DIP），
-	// 前端按它做缩放：窗口尺寸 = 基准尺寸 × 缩放比。
+	// width / height 是图片 1:1 显示时的尺寸（DIP，不含阴影留白），
+	// 前端按它做缩放：窗口尺寸 = 基准尺寸 × 缩放比 + 两侧留白。
 	width, height int
 }
 
@@ -125,8 +135,12 @@ func (s *ScreenshotService) PinOverlay(displayIndex int, dataB64 string, width, 
 	if dipH < 1 {
 		dipH = 1
 	}
-	x := d.X + int(math.Round(float64(offX)/scale))
-	y := d.Y + int(math.Round(float64(offY)/scale))
+	// 窗口比图片大一圈（pinShadowPad）：多出来的透明留白是给阴影用的，
+	// 窗口位置相应向左上挪同样的量，图片才会仍落在用户框选的位置上。
+	innerX := d.X + int(math.Round(float64(offX)/scale))
+	innerY := d.Y + int(math.Round(float64(offY)/scale))
+	x := innerX - pinShadowPad
+	y := innerY - pinShadowPad
 
 	id := s.pinSeq
 	s.pinSeq++
@@ -148,8 +162,8 @@ func (s *ScreenshotService) PinOverlay(displayIndex int, dataB64 string, width, 
 		URL:    fmt.Sprintf("/?mode=pin&id=%d", id),
 		X:      x,
 		Y:      y,
-		Width:  dipW,
-		Height: dipH,
+		Width:  dipW + 2*pinShadowPad,
+		Height: dipH + 2*pinShadowPad,
 		// 窗口没了就把字节放掉：ClosePin 与「用户直接关窗口」两条路
 		// 都要落到这里，否则图片会一直留在内存里。
 		onClose: func() {

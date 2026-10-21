@@ -143,11 +143,14 @@ func TestPinOverlayConvertsPhysicalToDIP(t *testing.T) {
 		t.Fatalf("应当开 1 个贴图窗口，实得 %d", len(host.pins))
 	}
 	p := host.pins[0]
-	if p.Width != 200 || p.Height != 150 {
-		t.Errorf("窗口尺寸 = %d×%d，期望 200×150（物理 400×300 / 2）", p.Width, p.Height)
+	// 窗口比图片大一圈：四周留白用来画阴影（见 pinShadowPad）。
+	if p.Width != 200+2*pinShadowPad || p.Height != 150+2*pinShadowPad {
+		t.Errorf("窗口尺寸 = %d×%d，期望 %d×%d（图片 200×150 加两侧留白）",
+			p.Width, p.Height, 200+2*pinShadowPad, 150+2*pinShadowPad)
 	}
-	if p.X != 200 || p.Y != 100 {
-		t.Errorf("窗口位置 = (%d,%d)，期望 (200,100)（屏原点 + 物理偏移 / 2）", p.X, p.Y)
+	if p.X != 200-pinShadowPad || p.Y != 100-pinShadowPad {
+		t.Errorf("窗口位置 = (%d,%d)，期望 (%d,%d)（屏原点 + 物理偏移 / 2，再外扩留白）",
+			p.X, p.Y, 200-pinShadowPad, 100-pinShadowPad)
 	}
 	if !strings.Contains(p.URL, fmt.Sprintf("mode=pin&id=%d", id)) {
 		t.Errorf("窗口 URL = %q，期望带上贴图 id", p.URL)

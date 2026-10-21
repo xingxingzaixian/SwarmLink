@@ -35,13 +35,15 @@ type OverlayOptions struct {
 // PinOptions 描述一个贴图窗口要开在哪、多大、加载什么。
 //
 // 与 OverlayOptions 的区别：贴图窗口是「用户要看/要留着的图」，
-// 尺寸就是图片尺寸（不铺满屏幕），位置就是刚才框选的位置。
+// 尺寸是图片尺寸外加一圈阴影留白（不铺满屏幕），位置就是刚才框选的位置
+// 再按留白量向外扩 —— 图片本身仍盖住用户框的地方。
 type PinOptions struct {
 	// Name 是窗口的唯一名字（关它的时候用）。
 	Name string
 	// URL 是窗口要加载的页面。
 	URL string
-	// X / Y / Width / Height 是窗口在虚拟桌面上的 DIP 位置与尺寸。
+	// X / Y / Width / Height 是窗口在虚拟桌面上的 DIP 位置与尺寸
+	// （含图片四周用于画阴影的透明留白）。
 	X, Y, Width, Height int
 	// onClose 在窗口被关掉时回调（无论关它的是谁：用户 Alt+F4、系统
 	// 关机、还是 ClosePin）。

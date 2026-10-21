@@ -275,9 +275,9 @@ export interface PinImageDTO {
     "mime": string;
 
     /**
-     * Width / Height 是 1:1 显示时的窗口尺寸（DIP 逻辑像素）。
+     * Width / Height 是图片 1:1 显示时的尺寸（DIP 逻辑像素，不含阴影留白）。
      * 
-     * 贴图窗口用它做缩放基准：窗口尺寸 = 基准尺寸 × 缩放比。
+     * 贴图窗口用它做缩放基准：窗口尺寸 = 基准尺寸 × 缩放比 + 2 × 留白。
      */
     "width": number;
     "height": number;
