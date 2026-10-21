@@ -10,40 +10,25 @@ package screencap
 #include <stdlib.h>
 
 // sl_capture_rect 抓取【指定矩形】那块屏幕的画面。
-// excludePID > 0 时把属于该进程的窗口全部排除在画面之外。
+//
+// excludePID 目前只接受 0：CoreGraphics 没有「排除某个进程」这种合成方式。
+// 唯一的近似做法 CGWindowListCreateImageFromArray 是「只合成这些窗口」，
+// 会把桌面壁纸与非窗口内容一起丢掉；而「画面里不要本应用」这个需求，
+// 调用方本来就是靠【先最小化主窗口】解决的（见 screenshot_overlay.go 的说明），
+// 那条路在各平台都成立，不必在这里再造一份不可靠的实现。
+// Go 侧遇到 excludeSelf=true 会直接返回 ErrUnsupported，不会带着默认值进来。
 // 返回 0 表示成功；成功时缓冲区由本函数 calloc，调用方负责 free。
 static int sl_capture_rect(CGRect screenRect, int32_t excludePID, int32_t *outW, int32_t *outH, uint8_t **outData) {
 	if (!outW || !outH || !outData) return 1;
 	*outW = 0; *outH = 0; *outData = NULL;
+	(void)excludePID; // 见函数说明：本平台只支持「整屏合成」
 
-	CFArrayRef all = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-	CFMutableArrayRef ids = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
-	if (all) {
-		CFIndex n = CFArrayGetCount(all);
-		for (CFIndex i = 0; i < n; i++) {
-			CFDictionaryRef info = (CFDictionaryRef)CFArrayGetValueAtIndex(all, i);
-			if (!info) continue;
-			if (excludePID > 0) {
-				CFNumberRef pidNum = (CFNumberRef)CFDictionaryGetValue(info, kCGWindowOwnerPID);
-				int32_t ownerPID = 0;
-				if (pidNum) CFNumberGetValue(pidNum, kCFNumberInt32Type, &ownerPID);
-				if (ownerPID == excludePID) continue;
-			}
-			CFNumberRef widNum = (CFNumberRef)CFDictionaryGetValue(info, kCGWindowNumber);
-			if (!widNum) continue;
-			int32_t wid = 0;
-			if (!CFNumberGetValue(widNum, kCFNumberInt32Type, &wid)) continue;
-			CFNumberRef copy = CFNumberCreate(NULL, kCFNumberInt32Type, &wid);
-			if (copy) {
-				CFArrayAppendValue(ids, copy);
-				CFRelease(copy);
-			}
-		}
-		CFRelease(all);
-	}
-
-	CGImageRef img = CGWindowListCreateImage(screenRect, kCGWindowListOptionOnScreenOnly, ids, NULL);
-	CFRelease(ids);
+	// 整屏合成：kCGNullWindowID 表示「矩形内所有在屏窗口」。
+	//
+	// 注意 32 位类型名是 kCFNumberSInt32Type（CFNumber.h）；写成
+	// kCFNumberInt32Type 在 Windows 的思维里很自然，但它在 SDK 里不存在。
+	CGImageRef img = CGWindowListCreateImage(screenRect, kCGWindowListOptionOnScreenOnly,
+		kCGNullWindowID, kCGWindowImageDefault);
 	if (!img) return 4;
 
 	size_t w = CGImageGetWidth(img);
@@ -128,23 +113,27 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"os"
 	"unsafe"
 
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
 )
 
+// errNoExcludeSelf 说明 macOS 不支持「抓屏时排除自身窗口」。
+//
+// 明确报错而不是悄悄忽略参数：调用方要的是「画面里没有自己」，
+// 悄悄返回一张带自己的图，比失败更难查。正确的替代做法是先最小化窗口。
+var errNoExcludeSelf = fmt.Errorf("%w：macOS 抓屏不支持排除自身窗口，请先最小化窗口", ErrUnsupported)
+
 func capture(ctx context.Context, excludeSelf bool) (ports.ScreenImage, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.ScreenImage{}, err
 	}
+	if excludeSelf {
+		return ports.ScreenImage{}, errNoExcludeSelf
+	}
 	var w, h C.int32_t
 	var data *C.uint8_t
-	pid := C.int32_t(0)
-	if excludeSelf {
-		pid = C.int32_t(os.Getpid())
-	}
-	rc := C.sl_capture(pid, &w, &h, &data)
+	rc := C.sl_capture(0, &w, &h, &data)
 	if rc != 0 {
 		return ports.ScreenImage{}, fmt.Errorf("screencap: macOS 抓屏失败（错误码 %d）", int(rc))
 	}
@@ -159,13 +148,12 @@ func captureDisplay(ctx context.Context, index int, excludeSelf bool) (ports.Scr
 	if err := ctx.Err(); err != nil {
 		return ports.ScreenImage{}, err
 	}
+	if excludeSelf {
+		return ports.ScreenImage{}, errNoExcludeSelf
+	}
 	var w, h C.int32_t
 	var data *C.uint8_t
-	pid := C.int32_t(0)
-	if excludeSelf {
-		pid = C.int32_t(os.Getpid())
-	}
-	rc := C.sl_capture_display(C.int32_t(index), pid, &w, &h, &data)
+	rc := C.sl_capture_display(C.int32_t(index), 0, &w, &h, &data)
 	if rc != 0 {
 		return ports.ScreenImage{}, fmt.Errorf("screencap: macOS 抓取第 %d 块显示器失败（错误码 %d）", index, int(rc))
 	}
