@@ -58,6 +58,17 @@ type ScreenshotService struct {
 	pinSeq int
 }
 
+// IsCapturing 报告当前是否有交互式截图会话在进行。
+//
+// 全局截屏热键要靠它拦住重入：BeginCapture 一进来就会先关掉旧会话
+// （见 screenshot_overlay.go 的说明），所以在会话进行中再按一次热键，
+// 表现会是「刚框好的选区凭空消失」。宁可这一次不响应。
+func (s *ScreenshotService) IsCapturing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.session != nil
+}
+
 // SendDraft 把输入框里的截图草稿发出去。
 //
 // 为什么单独一条路，而不是复用 ChatService.SendImageBytes：

@@ -10,6 +10,7 @@ import * as ScreenshotService from "./screenshotservice.js";
 import * as SearchService from "./searchservice.js";
 import * as SettingsService from "./settingsservice.js";
 import * as ShareService from "./shareservice.js";
+import * as ShortcutService from "./shortcutservice.js";
 import * as TransferService from "./transferservice.js";
 import * as UpdateService from "./updateservice.js";
 export {
@@ -22,6 +23,7 @@ export {
     SearchService,
     SettingsService,
     ShareService,
+    ShortcutService,
     TransferService,
     UpdateService
 };
@@ -48,6 +50,8 @@ export type {
     ShareDownloadDTO,
     ShareItemDTO,
     ShareVisibilityDTO,
+    ShortcutResultDTO,
+    ShortcutsDTO,
     TransferDTO,
     UpdatePeerDTO,
     UpdateStateDTO

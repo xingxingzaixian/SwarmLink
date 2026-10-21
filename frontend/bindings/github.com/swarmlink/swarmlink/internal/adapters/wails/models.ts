@@ -494,6 +494,31 @@ export interface ShareVisibilityDTO {
 }
 
 /**
+ * ShortcutResultDTO 是某个全局热键的注册现状。
+ * 
+ * Error 非空表示「这个键没绑上」，最常见的原因是别的程序已经占着它
+ * （QQ / 微信 / 输入法 / 显卡驱动都会抢）。此时用户的设置【不清空】：
+ * 换一台机器、或者关掉那个程序之后，同一个键位就会生效。
+ */
+export interface ShortcutResultDTO {
+    "id": string;
+    "accelerator": string;
+    "error": string;
+}
+
+/**
+ * ShortcutsDTO 是快捷键配置的完整快照。
+ * 
+ * 只有 Overrides（用户覆盖）与 Global（全局键注册现状）两项：
+ * 窗口内命令的生效值由前端用「覆盖 ?? 命令表默认值」算出来，
+ * 后端不需要、也不应该知道那些默认值。
+ */
+export interface ShortcutsDTO {
+    "overrides": { [_ in string]?: string } | null;
+    "global": ShortcutResultDTO[] | null;
+}
+
+/**
  * TransferDTO 是传输任务项。
  */
 export interface TransferDTO {

@@ -1,14 +1,3 @@
-<script lang="ts">
-/**
- * 已打开弹层的顺序（后进先出）。
- *
- * 必须在模块作用域：弹框里再开弹框时，两层都监听 window 的 keydown，
- * 不区分的话按一次 Esc 会把两层一起关掉（`stopPropagation` 拦不住同样挂在
- * window 上的另一个监听器）—— 用户以为自己只退了当前这层。
- */
-const openDialogs: object[] = []
-</script>
-
 <script setup lang="ts">
 /**
  * 通用弹层。
@@ -19,6 +8,7 @@ const openDialogs: object[] = []
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import Icon from './Icon.vue'
+import { pushHotkeyLayer } from '../hotkeys/dispatcher'
 
 const props = withDefaults(
   defineProps<{
@@ -34,27 +24,24 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 
 const dialog = ref<HTMLElement | null>(null)
 
-/** 本实例在弹层栈里的身份（用对象而不是索引：索引会随下层关闭而错位）。 */
-const self = {}
-
-/** Esc 关闭：桌面应用的基本礼仪，缺了会让人以为弹层卡住。只关最上层那一个。 */
-function onKey(e: KeyboardEvent): void {
-  if (e.key !== 'Escape') return
-  if (openDialogs[openDialogs.length - 1] !== self) return
-  e.stopPropagation()
-  emit('close')
-}
+/**
+ * Esc 关闭：桌面应用的基本礼仪，缺了会让人以为弹层卡住。
+ *
+ * 层级交给快捷键派发器（hotkeys/dispatcher）的层栈维护：它只把 Esc 交给
+ * 最上面那一层。搬到这里之前是「每个弹层各挂一个 window 监听 + 一个模块级
+ * 数组」—— 一旦有别的组件在捕获阶段抢过 Esc（更新框就干过这事），
+ * 这里就再也收不到事件，而代码上看不出来。
+ */
+let popLayer: (() => void) | null = null
 
 onMounted(() => {
-  openDialogs.push(self)
-  window.addEventListener('keydown', onKey)
+  popLayer = pushHotkeyLayer({ onEsc: () => emit('close') })
   dialog.value?.focus()
 })
 
 onBeforeUnmount(() => {
-  const i = openDialogs.indexOf(self)
-  if (i >= 0) openDialogs.splice(i, 1)
-  window.removeEventListener('keydown', onKey)
+  popLayer?.()
+  popLayer = null
 })
 </script>
 

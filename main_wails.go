@@ -49,6 +49,7 @@ import (
 	"github.com/swarmlink/swarmlink/internal/bootstrap"
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
+	"github.com/swarmlink/swarmlink/internal/domain/ports"
 	"github.com/swarmlink/swarmlink/internal/infra/eventbus"
 )
 
@@ -330,6 +331,7 @@ func main() {
 			application.NewService(services.Update),
 			application.NewService(services.Appearance),
 			application.NewService(services.Screenshot),
+			application.NewService(services.Shortcut),
 			application.NewService(sysNotify),
 		},
 		Assets: application.AssetOptions{
@@ -369,6 +371,95 @@ func main() {
 
 	// 覆盖层窗口宿主现在可以拿到 app 了（app 是上面才创建出来的）。
 	overlayHost.SetApp(app)
+
+	// ---------------------------------------------------------------------
+	// 全局热键（应用失焦也要生效）
+	//
+	// 只有两件事在 Go 侧做，理由是它们不依赖任何前端状态：
+	//   screenshot    —— 截屏的整条链路本来就在 Go（抓屏 + 开覆盖层窗口）；
+	//   toggle_window —— 窗口被收进托盘时前端根本没有可见的文档，
+	//                    让前端参与就得先 Show 再等它 ready，绕圈还会丢事件。
+	//
+	// 窗口内快捷键（搜索 / 切会话 / 开面板）反过来必须留在前端：
+	// Wails 的 KeyBinding 在原生消息层就把按键吞掉（Windows 的 WM_KEYDOWN），
+	// 绑了字母键会让输入框打不出字，而且它不知道焦点在哪、不知道输入法
+	// 是否在组合中。两边的分工不是偏好，是能力边界。
+	// ---------------------------------------------------------------------
+	hotkeyActions := map[string]func(){
+		"screenshot": func() {
+			// 会话进行中再按一次会【先关掉旧会话】再重开（见 BeginCapture），
+			// 表现是「刚框好的选区凭空消失」—— 宁可这次不响应。
+			if services.Screenshot.IsCapturing() {
+				return
+			}
+			if _, err := services.Screenshot.BeginCapture(ports.ScreenshotModeHideWindow); err != nil {
+				slog.Warn("全局热键截屏失败", "err", err)
+			}
+		},
+		"toggle_window": func() {
+			if services.Screenshot.IsCapturing() {
+				return // 截图时主窗口是故意最小化的，别再把它拉起来
+			}
+			if win.IsVisible() && win.IsFocused() {
+				win.Hide()
+				return
+			}
+			showWindow()
+		},
+	}
+
+	// gsRegistered 记的是「当初交给系统的那个字符串」而不是从配置重新推导的值：
+	// 用户改过键之后，配置里的新值与系统上绑着的旧值已经不是一回事，
+	// 注销必须用旧值。
+	var (
+		gsMu         sync.Mutex
+		gsRegistered = map[string]string{}
+	)
+
+	applyGlobalShortcuts := func(keys map[string]string) map[string]error {
+		gsMu.Lock()
+		defer gsMu.Unlock()
+
+		failed := map[string]error{}
+
+		for _, id := range wadapter.GlobalShortcutIDs {
+			prev, had := gsRegistered[id]
+			next := keys[id]
+			if had && prev == next {
+				continue // 没变，别去动系统上的绑定
+			}
+			action, ok := hotkeyActions[id]
+			if !ok {
+				continue
+			}
+
+			// 先绑新的，成功了才解旧的 —— 顺序反过来，一旦新键被别的程序
+			// 占着（最常见的情形），用户连原来的键也一起没了。
+			if next != "" {
+				if err := app.GlobalShortcut.Register(next, action); err != nil {
+					failed[id] = err
+					continue // 旧绑定原样保留
+				}
+				gsRegistered[id] = next
+			} else {
+				delete(gsRegistered, id)
+			}
+			if had {
+				if err := app.GlobalShortcut.Unregister(prev); err != nil {
+					slog.Warn("注销全局热键失败", "id", id, "accel", prev, "err", err)
+				}
+			}
+		}
+		return failed
+	}
+	wadapter.SetGlobalShortcutApplier(applyGlobalShortcuts)
+
+	// 注册时机必须是「应用真的起来之后」：Run() 之前注册会被 Wails 延后绑定，
+	// 而绑定失败只进全局 error handler —— 调用方拿不到原因，设置页也就
+	// 没法显示「被哪个程序占了」。
+	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
+		services.Shortcut.ReloadGlobal()
+	})
 
 	// 用户点了系统通知：把窗口叫到前台，并让前端切到对应会话。
 	//

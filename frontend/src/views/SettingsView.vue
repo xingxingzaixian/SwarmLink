@@ -18,8 +18,10 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import Icon from '../components/Icon.vue'
+import ShortcutEditor from '../components/ShortcutEditor.vue'
 import { getApi, type SeedTest, type SelfCheck, type Settings } from '../api'
 import { useAppearanceStore } from '../stores/appearance'
+import { useHotkeysStore } from '../stores/hotkeys'
 import { usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { useUpdateStore } from '../stores/update'
@@ -28,9 +30,18 @@ const ui = useUiStore()
 const update = useUpdateStore()
 const peers = usePeersStore()
 const appearance = useAppearanceStore()
+const hotkeys = useHotkeysStore()
+
+/** 恢复出厂键位。不二次确认：它是可逆的（重新录一遍即可），且用户就在这一页。 */
+async function resetShortcuts(): Promise<void> {
+  if (await hotkeys.resetAll()) {
+    ui.notify('已恢复默认快捷键')
+  }
+}
 
 type CatKey =
   | 'general'
+  | 'keys'
   | 'notify'
   | 'network'
   | 'connect'
@@ -61,6 +72,14 @@ const CATS: Cat[] = [
     label: '通用',
     icon: 'sliders',
     desc: '显示名与接收目录。显示名对端在资料卡里看得到。'
+  },
+  {
+    key: 'keys',
+    label: '快捷键',
+    icon: 'grid',
+    // 这一页不走底条的「保存」：快捷键改完即时生效并落盘，
+    // 底条在这里换成「恢复默认」（见模板末尾）。
+    desc: '点一下键位即可重新录制。系统级快捷键在应用退到后台时也生效。'
   },
   {
     key: 'notify',
@@ -606,6 +625,10 @@ onMounted(load)
         </div>
       </section>
 
+      <section v-else-if="cat === 'keys'">
+        <ShortcutEditor />
+      </section>
+
       <section v-else-if="cat === 'notify'">
         <label class="check">
           <input v-model="settings.notifySound" type="checkbox" />
@@ -878,8 +901,19 @@ onMounted(load)
     <footer class="bar">
       <div class="bar-msg">
         <span v-if="notice">{{ notice }}</span>
+        <span v-else-if="cat === 'keys'" class="faint">快捷键改完立即生效，无需保存</span>
       </div>
-      <button class="btn btn-primary" :disabled="saving || !settings" @click="save">
+      <!-- 快捷键页不走「保存」：它即时生效、即时落盘（见 ShortcutEditor 的说明）。
+           给一个「恢复默认」，是因为改键改乱了需要一条确定的退路。 -->
+      <button
+        v-if="cat === 'keys'"
+        class="btn btn-soft"
+        :disabled="hotkeys.loading"
+        @click="resetShortcuts"
+      >
+        <Icon name="refresh" :size="14" />恢复默认
+      </button>
+      <button v-else class="btn btn-primary" :disabled="saving || !settings" @click="save">
         <Icon name="check" :size="14" />{{ saving ? '保存中…' : '保存' }}
       </button>
     </footer>

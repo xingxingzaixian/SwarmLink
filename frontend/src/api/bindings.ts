@@ -36,6 +36,7 @@ import {
   SearchService,
   SettingsService,
   ShareService,
+  ShortcutService,
   TransferService,
   UpdateService,
   AppearanceService,
@@ -47,6 +48,7 @@ import type {
   SelfCheckDTO,
   SettingsDTO,
   ShareDTO,
+  ShortcutsDTO,
   UpdateStateDTO
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/models.js'
 
@@ -57,6 +59,7 @@ import type {
   SelfCheck,
   Settings,
   Share,
+  ShortcutsSnapshot,
   SwarmApi,
   UpdateState
 } from './types'
@@ -106,6 +109,20 @@ function toShare(s: ShareDTO): Share {
   return { ...s, visibility: { ...s.visibility, allowed: list(s.visibility?.allowed) } }
 }
 
+/**
+ * 绑定里的 map 与 slice 都可能是 null（Go 的 nil），统一收敛成空值。
+ * 前端拿到的一定是「空集合」而不是 null —— 否则每处渲染都要写 `?? {}`。
+ */
+function toShortcuts(s: ShortcutsDTO): ShortcutsSnapshot {
+  // 生成绑定的 map 值是 `string | undefined`（Go 的零值可能被编码成 null），
+  // 这里收敛成「一定是字符串」—— 下游拿到的键位不该还要判空。
+  const overrides: Record<string, string> = {}
+  for (const [id, accel] of Object.entries(s.overrides ?? {})) {
+    if (typeof accel === 'string') overrides[id] = accel
+  }
+  return { overrides, global: list(s.global) }
+}
+
 function toUpdateState(s: UpdateStateDTO): UpdateState {
   return { ...s, higherPeers: list(s.higherPeers) }
 }
@@ -118,6 +135,10 @@ export const realApi: SwarmApi = {
   downloadDir: async () => SettingsService.DownloadDir(),
   runSelfCheck: async () => toSelfCheck(await SettingsService.RunSelfCheck()),
   testSeed: async (addr) => SettingsService.TestSeed(addr),
+
+  readShortcuts: async () => toShortcuts(await ShortcutService.Get()),
+  applyShortcuts: async (overrides) => toShortcuts(await ShortcutService.Apply(overrides)),
+  resetShortcuts: async () => toShortcuts(await ShortcutService.Reset()),
 
   getBackground: async () => AppearanceService.Get(),
   saveBackground: async (dataBase64, ext) => AppearanceService.Save(dataBase64, ext),

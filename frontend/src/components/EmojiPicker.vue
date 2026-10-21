@@ -8,6 +8,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { EMOJI_GROUPS } from '../constants/emoji'
+import { pushHotkeyLayer } from '../hotkeys/dispatcher'
 
 const emit = defineEmits<{ (e: 'pick', ch: string): void; (e: 'close'): void }>()
 
@@ -26,18 +27,24 @@ function onDocClick(e: MouseEvent): void {
   if (!root.value?.contains(e.target as Node)) emit('close')
 }
 
-function onKey(e: KeyboardEvent): void {
-  if (e.key === 'Escape') emit('close')
-}
+/**
+ * Esc 关面板。
+ *
+ * 声明成独占层而不是自己听 keydown：面板开着时按 Ctrl+K 会把搜索弹层
+ * 叠在输入区上面，而用户本来只想选个表情 —— 这类「两个层都想关」的
+ * 处境由派发器统一挡住。焦点仍留在输入框（本组件不抢焦点）。
+ */
+let popLayer: (() => void) | null = null
 
 onMounted(() => {
   document.addEventListener('click', onDocClick, true)
-  document.addEventListener('keydown', onKey)
+  popLayer = pushHotkeyLayer({ exclusive: true, onEsc: () => emit('close') })
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick, true)
-  document.removeEventListener('keydown', onKey)
+  popLayer?.()
+  popLayer = null
 })
 </script>
 

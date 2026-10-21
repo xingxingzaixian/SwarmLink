@@ -19,12 +19,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import { getApi } from '../api'
 import type { TransferJob } from '../api/types'
+import { useHotkeysStore } from '../stores/hotkeys'
 import { canPause, isPaused, useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
 import { speedText, transferredBytes } from '../utils/format'
 
 const ui = useUiStore()
 const transfers = useTransferStore()
+const hotkeys = useHotkeysStore()
 
 /** 与传输列表同一口径：DTO 的 percent 可能是空的（刚建出来的壳）。 */
 function percentOf(j: TransferJob): number {
@@ -197,7 +199,8 @@ async function resumeAll(): Promise<void> {
         <Icon name="play" :size="13" />全部恢复
       </button>
 
-      <button class="btn btn-ghost" title="打开完整传输列表" @click="ui.openPanel('transfers')">
+      <button class="btn btn-ghost" :title="hotkeys.withHint('打开完整传输列表', 'transfers')"
+        @click="ui.openPanel('transfers')">
         查看
       </button>
     </div>

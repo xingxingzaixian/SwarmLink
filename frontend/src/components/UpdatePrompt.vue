@@ -10,9 +10,10 @@
  * 误触关闭导致更新被取消，会让「全网拉齐」在无人值守的机器上悄悄失效。
  * 真正的放弃动作只在设置页里（那里有明确的文字）。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import Icon from './Icon.vue'
+import { pushHotkeyLayer } from '../hotkeys/dispatcher'
 import { useUpdateStore } from '../stores/update'
 
 const update = useUpdateStore()
@@ -110,19 +111,32 @@ function scheduleCustom(): Promise<void> {
 /**
  * Esc = 稍后提醒。
  *
- * 用【捕获阶段 + stopImmediatePropagation】：设置弹层也在 window 上听 Esc，
- * 只 stopPropagation 拦不住同一目标上的另一个监听器 —— 用户会看到
- * 「按一下 Esc，更新框和设置页一起关了」。
+ * 独占层：它弹出来就是要求用户做个决定，底下的弹层不该被同一次 Esc 顺带关掉。
+ * 只在【真的可见时】占住 Esc —— 迁移前这里无条件挂在捕获阶段并
+ * stopImmediatePropagation，于是提示框没出现时 Esc 也会被它吞掉，
+ * 所有弹层都关不掉，而代码上完全看不出因果关系。
  */
-function onKey(e: KeyboardEvent): void {
-  if (e.key !== 'Escape') return
-  e.stopImmediatePropagation()
-  e.preventDefault()
-  void snooze()
-}
+let popLayer: (() => void) | null = null
 
-onMounted(() => window.addEventListener('keydown', onKey, true))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
+watch(
+  () => update.promptVisible,
+  (visible) => {
+    if (visible && !popLayer) {
+      popLayer = pushHotkeyLayer({ exclusive: true, onEsc: () => void snooze() })
+      return
+    }
+    if (!visible) {
+      popLayer?.()
+      popLayer = null
+    }
+  },
+  { immediate: true }
+)
+
+onBeforeUnmount(() => {
+  popLayer?.()
+  popLayer = null
+})
 </script>
 
 <template>

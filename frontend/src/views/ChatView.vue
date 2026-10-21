@@ -20,6 +20,7 @@ import type { Message, Screenshot } from '../api/types'
 import { useFileSend } from '../composables/useFileSend'
 import { useChatStore } from '../stores/chat'
 import { useGroupStore } from '../stores/group'
+import { useHotkeysStore } from '../stores/hotkeys'
 import { usePeersStore } from '../stores/peers'
 import { SHOT_HIDE, SHOT_KEEP, useScreenshotStore } from '../stores/screenshot'
 import { useUiStore } from '../stores/ui'
@@ -31,6 +32,7 @@ const chat = useChatStore()
 const peers = usePeersStore()
 const groups = useGroupStore()
 const ui = useUiStore()
+const hotkeys = useHotkeysStore()
 
 const { sending, sendPaths, attach, attachFolder, attachImage } = useFileSend()
 
@@ -592,7 +594,8 @@ async function restoreView(): Promise<void> {
              带文字而不是纯图标：共享/上传类的图标在中文语境里认不出是「共享文件」，
              而「认不出」正是它原来没人发现的原因。 -->
         <button class="btn btn-soft share-entry" :class="{ on: ui.panel === 'share' }"
-          title="共享中心：发布目录给可见范围内的人，或下载他人的共享" aria-label="打开共享中心" @click="ui.openPanel('share')">
+          :title="hotkeys.withHint('共享中心：发布目录给可见范围内的人，或下载他人的共享', 'share')"
+          aria-label="打开共享中心" @click="ui.openPanel('share')">
           <Icon name="share" :size="15" />
           <span>共享中心</span>
         </button>
@@ -617,7 +620,7 @@ async function restoreView(): Promise<void> {
           同网段的节点会自动出现在列表里。<br />
           跨网段部署需要先在设置中配置种子清单。
         </div>
-        <button class="btn btn-soft" @click="ui.openPanel('settings')">
+        <button class="btn btn-soft" :title="hotkeys.withHint('打开设置', 'settings')" @click="ui.openPanel('settings')">
           <Icon name="sliders" :size="14" />打开设置
         </button>
       </div>
@@ -680,7 +683,8 @@ async function restoreView(): Promise<void> {
           @click="captureShot(SHOT_KEEP)">
           <Icon name="camera" :size="17" />
         </button>
-        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy" title="隐藏窗口截屏" aria-label="截屏（隐藏本窗口）"
+        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy"
+          :title="hotkeys.withHint('隐藏窗口截屏', 'screenshot')" aria-label="截屏（隐藏本窗口）"
           @click="captureShot(SHOT_HIDE)">
           <Icon name="cameraOff" :size="17" />
         </button>

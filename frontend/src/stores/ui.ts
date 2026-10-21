@@ -96,6 +96,31 @@ export const useUiStore = defineStore('ui', () => {
   const searchSeed = ref('')
 
   /**
+   * 「把焦点送到左栏搜索框」的请求计数。
+   *
+   * 快捷键（Ctrl+F）与左栏是两个没有父子关系的组件，前端也没有跨组件的
+   * 焦点 API，因此用一个自增计数当信号：ContactPanel 盯它一眼，看到变化
+   * 就 focus 自己的输入框。比把 input 的 ref 提到 store 里干净得多。
+   */
+  const searchFocusTick = ref(0)
+
+  function focusSearchBox(): void {
+    searchFocusTick.value++
+  }
+
+  /**
+   * 快捷键一览浮层是否可见（Ctrl+/）。
+   *
+   * 它不走 panel：panel 是「设置 / 传输 / 共享」那种有归属的功能弹层，
+   * 一览是随时可开、Esc 即走的参考页，压在什么上面都合理。
+   */
+  const helpVisible = ref(false)
+
+  function toggleHelp(force?: boolean): void {
+    helpVisible.value = force ?? !helpVisible.value
+  }
+
+  /**
    * 配置被「非设置页」的入口改过的次数。
    *
    * 存在的理由：提示开关有两个入口（设置页、托盘菜单）。托盘改完后端会推
@@ -196,6 +221,10 @@ export const useUiStore = defineStore('ui', () => {
     pathInputVisible,
     toast,
     searchSeed,
+    searchFocusTick,
+    helpVisible,
+    toggleHelp,
+    focusSearchBox,
     configRevision,
     bumpConfigRevision,
     openPanel,

@@ -500,6 +500,27 @@ export interface UpdateState {
   logPath: string
 }
 
+/** 一个全局热键的注册现状。`error` 非空表示没绑上（通常是别的程序占着）。 */
+export interface GlobalShortcutState {
+  id: string
+  /** 实际生效的加速键；空串 = 用户主动解绑。 */
+  accelerator: string
+  error: string
+}
+
+/**
+ * 快捷键配置快照。
+ *
+ * 只有「用户覆盖」与「全局键现状」两项 —— 窗口内命令的生效值由前端用
+ * `覆盖 ?? 命令表默认值` 算出来。这么切的好处是：升级后默认键位变了，
+ * 没改过的用户能直接收到新默认值。
+ */
+export interface ShortcutsSnapshot {
+  /** 命令 id → 加速键，空串表示解绑。只含用户改过的项。 */
+  overrides: Record<string, string>
+  global: GlobalShortcutState[]
+}
+
 /** 前端可调用的后端能力。 */
 export interface SwarmApi {
   // 设置
@@ -507,6 +528,14 @@ export interface SwarmApi {
   saveSettings(s: Settings): Promise<string[]>
   listInterfaces(): Promise<string[]>
   downloadDir(): Promise<string>
+
+  // 快捷键
+  /** 读取快捷键配置（不触发注册）。 */
+  readShortcuts(): Promise<ShortcutsSnapshot>
+  /** 整体替换用户覆盖表并重新注册全局热键，返回新快照。 */
+  applyShortcuts(overrides: Record<string, string>): Promise<ShortcutsSnapshot>
+  /** 清空全部覆盖值，回到出厂键位。 */
+  resetShortcuts(): Promise<ShortcutsSnapshot>
 
   /**
    * 上报「用户当前正在看哪个会话」（没有打开会话时传空串）。

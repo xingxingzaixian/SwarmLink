@@ -19,6 +19,7 @@ import { directConvId, isGroupId } from '../api/ids'
 import type { Group, Peer } from '../api/types'
 import { useChatStore } from '../stores/chat'
 import { useGroupStore } from '../stores/group'
+import { useHotkeysStore } from '../stores/hotkeys'
 import { reachable, usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { listTime } from '../utils/format'
@@ -30,10 +31,29 @@ const peers = usePeersStore()
 const chat = useChatStore()
 const groups = useGroupStore()
 const ui = useUiStore()
+const hotkeys = useHotkeysStore()
 
 const query = ref('')
 const menuOpen = ref(false)
 const showCreate = ref(false)
+
+/** 搜索框的 DOM 引用：Ctrl+F 要能把焦点送到这里（见 ui.searchFocusTick）。 */
+const searchEl = ref<HTMLInputElement | null>(null)
+
+/**
+ * 「把焦点送过来」的请求。
+ *
+ * 用计数器而不是布尔：连续按两次 Ctrl+F 时，布尔值第二次不变就没有反应
+ * （用户以为按键失效，其实焦点早就在框里或者被别的层抢走了，再按一次
+ * 应该重新抢回来）。
+ */
+watch(
+  () => ui.searchFocusTick,
+  () => {
+    searchEl.value?.focus()
+    searchEl.value?.select()
+  }
+)
 
 const groupName = ref('')
 const memberIds = ref<string[]>([])
@@ -345,9 +365,11 @@ const lightTip = computed(() => {
         <label class="search">
           <Icon name="search" :size="14" />
           <input
+            ref="searchEl"
             v-model="query"
             type="text"
             :placeholder="searchPlaceholder"
+            :title="hotkeys.withHint('搜索会话 / 节点', 'focus_search')"
             spellcheck="false"
             @keydown.enter="openHistorySearch"
           />

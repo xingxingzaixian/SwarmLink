@@ -6,6 +6,7 @@ import type {
   Conversation,
   Diagnostics,
   FolderSummary,
+  GlobalShortcutState,
   Group,
   Message,
   Peer,
@@ -49,6 +50,28 @@ interface SeqMessage {
  * 因此右栏的「文件发送进度」在浏览器里也能被完整走查。
  */
 export function createMockApi(): SwarmApi {
+  /**
+   * 快捷键覆盖值（浏览器预览用）。
+   *
+   * 只活在内存里：没有 Go 就没有持久化，也没有系统级热键可注册。
+   * 保留它是为了让「录制 → 保存 → 界面刷新」这条路在预览里也能走通。
+   */
+  let shortcutOverrides: Record<string, string> = {}
+
+  /** 预览模式下全局热键的“注册现状”：键位跟着覆盖值走，永远注册成功。 */
+  const mockGlobal = (): GlobalShortcutState[] => [
+    {
+      id: 'screenshot',
+      accelerator: shortcutOverrides.screenshot ?? 'Ctrl+Shift+A',
+      error: ''
+    },
+    {
+      id: 'toggle_window',
+      accelerator: shortcutOverrides.toggle_window ?? 'Ctrl+Alt+Space',
+      error: ''
+    }
+  ]
+
   /** 每会话的清空点（毫秒）；与后端一样，缺省 = 未清空。 */
   const cleared = new Map<string, number>()
 
@@ -898,6 +921,19 @@ export function createMockApi(): SwarmApi {
     },
     async downloadDir() {
       return settings.downloadDir
+    },
+    // 快捷键：浏览器里没有 Go，也就没有系统级热键可注册。
+    // 仍然记住覆盖值，好让设置页的编辑流程可以完整走通（刷新即丢）。
+    async readShortcuts() {
+      return { overrides: { ...shortcutOverrides }, global: mockGlobal() }
+    },
+    async applyShortcuts(overrides) {
+      shortcutOverrides = { ...overrides }
+      return { overrides: { ...shortcutOverrides }, global: mockGlobal() }
+    },
+    async resetShortcuts() {
+      shortcutOverrides = {}
+      return { overrides: {}, global: mockGlobal() }
     },
     // 浏览器里没有托盘也没有提示决策，收下即可 ——
     // 保留这个调用点是为了让「上报当前会话」这条链路在 mock 模式下

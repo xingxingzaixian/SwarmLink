@@ -106,6 +106,7 @@ type ServiceSet struct {
 	Update     *UpdateService
 	Appearance *AppearanceService
 	Screenshot *ScreenshotService
+	Shortcut   *ShortcutService
 }
 
 // NewServices 构造服务集合。
@@ -122,6 +123,7 @@ func NewServices(d Deps) *ServiceSet {
 		Update:     &UpdateService{d: d},
 		Appearance: NewAppearanceService(d),
 		Screenshot: &ScreenshotService{d: d},
+		Shortcut:   &ShortcutService{d: d},
 	}
 }
 

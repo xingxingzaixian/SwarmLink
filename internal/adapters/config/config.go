@@ -184,8 +184,44 @@ type Config struct {
 		AutoInstallAfter Duration `toml:"auto_install_after"`
 	} `toml:"update"`
 
+	// Shortcuts 存快捷键的【用户覆盖值】：键是命令 id，值是加速键字符串，
+	// 空串表示「用户主动解绑了这个命令」。
+	//
+	// 为什么只存覆盖、不存全部键位：
+	//   - 缺失 = 用出厂默认，因此升级后默认键位变了，用户能收到；
+	//     若把默认值也写进文件，旧文件会把旧默认值永久钉死。
+	//   - 文件里出现的每一行都是用户真实的意志，运维打开文件就能看懂。
+	//
+	// 【不要】在 applyDefaults 里给它补默认值：那样「解绑」就会被悄悄还原，
+	// 与 Notify 那几个 bool 是同一个陷阱（见上方注释）。
+	Shortcuts struct {
+		Keys map[string]string `toml:"keys"`
+	} `toml:"shortcuts"`
+
 	// 截屏没有配置项：它是常规功能，两个按钮（保留 / 隐藏本窗口）就是
 	// 全部选择，没有开关、也没有需要记住的状态。
+}
+
+// GlobalShortcutDefaults 是【全局热键】的出厂键位。
+//
+// 只有全局键需要 Go 侧知道默认值：它们在应用启动、前端还没加载时就要注册。
+// 窗口内命令的默认键在前端命令表（frontend/src/hotkeys/commands.ts），
+// Go 不参与 —— 两侧各管自己那半，比在两边复制同一张表更不容易腐化。
+//
+// 键位选择避开常见占用：QQ 截图 Ctrl+Alt+A、微信 Alt+A、Snipaste F1。
+var GlobalShortcutDefaults = map[string]string{
+	"screenshot":    "Ctrl+Shift+A",
+	"toggle_window": "Ctrl+Alt+Space",
+}
+
+// Shortcut 返回某个快捷键的生效值：用户覆盖优先，否则回落出厂默认。
+//
+// 覆盖值为空串是合法的（用户解绑），因此不能写成 `if v != ""`。
+func (c *Config) Shortcut(id string) string {
+	if v, ok := c.Shortcuts.Keys[id]; ok {
+		return v
+	}
+	return GlobalShortcutDefaults[id]
 }
 
 // Default 返回带默认值的配置。

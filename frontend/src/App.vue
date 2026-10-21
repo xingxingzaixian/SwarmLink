@@ -18,9 +18,12 @@ import UpdatePrompt from './components/UpdatePrompt.vue'
 import SearchPanel from './views/SearchPanel.vue'
 import SettingsDialog from './views/SettingsDialog.vue'
 import ShareDialog from './views/ShareDialog.vue'
+import ShortcutsHelp from './components/ShortcutsHelp.vue'
 import { getApi, isMockMode } from './api'
+import { installHotkeys, uninstallHotkeys } from './hotkeys/dispatcher'
 import { useChatStore } from './stores/chat'
 import { useGroupStore } from './stores/group'
+import { useHotkeysStore } from './stores/hotkeys'
 import { usePeersStore } from './stores/peers'
 import { useTransferStore } from './stores/transfer'
 import { useUiStore } from './stores/ui'
@@ -34,12 +37,17 @@ const groups = useGroupStore()
 const ui = useUiStore()
 const update = useUpdateStore()
 const appearance = useAppearanceStore()
+const hotkeys = useHotkeysStore()
 
 const mock = ref(false)
 
 let timer: number | undefined
 
 onMounted(async () => {
+  // 快捷键派发器先装上：它每次按键都从 store 现读键位，不缓存，
+  // 因此「先装监听、后读配置」不会出现用错键位的问题。
+  installHotkeys()
+
   // 先探测后端：决定用真实绑定还是降级到 mock，再拉数据
   await getApi()
   mock.value = isMockMode()
@@ -55,7 +63,9 @@ onMounted(async () => {
     update.refresh().catch(() => {}),
     // 背景图要在首帧之后尽快贴上，否则用户会看到「先灰底、再跳到图片」。
     // 失败静默：没有背景图是正常状态，不是错误。
-    appearance.load().catch(() => {})
+    appearance.load().catch(() => {}),
+    // 快捷键配置：失败静默，读不到就用命令表里的默认键位。
+    hotkeys.load().catch(() => {})
   ])
 
   // 节点目录的变化主体靠 peer:updated 事件推送，这里只做兜底轮询：
@@ -89,28 +99,9 @@ watch(
   { immediate: true }
 )
 
-/**
- * 全局快捷键：Ctrl/⌘ + K 打开「搜索聊天记录」。
- *
- * 挂在 window 而不是某个输入框上：它是全局动作，焦点在哪（包括正在写草稿）
- * 都应该能用。`altKey` 要排除掉 —— macOS 的 ⌘⌥K 是别的意思，
- * 抢过来会让用户觉得「这个应用乱吃快捷键」。
- *
- * preventDefault 不是可选的：WebView 里 Ctrl+K 在部分平台有默认行为
- * （聚焦到浏览器层 / 清空当前行），不拦会出现「面板开了但焦点丢了」。
- */
-function onShortcut(e: KeyboardEvent): void {
-  if (!(e.ctrlKey || e.metaKey) || e.altKey) return
-  if (e.key.toLowerCase() !== 'k') return
-  e.preventDefault()
-  ui.openSearch('')
-}
-
-onMounted(() => window.addEventListener('keydown', onShortcut))
-
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
-  window.removeEventListener('keydown', onShortcut)
+  uninstallHotkeys()
 })
 </script>
 
@@ -144,6 +135,9 @@ onUnmounted(() => {
   <!-- 更新确认框与其它弹层【并列】而不是二选一：它由后端状态驱动（下载完成），
        而不是由 ui.panel 驱动；用户正在设置页里也可能收到它。 -->
   <UpdatePrompt />
+
+  <!-- 快捷键一览（Ctrl+/）：随时可开、Esc 即走，因此与弹层并列。 -->
+  <ShortcutsHelp />
 </template>
 
 <style scoped>
