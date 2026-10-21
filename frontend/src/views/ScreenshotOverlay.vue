@@ -21,7 +21,7 @@
  *   所有内部坐标一律用物理像素存，鼠标坐标按 scaleFactor 换算回物理像素。
  *   混用两套坐标是这类界面最常见的「差几个像素」的来源。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Clipboard } from '@wailsio/runtime'
 
 import Icon from '../components/Icon.vue'
@@ -146,7 +146,38 @@ const draft = ref<Annotation | null>(null)
 /** 文字输入框的位置与内容。 */
 const textBox = ref<{ x: number; y: number } | null>(null)
 const textValue = ref('')
-const textInputRef = ref<HTMLInputElement | null>(null)
+const textInputRef = ref<HTMLTextAreaElement | null>(null)
+
+/**
+ * 输入框的字体与排版参数。
+ *
+ * 必须与画布上落字用的字体一致（600 字重、20 DIP、行高 1.35 倍）：
+ * 输入时看到的框有多大，贴到图上就有多大 —— 否则用户会看到「输入时一行，
+ * 落下去变两行」。
+ */
+const TEXT_FONT_SIZE = 20
+const TEXT_FONT = `600 ${TEXT_FONT_SIZE}px "Plus Jakarta Sans", system-ui, sans-serif`
+/** 行高倍数：输入框（DIP）和画布上落字（物理像素）都用它，两边不会走偏。 */
+const TEXT_LINE_RATIO = 1.35
+const TEXT_LINE_H = Math.round(TEXT_FONT_SIZE * TEXT_LINE_RATIO)
+/** 与 .text-input 的 padding 保持一致（4px 8px）。 */
+const TEXT_PAD_X = 8
+const TEXT_PAD_Y = 4
+const TEXT_BORDER = 1
+/** 空输入时的最小宽度：按占位符量出来，提示语不会被裁掉。 */
+const TEXT_PLACEHOLDER = '输入文字（Ctrl+Enter 完成）'
+/** 输入框当前尺寸（DIP），随内容实时算。 */
+const textBoxSize = ref({ w: 0, h: 0 })
+
+/** 量文字宽度用的离屏 context（只创建一次，字体设置一次）。 */
+let measureCtx: CanvasRenderingContext2D | null = null
+function textWidth(s: string): number {
+  if (!measureCtx) {
+    measureCtx = document.createElement('canvas').getContext('2d')
+    if (measureCtx) measureCtx.font = TEXT_FONT
+  }
+  return measureCtx ? measureCtx.measureText(s).width : s.length * TEXT_FONT_SIZE * 0.6
+}
 
 /** 放大镜的位置（DIP）与取到的色值。 */
 const mag = ref<{ x: number; y: number } | null>(null)
@@ -206,18 +237,39 @@ const selSizeText = computed(() => {
 })
 
 /**
- * 文字输入框的位置。
+ * 文字输入框的位置与尺寸。
  *
- * 贴边点击时往回收一点：输入框如果落在窗口外，用户看到的只是「点了没反应」。
+ * 尺寸不写死：输入框跟着文字长（宽按最长的一行，高按行数），见 fitTextBox。
+ * 位置在这里贴边回收：输入框如果落在窗口外，用户看到的只是「点了没反应」。
  */
 const textBoxStyle = computed(() => {
   const t = textBox.value
   if (!t) return {}
   const k = scale.value
-  const x = Math.min(t.x / k, Math.max(0, viewW.value - 220))
-  const y = Math.min(t.y / k, Math.max(0, viewH.value - 44))
-  return { left: `${x}px`, top: `${y}px` }
+  const { w, h } = textBoxSize.value
+  const x = Math.min(t.x / k, Math.max(0, viewW.value - w))
+  const y = Math.min(t.y / k, Math.max(0, viewH.value - h))
+  // line-height 跟着常量走，避免 CSS 与画布行高各写一份、日后走偏。
+  return { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`, lineHeight: `${TEXT_LINE_H}px` }
 })
+
+/**
+ * 按当前内容重算输入框尺寸。
+ *
+ * 宽 = 最长一行（折行由 Enter 决定，不自动换行）；高 = 行数 × 行高。
+ * 上限贴着窗口：一行极长的文字不该把框顶出屏幕。
+ */
+function fitTextBox(): void {
+  const lines = textValue.value.split('\n')
+  const longest = Math.max(textWidth(TEXT_PLACEHOLDER), ...lines.map((l) => textWidth(l)))
+  const maxW = Math.max(160, viewW.value - 16)
+  const maxH = Math.max(TEXT_LINE_H + 2 * (TEXT_PAD_Y + TEXT_BORDER), viewH.value - 16)
+  // +2：量出来的字宽与浏览器实际排版差不到 1px，但差一点就会让输入框
+  // 冒出横向滚动条 —— 留一点余量比事后调参便宜。
+  const w = Math.min(maxW, Math.ceil(longest) + 2 * (TEXT_PAD_X + TEXT_BORDER) + 2)
+  const h = Math.min(maxH, lines.length * TEXT_LINE_H + 2 * (TEXT_PAD_Y + TEXT_BORDER))
+  textBoxSize.value = { w, h }
+}
 
 /** 八个控制点的位置（DIP）。 */
 const handles = computed(() => {
@@ -501,7 +553,10 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, a: Annotation): void {
       ctx.fillStyle = a.color
       ctx.font = `600 ${a.size}px "Plus Jakarta Sans", system-ui, sans-serif`
       ctx.textBaseline = 'top'
-      ctx.fillText(a.text, a.x, a.y)
+      // 多行：按输入框里的换行逐行落字，行高用同一个倍数（见 TEXT_LINE_RATIO）
+      const lines = a.text.split('\n')
+      const lh = a.size * TEXT_LINE_RATIO
+      for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], a.x, a.y + i * lh)
       break
     }
     case 'mosaic':
@@ -928,6 +983,8 @@ function finishAnnotation(): void {
 function openTextBox(p: Pt): void {
   textBox.value = { x: p.x, y: p.y }
   textValue.value = ''
+  // 尺寸要按空内容算一次：不先算的话，第一帧会用上一段文字的尺寸闪一下。
+  fitTextBox()
   // 放大镜是「指针附近的浮层」，它盖住输入框就谁也打不了字。
   mag.value = null
   nextTick(() => {
@@ -935,6 +992,9 @@ function openTextBox(p: Pt): void {
     window.setTimeout(() => textInputRef.value?.focus({ preventScroll: true }), 60)
   })
 }
+
+/** 敲字就重算尺寸：输入框跟着文字长，而不是固定宽度里横向滚动。 */
+watch(textValue, fitTextBox)
 
 function commitText(): void {
   const box = textBox.value
@@ -960,16 +1020,21 @@ function cancelText(): void {
 }
 
 /**
- * 输入框里的回车。
+ * 输入框里的按键处理。
+ *
+ * 现在支持多行：回车就是换行（不再提交）；提交走 Ctrl/Cmd+Enter，
+ * 或者鼠标点到别处（onDown 里会 commitText）。
  *
  * 必须先看 isComposing：中文输入法选词时按回车是「确认候选词」，
  * 不是「确认这段文字」。不判这一下，打一半的拼音会被直接提交。
  */
-function onTextEnter(e: KeyboardEvent): void {
+function onTextKey(e: KeyboardEvent): void {
   if (e.isComposing || e.keyCode === 229) return
-  e.preventDefault()
-  e.stopPropagation()
-  commitText()
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault()
+    e.stopPropagation()
+    commitText()
+  }
 }
 
 /** 输入框里的 Esc：输入法正在组词时，这一次 Esc 归输入法。 */
@@ -1367,17 +1432,19 @@ onBeforeUnmount(() => {
       />
     </template>
 
-    <!-- 文字输入 -->
-    <input
+    <!-- 文字输入：多行 + 随内容变大（textarea 才能换行，尺寸由 fitTextBox 算） -->
+    <textarea
       v-if="textBox"
       ref="textInputRef"
       v-model="textValue"
       class="text-input"
       :style="textBoxStyle"
-      placeholder="输入文字后回车"
+      :placeholder="TEXT_PLACEHOLDER"
+      rows="1"
+      wrap="off"
       autocomplete="off"
       spellcheck="false"
-      @keydown.enter="onTextEnter"
+      @keydown="onTextKey"
       @keydown.esc="onTextEsc"
       @pointerdown.stop
       @click.stop
@@ -1648,19 +1715,34 @@ onBeforeUnmount(() => {
   position: absolute;
   /* 高于工具栏（6）：贴边输入时不能被工具栏压住。 */
   z-index: 7;
-  min-width: 160px;
+  /* 宽高由脚本按内容实时算（输入框随文字长），这里只管外观。
+     padding / 字号 / 行高必须与 TEXT_PAD_*、TEXT_FONT_* 保持一致，
+     否则算出来的尺寸套不住内容。 */
+  box-sizing: border-box;
+  margin: 0;
   padding: 4px 8px;
   border: 1px solid #0af;
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.85);
   color: #fff;
   font-family: var(--font-body);
-  /* 与落到画布上的字号一致（20 DIP），输入时看到的就是最终效果。 */
+  /* 与落到画布上的文字完全一致（600 / 20 DIP）：输入时看到的就是最终效果。
+     全局样式里 textarea 是 width: 100% 且字重 400，这里必须都盖掉。 */
   font-size: 20px;
+  font-weight: 600;
   outline: none;
+  /* 多行输入：不自动折行（宽度按最长的一行长），也不显示 resize 手柄 */
+  white-space: pre;
+  overflow: auto;
+  resize: none;
   /* 覆盖层的 user-select: none 不能传染给输入框，否则改不了已输入的字符。 */
   user-select: text;
   cursor: text;
+}
+
+/* 焦点环跟着覆盖层的强调色（#0af），不要用全局那条绿色 ring。 */
+.text-input:focus {
+  box-shadow: 0 0 0 3px rgba(0, 170, 255, 0.25);
 }
 
 /* 放大镜：贴在指针右下方，压在所有层之上；不接收鼠标事件。 */
