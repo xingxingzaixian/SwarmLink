@@ -72,6 +72,15 @@ type Deps struct {
 	Interfaces   func() []string
 	// SeedSnapshot 由组合根注入（避免本包依赖 udp 适配器的具体类型）。
 	SeedSnapshot func() []SeedDTO
+	// Capturer 是「抓本机屏幕」的平台能力（由组合根注入实现）。
+	//
+	// 走接口而不是直接 import screencap 适配器：红线 R2 规定适配器之间
+	// 禁止互引，本包要 import 它就等于破坏架构。
+	Capturer ports.ScreenCapturer
+	// Overlay 是「开一个覆盖层窗口」这项壳层能力（由组合根注入实现）。
+	//
+	// 交互式截图要铺一层全屏窗口在每块显示器上，选区与标注都在那层窗口里做。
+	Overlay OverlayHost
 
 	// SetActiveConv 由组合根注入：前端上报「用户正在看哪个会话」，
 	// 提示决策据此区分「正看着这个会话（不打扰）」与「别的会话来消息（要提示）」。
@@ -96,6 +105,7 @@ type ServiceSet struct {
 	Search     *SearchService
 	Update     *UpdateService
 	Appearance *AppearanceService
+	Screenshot *ScreenshotService
 }
 
 // NewServices 构造服务集合。
@@ -111,6 +121,7 @@ func NewServices(d Deps) *ServiceSet {
 		Search:     &SearchService{d: d},
 		Update:     &UpdateService{d: d},
 		Appearance: NewAppearanceService(d),
+		Screenshot: &ScreenshotService{d: d},
 	}
 }
 
@@ -168,6 +179,9 @@ func (s *SettingsService) Get() SettingsDTO {
 		UpdateEnabled:          c.Update.LANEnabled,
 		UpdateMode:             c.Update.Mode,
 		UpdateAutoInstallHours: int(c.Update.AutoInstallAfter.Std() / time.Hour),
+
+		ScreenshotEnabled:  c.Screenshot.Enabled,
+		ScreenshotLastMode: c.Screenshot.LastMode,
 	}
 }
 
@@ -206,6 +220,13 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	// 不存在「老前端不带这两个字段」的版本错配。
 	c.Notify.Sound = in.NotifySound
 	c.Notify.MinimizeToTray = in.NotifyMinimizeToTray
+
+	// 截屏总开关同样【无条件】赋值。
+	//
+	// 【不要】在这里写 last_mode：它的写者是 ScreenshotService.RememberMode
+	// （用户显式选过模式之后才记）。两个写者会互相覆盖 —— 设置页保存时
+	// 会把用户刚选的模式抹回配置里的旧值。
+	c.Screenshot.Enabled = in.ScreenshotEnabled
 
 	// 局域网更新：同样【无条件】赋值。
 	//
@@ -1276,7 +1297,7 @@ func (s *GroupService) History(groupID string, limit int, before int64) ([]Messa
 	if err != nil {
 		return nil, err
 	}
-	stats := s.statsOf(groupID)
+	stats := statsOf(s.d, groupID)
 	out := make([]MessageDTO, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, fillDeliveryStat(ToMessageDTO(m), stats))
@@ -1285,11 +1306,15 @@ func (s *GroupService) History(groupID string, limit int, before int64) ([]Messa
 }
 
 // statsOf 取某群的送达统计；没有投递仓储或查询失败时返回 nil（表示不附加统计）。
-func (s *GroupService) statsOf(groupID string) map[string]ports.DeliveryStat {
-	if s.d.Deliveries == nil {
+//
+// 抽成包级函数而不是留在 GroupService 上：截屏草稿那条路（ScreenshotService）
+// 也要给群消息补同样的统计，而它不是 GroupService —— 两处各写一遍
+// 迟早会分叉。
+func statsOf(d Deps, groupID string) map[string]ports.DeliveryStat {
+	if d.Deliveries == nil {
 		return nil
 	}
-	stats, err := s.d.Deliveries.StatsByConv(message.GroupConvID(groupID))
+	stats, err := d.Deliveries.StatsByConv(message.GroupConvID(groupID))
 	if err != nil {
 		return nil
 	}
@@ -1298,7 +1323,7 @@ func (s *GroupService) statsOf(groupID string) map[string]ports.DeliveryStat {
 
 // withStats 给一条群消息补上送达统计。
 func (s *GroupService) withStats(dto MessageDTO, groupID string) MessageDTO {
-	return fillDeliveryStat(dto, s.statsOf(groupID))
+	return fillDeliveryStat(dto, statsOf(s.d, groupID))
 }
 
 // fillDeliveryStat 把统计填进 DTO；该消息没有记录（已送达/非群消息）则原样返回。

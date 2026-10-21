@@ -346,6 +346,36 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 发送截图草稿。
+   *
+   * 走独立的「已压缩图片」通道：抓屏时已经按 1920px / 480KB 压过一次，
+   * 若再走通用通道（sendImageBytes）会被压回 1280px / 300KB —— 4K 屏的
+   * 截图会糊掉一大截，而这正是截屏最不该损失的东西。
+   */
+  async function sendScreenshot(
+    conv: Conversation,
+    name: string,
+    mime: string,
+    width: number,
+    height: number,
+    dataB64: string
+  ): Promise<void> {
+    const api = await getApi()
+    const m = await api.sendScreenshotDraft(
+      conv.kind,
+      conv.kind === 'group' ? conv.convId : (conv.peerId ?? ''),
+      name,
+      mime,
+      width,
+      height,
+      dataB64
+    )
+    upsert(conv.convId, m)
+    previews.value = { ...previews.value, [conv.convId]: m }
+    bump(conv.convId, m.sentAt)
+  }
+
+  /**
    * 发送文件消息。
    *
    * 与文本发送共用 upsert/bump：文件消息同样会等到 chat:delivered 事件回来，
@@ -493,6 +523,7 @@ export const useChatStore = defineStore('chat', () => {
     send,
     sendImage,
     sendImageBytes,
+    sendScreenshot,
     sendFile,
     sendFolder,
     markDelivered

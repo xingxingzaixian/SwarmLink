@@ -561,3 +561,135 @@ type FileSink interface {
 	// Abort 清理临时文件。
 	Abort(h SinkHandle) error
 }
+
+// ---------------------------------------------------------------------------
+// 屏幕抓取（本地单帧截屏）
+// ---------------------------------------------------------------------------
+
+// ScreenImage 是一张抓到的屏幕图像（尚未编码的像素）。
+type ScreenImage struct {
+	// Width / Height 是像素尺寸，且是【物理像素】不是逻辑像素。
+	//
+	// 必须是物理像素：用户在 150% 缩放的屏幕上看到的是物理像素，
+	// 抓成逻辑像素会得到一张被系统插值放大过的糊图。
+	Width, Height int
+	// Data 是紧密排列的 RGBA8888 像素，长度恒为 Width*Height*4。
+	//
+	// 「紧密排列」是刻意的：各平台原始格式不同（Windows 的 DIB 是 BGRA、
+	// macOS 的 CGImage 可能带 stride），把它们统一到同一种布局，
+	// 免得每个消费方都要重新处理一遍 stride 与通道序。
+	Data []byte
+}
+
+// Display 是一块显示器在虚拟桌面上的位置与尺寸。
+//
+// 坐标系统一说明（这是整个截屏覆盖层能铺准屏幕的前提）：
+//
+//   - X / Y / Width / Height 是【DIP 逻辑像素】，也就是 Windows 的
+//     「按 96 DPI 折算过的像素」。它们与 Wails 窗口定位用的是同一套坐标
+//     （Wails v3 的 SetPosition/SetSize 走 DIP ↔ 物理的换算），
+//     所以覆盖层窗口可以直接用这组数字定位，不需要再做一次换算。
+//   - PhysicalWidth / PhysicalHeight 是【物理像素】，也就是真正被拍下来的
+//     那些像素。抓屏拿到的是物理像素，两者之比即 ScaleFactor。
+//
+// 虚拟桌面允许负坐标：副屏摆在主屏左边时 X 就是负的。
+type Display struct {
+	// Index 是本机内的显示器序号（从 0 开始），用于按序号抓取。
+	//
+	// 序号由实现自行枚举并保持稳定于「一次调用之内」—— 跨调用不保证，
+	// 因此它只适合做「枚举出来的列表里的第几块」的临时引用。
+	Index int
+	// X / Y 是该显示器左上角在虚拟桌面中的 DIP 坐标。
+	X, Y int
+	// Width / Height 是该显示器的 DIP 尺寸。
+	Width, Height int
+	// ScaleFactor 是 DIP → 物理像素的倍率（DPI/96）：150% 缩放 = 1.5。
+	ScaleFactor float64
+	// PhysicalWidth / PhysicalHeight 是该显示器的物理像素尺寸。
+	PhysicalWidth, PhysicalHeight int
+	// PhysicalX / PhysicalY 是该显示器左上角在虚拟桌面中的【物理像素】坐标。
+	//
+	// 单独给出，而不是让调用方拿 DIP 乘 ScaleFactor 反算：DIP ↔ 物理的
+	// 换算带舍入，反算一次可能与真实边界差一两个像素 —— 对「铺满屏幕的
+	// 覆盖层窗口」来说，这一两个像素就是屏幕上的一条缝。
+	PhysicalX, PhysicalY int
+}
+
+// ScreenCapturer 是「抓本机屏幕」这项平台能力。
+type ScreenCapturer interface {
+	// Capture 抓取【鼠标当前所在的那块显示器】的画面。
+	//
+	// excludeSelf 为真时，本应用自己的窗口不出现在画面里。
+	//
+	// 两条契约：
+	//
+	//  1. 平台中立 —— 这里不出现窗口句柄之类平台概念。句柄是平台专有的
+	//     （Windows HWND / macOS CGWindowID / X11 Window），把它放进接口
+	//     会让 domain 层认识 Win32。各平台自己枚举自己的窗口即可。
+	//
+	//  2. 不留残余状态 —— 实现对系统做的改动必须在返回前复原。
+	//     Windows 的显示亲和性（DDA）是【粘性】的：设上去就一直生效。
+	//     忘了复位的后果是用户此后用任何工具截图都拍不到本应用的窗口，
+	//     而且没有任何报错会提示他去找原因。
+	Capture(ctx context.Context, excludeSelf bool) (ScreenImage, error)
+
+	// Displays 枚举本机的所有显示器。
+	//
+	// 供「交互式截图」的覆盖层窗口定位使用：每块屏开一个全屏窗口，
+	// 窗口的位置与尺寸直接取这组 DIP 坐标。
+	Displays() ([]Display, error)
+
+	// CaptureDisplay 抓取【序号为 index 的那块显示器】的画面。
+	//
+	// 与 Capture 的区别只在「抓哪一块」：前者按鼠标位置选，后者按序号选。
+	// 之所以要按序号而不是按物理矩形，是因为 macOS 的 CoreGraphics
+	// 只能按 display ID 抓整块屏（CGDisplayCreateImage 不支持任意矩形），
+	// 按矩形抓会让 macOS 变成特例。
+	CaptureDisplay(ctx context.Context, index int, excludeSelf bool) (ScreenImage, error)
+}
+
+// 截屏模式。
+//
+// 放在 ports（domain 层）而不是 screencap 适配器包里，是因为服务层
+// （adapters/wails）要用到它们，而红线 R2 规定适配器之间禁止互引 ——
+// 让服务层去 import 适配器只为拿两个常量，是一次不必要的架构破坏。
+//
+// 这些是纯字符串常量，不违反红线 R1（domain 层零 I/O）。
+const (
+	// ScreenshotModeInteractive 交互式截图 —— 全屏变暗的覆盖层，
+	// 用户拖拽选区并可标注（矩形/箭头/画笔/文字/马赛克）。
+	//
+	// 这是主力模式：一整屏的截图往往不是用户真正想要的，
+	// 「框一块 + 圈出重点」才是。
+	ScreenshotModeInteractive = "interactive"
+	// ScreenshotModeKeepWindow 保留本应用窗口 —— 画面里能看到蜂群自己的界面。
+	ScreenshotModeKeepWindow = "keep_window"
+	// ScreenshotModeHideWindow 排除本应用窗口 —— 画面里没有蜂群自己的界面。
+	ScreenshotModeHideWindow = "hide_window"
+)
+
+// NormalizeScreenshotMode 把外部传入的模式归一成三个合法值之一。
+//
+// fallback 是「上次的模式」，在 mode 为空串时使用（主键单击的路径）。
+//
+// 兜底是 interactive：交互式是主力模式，也是唯一一个【不会】把
+// 用户自己不想给人看的东西（整个聊天窗口）框进去的模式。
+func NormalizeScreenshotMode(mode, fallback string) string {
+	switch mode {
+	case ScreenshotModeInteractive, ScreenshotModeKeepWindow, ScreenshotModeHideWindow:
+		return mode
+	}
+	switch fallback {
+	case ScreenshotModeInteractive, ScreenshotModeKeepWindow, ScreenshotModeHideWindow:
+		return fallback
+	}
+	return ScreenshotModeInteractive
+}
+
+// ScreenshotExcludesSelf 返回「该模式是否要排除本应用自己的窗口」。
+//
+// 交互式也算排除：那条流程在抓屏时同样把蜂群窗口排除了 ——
+// 覆盖层铺在屏幕上时，蜂群界面出现在被选区域里没有任何意义。
+func ScreenshotExcludesSelf(mode string) bool {
+	return NormalizeScreenshotMode(mode, ScreenshotModeKeepWindow) != ScreenshotModeKeepWindow
+}

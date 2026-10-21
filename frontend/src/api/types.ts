@@ -373,6 +373,83 @@ export interface Settings {
   updateMode: string
   /** 弹框后多少小时无操作自动安装；**0 = 永不**。 */
   updateAutoInstallHours: number
+
+  /** 截屏总开关（关闭后聊天窗口的截屏按钮不可用）。 */
+  screenshotEnabled: boolean
+  /**
+   * 上次使用的截屏模式：`keep_window`（保留本窗口）| `hide_window`（隐藏本窗口）。
+   *
+   * 它决定截屏按钮【主键】的行为；下拉箭头可以临时改选。
+   */
+  screenshotLastMode: string
+}
+
+/**
+ * 一张抓到的屏幕截图。
+ *
+ * 与 `Message` 里的图片消息不同：它还没进消息流，只是聊天输入框上方的
+ * 「草稿」—— 用户点发送之后才会变成一条图片消息。
+ */
+export interface Screenshot {
+  /** 图片类型（当前恒为 `image/jpeg`）。 */
+  mime: string
+  /** 图片宽度（像素）。 */
+  width: number
+  /** 图片高度（像素）。 */
+  height: number
+  /** 图片字节的 base64。 */
+  dataBase64: string
+}
+
+/**
+ * 一张贴在桌面上的图（「贴图」）。
+ *
+ * 它不是消息、也不进聊天：只是把刚才框的那块画面留在屏幕最上层，
+ * 方便一边看一边操作别的窗口。
+ */
+export interface PinImage {
+  /** 图片类型（`image/png` / `image/jpeg`，按字节头嗅探得出）。 */
+  mime: string
+  /** 1:1 显示时的窗口尺寸（DIP 逻辑像素），贴图窗口按它做缩放基准。 */
+  width: number
+  height: number
+  /** 图片字节的 base64。 */
+  dataBase64: string
+}
+
+/**
+ * 一次交互式截图的会话描述。
+ *
+ * 「交互式」= 全屏变暗的覆盖层 + 拖拽选区 + 标注（与微信/QQ 同一套交互）。
+ */
+export interface OverlaySession {
+  displays: OverlayDisplay[]
+}
+
+/** 一块显示器上的覆盖层窗口布局。 */
+export interface OverlayDisplay {
+  index: number
+  /** 窗口在虚拟桌面上的 DIP 位置与尺寸。 */
+  x: number
+  y: number
+  width: number
+  height: number
+  /** 这块屏的物理像素尺寸。 */
+  physicalWidth: number
+  physicalHeight: number
+  /** DIP → 物理像素的倍率（150% 缩放 = 1.5）。 */
+  scaleFactor: number
+}
+
+/** 覆盖层要显示的底图。 */
+export interface OverlayImage {
+  mime: string
+  /** 底图的物理像素尺寸。 */
+  width: number
+  height: number
+  /** DIP → 物理像素的倍率：前端据此换算鼠标坐标。 */
+  scaleFactor: number
+  dataBase64: string
 }
 
 /**
@@ -698,11 +775,108 @@ export interface SwarmApi {
    * 返回的 batchId 会出现在随后相关任务的 transfer:* 事件里。
    */
   shareDownload(shareId: string, paths: string[]): Promise<ShareDownload>
+
+  // 截屏（本地单帧）
+  /**
+   * 把截图另存到指定路径。
+   *
+   * `destPath` 由原生保存对话框给出。后端按字节头判断真实格式，
+   * 文件名没写扩展名时会自动补上 —— 另存为不该产出双击打不开的文件。
+   */
+  saveOverlay(dataB64: string, destPath: string): Promise<void>
+  /**
+   * 把选中的一块图贴到桌面上（置顶的独立窗口）。
+   *
+   * `displayIndex` / `offX` / `offY` 说明这块图在【哪块屏、屏内什么位置】：
+   * 后端据此把窗口摆回用户刚框的地方，而不是贴到别处去。
+   * 返回贴图 id（关它的时候要用）。
+   */
+  pinOverlay(
+    displayIndex: number,
+    dataB64: string,
+    width: number,
+    height: number,
+    offX: number,
+    offY: number
+  ): Promise<number>
+  /** 取一张贴图的内容（贴图窗口自己调）。 */
+  getPinImage(id: number): Promise<PinImage>
+  /** 关掉一张贴图（幂等：已经关掉的再关一次不算错）。 */
+  closePin(id: number): Promise<void>
+  /**
+   * 抓一张本机屏幕截图。
+   *
+   * `mode`：`keep_window`（画面保留蜂群窗口）| `hide_window`（画面排除蜂群窗口）。
+   * 传空串表示「用上次的模式」。
+   *
+   * 抓的是【鼠标当前所在的那块显示器】——多屏用户把鼠标移到另一块屏再截，
+   * 截到的就是另一块。
+   */
+  captureScreenshot(mode: string): Promise<Screenshot>
+  /**
+   * 记住用户显式选择的模式（截屏按钮下拉菜单选的那一次）。
+   *
+   * 与设置页的保存是两条路：设置页管「允不允许截屏」，这里管「上次用哪种」。
+   */
+  rememberScreenshotMode(mode: string): Promise<void>
+  /**
+   * 开始一次交互式截图：抓下所有屏幕，开出全屏的覆盖层窗口。
+   *
+   * 覆盖层铺在每一块显示器上，用户可以在任意一块屏上拖拽选区并标注。
+   *
+   * `mode` 只决定画面里要不要有本应用自己：
+   * `keep_window` 保留（主窗口一起入镜）、`hide_window` 先最小化主窗口
+   * 再抓屏（截图会话结束时恢复）。两者都是交互式。
+   */
+  beginCapture(mode: string): Promise<OverlaySession>
+  /** 取某块显示器的底图（覆盖层窗口自己调）。 */
+  getOverlayImage(index: number): Promise<OverlayImage>
+  /**
+   * 告诉后端「覆盖层已经画好第一帧了，可以显示了」。
+   *
+   * 窗口先以隐藏状态创建，就是为了避开加载期间那块白屏的闪烁。
+   */
+  overlayReady(index: number): Promise<void>
+  /**
+   * 把键盘焦点抢到本块屏的覆盖层窗口上。
+   *
+   * 多屏时每个屏各有一个覆盖层窗口，键盘焦点只可能在其中之一。
+   * 用户用鼠标在 A 屏选区、焦点却在 B 屏时，Esc / Enter 会被送错地方。
+   */
+  focusOverlay(index: number): Promise<void>
+  /** 提交选好并标注完的结果（base64 JPEG）。 */
+  commitOverlay(dataB64: string, width: number, height: number): Promise<void>
+  /** 放弃这次截图。 */
+  cancelOverlay(): Promise<void>
+  /**
+   * 把输入框里的截图草稿发成一条图片消息。
+   *
+   * 走独立通道而不是 `sendImageBytes`：那条路会按通用上限（1280px/300KB）
+   * 重新压一次，把抓屏时已经压好的 1920px 画质又削掉一截。
+   *
+   * `kind` 是会话类型（`group` 走群发，其余走单聊）；`convID` 在群聊时是
+   * 群 id，在单聊时是对端 node id。
+   */
+  sendScreenshotDraft(
+    kind: string,
+    convID: string,
+    name: string,
+    mime: string,
+    width: number,
+    height: number,
+    dataB64: string
+  ): Promise<Message>
 }
 
 /** 后端推送的事件名（与 internal/adapters/wails/eventbridge.go 保持一致）。 */
 export const EV = {
   peerUpdated: 'peer:updated',
+  /**
+   * 交互式截图完成：覆盖层选好并标注完，结果已就绪。
+   *
+   * 它来自覆盖层窗口，而要收下的是主窗口 —— 所以走事件而不是返回值。
+   */
+  screenshotReady: 'screenshot:ready',
   chatNewMessage: 'chat:new-message',
   chatDelivered: 'chat:delivered',
   groupUpdated: 'group:updated',

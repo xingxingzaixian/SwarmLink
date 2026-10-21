@@ -6,6 +6,7 @@ import * as ChatService from "./chatservice.js";
 import * as GroupService from "./groupservice.js";
 import * as NotifyService from "./notifyservice.js";
 import * as PeerService from "./peerservice.js";
+import * as ScreenshotService from "./screenshotservice.js";
 import * as SearchService from "./searchservice.js";
 import * as SettingsService from "./settingsservice.js";
 import * as ShareService from "./shareservice.js";
@@ -17,6 +18,7 @@ export {
     GroupService,
     NotifyService,
     PeerService,
+    ScreenshotService,
     SearchService,
     SettingsService,
     ShareService,
@@ -32,7 +34,12 @@ export type {
     GroupDTO,
     GroupMemberDTO,
     MessageDTO,
+    OverlayDisplayDTO,
+    OverlayImageDTO,
+    OverlaySessionDTO,
     PeerDTO,
+    PinImageDTO,
+    ScreenshotDTO,
     SeedDTO,
     SeedTestDTO,
     SelfCheckDTO,

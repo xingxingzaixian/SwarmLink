@@ -431,6 +431,80 @@ type SettingsDTO struct {
 	// 用小时而不是 Duration：设置页是数字输入框，而 TOML 里写 "4h"
 	// 对运维更直观 —— 两个面各用各的自然单位，服务层做换算。
 	UpdateAutoInstallHours int `json:"updateAutoInstallHours"`
+
+	// ScreenshotEnabled 是截屏总开关（关闭后聊天窗口的截屏按钮不可用）。
+	ScreenshotEnabled bool `json:"screenshotEnabled"`
+	// ScreenshotLastMode 是上次使用的截屏模式：
+	// keep_window（保留本窗口）| hide_window（隐藏本窗口）。
+	//
+	// 它只被【读】：设置页保存时不会写它 —— 写者是 ScreenshotService
+	// （用户显式选过模式之后才记），两个写者会互相覆盖。
+	ScreenshotLastMode string `json:"screenshotLastMode"`
+}
+
+// ScreenshotDTO 是一张抓到的屏幕截图。
+type ScreenshotDTO struct {
+	// MIME 是图片类型（当前恒为 image/jpeg）。
+	MIME string `json:"mime"`
+	// Width / Height 是图片的像素尺寸。
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	// DataBase64 是图片字节的 base64。
+	//
+	// 用 base64 字符串而不是 []byte：Wails 生成器把 []byte 映射成 TS 的
+	// `string | null`，参数类型与运行时编码之间会留下一次「猜」的机会。
+	DataBase64 string `json:"dataBase64"`
+}
+
+// OverlaySessionDTO 是一次交互式截图的会话描述。
+type OverlaySessionDTO struct {
+	// Displays 是每块显示器的覆盖层窗口布局。
+	Displays []OverlayDisplayDTO `json:"displays"`
+}
+
+// OverlayDisplayDTO 描述一块显示器上的覆盖层窗口。
+type OverlayDisplayDTO struct {
+	// Index 是显示器序号（与 GetOverlayImage 的入参对应）。
+	Index int `json:"index"`
+	// X / Y / Width / Height 是窗口在虚拟桌面上的 DIP 位置与尺寸。
+	//
+	// 前端主要用它做自检（覆盖层没铺满时能看出来），实际定位由后端完成。
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	// PhysicalWidth / PhysicalHeight 是这块屏的物理像素尺寸。
+	PhysicalWidth  int `json:"physicalWidth"`
+	PhysicalHeight int `json:"physicalHeight"`
+	// ScaleFactor 是 DIP → 物理像素的倍率（150% 缩放 = 1.5）。
+	ScaleFactor float64 `json:"scaleFactor"`
+}
+
+// OverlayImageDTO 是覆盖层要显示的底图。
+type OverlayImageDTO struct {
+	// MIME 是图片类型（当前恒为 image/jpeg）。
+	MIME string `json:"mime"`
+	// Width / Height 是底图的【物理像素】尺寸。
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	// ScaleFactor 是 DIP → 物理像素的倍率：前端据此把物理像素的画布
+	// 按 DIP 尺寸摆进窗口，鼠标坐标也按它换算回物理像素。
+	ScaleFactor float64 `json:"scaleFactor"`
+	// DataBase64 是底图字节的 base64。
+	DataBase64 string `json:"dataBase64"`
+}
+
+// PinImageDTO 是一张贴图的内容（贴图窗口按 id 取自己的那一张）。
+type PinImageDTO struct {
+	// MIME 是图片类型（PNG 或 JPEG，按字节头嗅探得出）。
+	MIME string `json:"mime"`
+	// Width / Height 是 1:1 显示时的窗口尺寸（DIP 逻辑像素）。
+	//
+	// 贴图窗口用它做缩放基准：窗口尺寸 = 基准尺寸 × 缩放比。
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	// DataBase64 是图片字节的 base64。
+	DataBase64 string `json:"dataBase64"`
 }
 
 // UpdatePeerDTO 是「局域网里版本更高」的一个候选源。

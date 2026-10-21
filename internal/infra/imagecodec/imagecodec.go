@@ -150,6 +150,15 @@ func Prepare(raw []byte, maxEdge, maxBytes int) (Inline, error) {
 	return Inline{}, ErrTooLarge
 }
 
+// Sniff 按魔数判断图片格式，返回格式名（jpeg/png/gif/webp/bmp）。
+//
+// 导出的原因：「已经压缩好的图片」那条路径（见 wails.ScreenshotService）
+// 需要在【不重新压缩】的前提下验证字节确实是图片 —— 而格式判断必须与
+// 通用路径用同一套魔数规则，否则就会出现「这条路上什么都能塞进去」。
+func Sniff(raw []byte) (string, error) {
+	return sniff(raw)
+}
+
 // sniff 按魔数判断格式。扩展名一律不信 —— 用户可以把任何文件改名成 .png。
 func sniff(raw []byte) (string, error) {
 	switch {

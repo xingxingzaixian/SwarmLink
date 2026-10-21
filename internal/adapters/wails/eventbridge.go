@@ -66,6 +66,12 @@ const (
 	// 窗口已经由外壳叫到前台，这里只负责让前端切到对应会话。
 	// 载荷：{ convId: string }，取不到会话时为空串。
 	EventSystemNotifyActivated = "notify:activated"
+	// EventScreenshotReady 表示「覆盖层里选好并标注完的截图」已经就绪。
+	//
+	// 它由覆盖层窗口所在的会话发出，而【要送到的是主窗口】——
+	// 主窗口据此把图放进聊天输入框上方的草稿行。
+	// 载荷：ScreenshotDTO。
+	EventScreenshotReady = "screenshot:ready"
 )
 
 // ProgressThrottle 是进度事件的最小间隔。

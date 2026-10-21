@@ -164,6 +164,74 @@ export interface MessageDTO {
 }
 
 /**
+ * OverlayDisplayDTO 描述一块显示器上的覆盖层窗口。
+ */
+export interface OverlayDisplayDTO {
+    /**
+     * Index 是显示器序号（与 GetOverlayImage 的入参对应）。
+     */
+    "index": number;
+
+    /**
+     * X / Y / Width / Height 是窗口在虚拟桌面上的 DIP 位置与尺寸。
+     * 
+     * 前端主要用它做自检（覆盖层没铺满时能看出来），实际定位由后端完成。
+     */
+    "x": number;
+    "y": number;
+    "width": number;
+    "height": number;
+
+    /**
+     * PhysicalWidth / PhysicalHeight 是这块屏的物理像素尺寸。
+     */
+    "physicalWidth": number;
+    "physicalHeight": number;
+
+    /**
+     * ScaleFactor 是 DIP → 物理像素的倍率（150% 缩放 = 1.5）。
+     */
+    "scaleFactor": number;
+}
+
+/**
+ * OverlayImageDTO 是覆盖层要显示的底图。
+ */
+export interface OverlayImageDTO {
+    /**
+     * MIME 是图片类型（当前恒为 image/jpeg）。
+     */
+    "mime": string;
+
+    /**
+     * Width / Height 是底图的【物理像素】尺寸。
+     */
+    "width": number;
+    "height": number;
+
+    /**
+     * ScaleFactor 是 DIP → 物理像素的倍率：前端据此把物理像素的画布
+     * 按 DIP 尺寸摆进窗口，鼠标坐标也按它换算回物理像素。
+     */
+    "scaleFactor": number;
+
+    /**
+     * DataBase64 是底图字节的 base64。
+     */
+    "dataBase64": string;
+}
+
+/**
+ * OverlaySessionDTO 是一次交互式截图的会话描述。
+ */
+export interface OverlaySessionDTO {
+    /**
+     * Displays 是每块显示器的覆盖层窗口布局。
+     */
+    "displays": OverlayDisplayDTO[] | null;
+}
+
+/**
  * PeerDTO 是节点列表项。
  * 
  * 注意：UI 必须同时展示「节点在线」（announce 维护）与「连接可用」（TCP 维护），
@@ -195,6 +263,53 @@ export interface PeerDTO {
      * 它是「局域网更新」判断谁更新的唯一输入，因此必须给到界面。
      */
     "appVersion"?: string;
+}
+
+/**
+ * PinImageDTO 是一张贴图的内容（贴图窗口按 id 取自己的那一张）。
+ */
+export interface PinImageDTO {
+    /**
+     * MIME 是图片类型（PNG 或 JPEG，按字节头嗅探得出）。
+     */
+    "mime": string;
+
+    /**
+     * Width / Height 是 1:1 显示时的窗口尺寸（DIP 逻辑像素）。
+     * 
+     * 贴图窗口用它做缩放基准：窗口尺寸 = 基准尺寸 × 缩放比。
+     */
+    "width": number;
+    "height": number;
+
+    /**
+     * DataBase64 是图片字节的 base64。
+     */
+    "dataBase64": string;
+}
+
+/**
+ * ScreenshotDTO 是一张抓到的屏幕截图。
+ */
+export interface ScreenshotDTO {
+    /**
+     * MIME 是图片类型（当前恒为 image/jpeg）。
+     */
+    "mime": string;
+
+    /**
+     * Width / Height 是图片的像素尺寸。
+     */
+    "width": number;
+    "height": number;
+
+    /**
+     * DataBase64 是图片字节的 base64。
+     * 
+     * 用 base64 字符串而不是 []byte：Wails 生成器把 []byte 映射成 TS 的
+     * `string | null`，参数类型与运行时编码之间会留下一次「猜」的机会。
+     */
+    "dataBase64": string;
 }
 
 /**
@@ -318,6 +433,20 @@ export interface SettingsDTO {
      * 对运维更直观 —— 两个面各用各的自然单位，服务层做换算。
      */
     "updateAutoInstallHours": number;
+
+    /**
+     * ScreenshotEnabled 是截屏总开关（关闭后聊天窗口的截屏按钮不可用）。
+     */
+    "screenshotEnabled": boolean;
+
+    /**
+     * ScreenshotLastMode 是上次使用的截屏模式：
+     * keep_window（保留本窗口）| hide_window（隐藏本窗口）。
+     * 
+     * 它只被【读】：设置页保存时不会写它 —— 写者是 ScreenshotService
+     * （用户显式选过模式之后才记），两个写者会互相覆盖。
+     */
+    "screenshotLastMode": string;
 }
 
 /**

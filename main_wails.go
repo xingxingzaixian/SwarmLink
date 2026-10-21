@@ -40,6 +40,7 @@ import (
 
 	"github.com/swarmlink/swarmlink/internal/adapters/config"
 	"github.com/swarmlink/swarmlink/internal/adapters/notify"
+	"github.com/swarmlink/swarmlink/internal/adapters/screencap"
 	"github.com/swarmlink/swarmlink/internal/adapters/systemnotify"
 	wadapter "github.com/swarmlink/swarmlink/internal/adapters/wails"
 	// capp 是 internal/app 的别名：本文件里 `app` 这个名字已经被 Wails 的
@@ -244,6 +245,11 @@ func main() {
 	}
 
 	// 2. 构造服务（纯 Go，不依赖 Wails）
+	//
+	// overlayHost 是「开一个覆盖层窗口」的能力（交互式截图要铺一层
+	// 全屏窗口在每块显示器上）。它必须在这里就注入 —— 但它要用的
+	// *application.App 是下一步才创建的，所以它内部留了一个延迟绑定的引用。
+	overlayHost := wadapter.NewWailsOverlayHost()
 	services := wadapter.NewServices(wadapter.Deps{
 		Self: wadapter.SelfInfo{
 			NodeID:      node.KP.NodeID(),
@@ -292,6 +298,10 @@ func main() {
 		Cfg:           node.Cfg,
 		ConfigDir:     node.ConfigDir,
 		LogPath:       logPath,
+		// 截屏：抓本机屏幕的平台能力（纯本地，无远端触发路径）。
+		Capturer: screencap.New(),
+		// 截屏：开覆盖层窗口的能力（选区与标注都在那层窗口里做）。
+		Overlay: overlayHost,
 	})
 
 	// 系统通知：一个 Wails 服务，但在本文件里只用它自己的两个方法（Send / OnActivated）。
@@ -319,6 +329,7 @@ func main() {
 			application.NewService(services.Search),
 			application.NewService(services.Update),
 			application.NewService(services.Appearance),
+			application.NewService(services.Screenshot),
 			application.NewService(sysNotify),
 		},
 		Assets: application.AssetOptions{
@@ -355,6 +366,9 @@ func main() {
 			},
 		},
 	})
+
+	// 覆盖层窗口宿主现在可以拿到 app 了（app 是上面才创建出来的）。
+	overlayHost.SetApp(app)
 
 	// 用户点了系统通知：把窗口叫到前台，并让前端切到对应会话。
 	//
@@ -442,6 +456,11 @@ func main() {
 		BackgroundColour: application.NewRGB(15, 7, 35),
 		URL:              "/",
 	})
+
+	// 主窗口交给覆盖层宿主：「隐藏本窗口」的截屏要先把它最小化，
+	// 截图会话结束时再恢复。按名字查窗口在这里行不通 —— Wails 的默认
+	// 窗口名是实现细节，直接给引用才稳。
+	overlayHost.SetMainWindow(win)
 
 	// 拖入文件的路径 → 前端。落在哪个区域由前端的 data-file-drop-target 决定，
 	// 这里只做搬运，不做业务判断（发给谁、能不能发，属于 UI 的决策）。

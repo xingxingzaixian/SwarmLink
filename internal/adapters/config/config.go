@@ -183,6 +183,30 @@ type Config struct {
 		// 就自动安装（对应凌晨无人值守）。"0s" 表示永不自动安装。
 		AutoInstallAfter Duration `toml:"auto_install_after"`
 	} `toml:"update"`
+
+	// Screenshot 是截屏（本地单帧）设置。
+	//
+	// 截屏是纯本地能力：用户自己按下按钮、抓自己的屏幕、发给对方。
+	// 它不涉及任何远端触发，因此不需要授权与确认（那属于「远程控制 /
+	// 屏幕共享」，本仓明确不做）。
+	Screenshot struct {
+		// Enabled 是总开关。关闭后聊天窗口里的截屏按钮不可用，
+		// 后端也会拒绝任何截屏请求 —— 企业在受管环境里可能要求禁用它。
+		//
+		// 默认值是 true，且【不要】在 applyDefaults 里用
+		// `if !c.Screenshot.Enabled { ... }` 回填：false 是用户的合法选择，
+		// 那样写会让「关掉开关」重启后自己打开（与 Notify/Update 同一个陷阱）。
+		Enabled bool `toml:"enabled"`
+		// LastMode 是上次使用的截屏模式：
+		//   interactive —— 交互式（选区 + 标注），主力模式
+		//   keep_window —— 整屏，画面里保留蜂群自己的窗口
+		//   hide_window —— 整屏，画面里排除蜂群自己的窗口
+		//
+		// 它决定「主键单击」的行为：用户多数时候不想每次都选一遍。
+		// 由 ScreenshotService 在用户【显式】选过模式后写入，
+		// 不经过 SettingsService.Save —— 那是设置页的通道，两个写者会打架。
+		LastMode string `toml:"last_mode"`
+	} `toml:"screenshot"`
 }
 
 // Default 返回带默认值的配置。
@@ -249,6 +273,12 @@ func Default() *Config {
 	c.Update.LANEnabled = true
 	c.Update.Mode = "prompt"
 	c.Update.AutoInstallAfter = Duration(4 * time.Hour)
+
+	// 截屏默认开启：它是纯本地能力，风险远低于远端控制。
+	// 默认模式是「交互式」—— 全屏变暗、拖拽选区、可标注，
+	// 这是真正好用的那个；两种「整屏」是快捷路径。
+	c.Screenshot.Enabled = true
+	c.Screenshot.LastMode = "interactive"
 
 	return c
 }
@@ -493,6 +523,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Update.AutoInstallAfter < 0 {
 		c.Update.AutoInstallAfter = 0
+	}
+	// 截屏模式：空串按默认（交互式）处理而不是报错 —— 老配置文件里
+	// 根本没有 [screenshot] 段，判成非法会让升级后的机器起不来。
+	switch c.Screenshot.LastMode {
+	case "", "interactive":
+		c.Screenshot.LastMode = "interactive"
+	case "keep_window", "hide_window":
+	default:
+		return fmt.Errorf("config: invalid screenshot.last_mode %q (want interactive|keep_window|hide_window)", c.Screenshot.LastMode)
 	}
 	return nil
 }

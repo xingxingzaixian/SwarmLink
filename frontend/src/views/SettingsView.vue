@@ -23,15 +23,18 @@ import { useAppearanceStore } from '../stores/appearance'
 import { usePeersStore } from '../stores/peers'
 import { useUiStore } from '../stores/ui'
 import { useUpdateStore } from '../stores/update'
+import { useScreenshotStore } from '../stores/screenshot'
 
 const ui = useUiStore()
 const update = useUpdateStore()
 const peers = usePeersStore()
 const appearance = useAppearanceStore()
+const shot = useScreenshotStore()
 
 type CatKey =
   | 'general'
   | 'notify'
+  | 'shot'
   | 'network'
   | 'connect'
   | 'transfer'
@@ -67,6 +70,12 @@ const CATS: Cat[] = [
     label: '提示与启动',
     icon: 'bell',
     desc: '提示音、托盘行为与开机自启。'
+  },
+  {
+    key: 'shot',
+    label: '截屏',
+    icon: 'camera',
+    desc: '截屏是纯本地能力：只有你自己按下按钮才会抓屏，别的节点无法触发。'
   },
   {
     key: 'network',
@@ -346,6 +355,9 @@ async function save(): Promise<void> {
     // 而「哪些项要重启才生效」不能因为弹层消失就丢掉 —— 用户合上设置、
     // 回聊天里又发现端口没变，那种困惑排查起来最费劲。
     ui.notify(needRestart.length ? `已保存，重启后生效：${needRestart.join('、')}` : '已保存')
+    // 截屏的「允不允许」变了，聊天窗口里的按钮状态要跟着变。
+    // （「上次用哪种模式」由聊天页自己管，这里不碰。）
+    void shot.syncFromSettings()
     ui.closePanel()
   } catch (e: any) {
     // 失败【不关】：用户要对着这条错误原地改。关掉弹层等于把错误一起关掉，
@@ -594,10 +606,6 @@ onMounted(load)
             />
           </label>
 
-          <p v-if="appearance.hasBackground" class="note appearance__hint appearance__hint--tight">
-            预览是缩略图，模糊在整窗里比这里更明显 —— 4–12px 通常就够把照片退成纹理而不糊掉正文。
-          </p>
-
           <p v-if="bgError" class="appearance__err">{{ bgError }}</p>
 
           <input
@@ -623,6 +631,28 @@ onMounted(load)
           <input v-model="settings.autoStart" type="checkbox" />
           <span>开机自启动</span>
         </label>
+      </section>
+
+      <section v-else-if="cat === 'shot'">
+        <label class="check">
+          <input v-model="settings.screenshotEnabled" type="checkbox" />
+          <span>允许截屏</span>
+        </label>
+        <p class="note">
+          关闭后聊天输入框上方的「截屏」按钮会变灰，本机也不再接受任何截屏请求。
+        </p>
+        <p class="note">
+          截屏是<b>纯本地</b>能力：只有你自己在聊天窗口按下按钮才会抓屏，
+          局域网里的其他节点无法触发它（本应用不做远程控制与屏幕共享）。
+        </p>
+        <p class="note">
+          默认的「交互式截图」会铺一层全屏遮罩：<b>拖拽框选</b>要截的区域，
+          还能画框、画箭头、写文字、打马赛克，确认后落进输入框上方的草稿。
+          下拉菜单里另有两种整屏截图（保留 / 隐藏蜂群自己的窗口）。
+        </p>
+        <p class="note">
+          截图会先落在输入框上方，确认后才作为图片消息发出 —— 聊天里的内容无法撤回。
+        </p>
       </section>
 
       <section v-else-if="cat === 'network'">

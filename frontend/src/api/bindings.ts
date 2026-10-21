@@ -38,7 +38,8 @@ import {
   ShareService,
   TransferService,
   UpdateService,
-  AppearanceService
+  AppearanceService,
+  ScreenshotService
 } from '../../bindings/github.com/swarmlink/swarmlink/internal/adapters/wails/index.js'
 import type {
   DiagnosticsDTO,
@@ -212,7 +213,42 @@ export const realApi: SwarmApi = {
   applyUpdateNow: async () => toUpdateState(await UpdateService.ApplyNow()),
   scheduleUpdate: async (atMillis) => toUpdateState(await UpdateService.Schedule(atMillis)),
   snoozeUpdate: async () => toUpdateState(await UpdateService.Snooze()),
-  cancelUpdate: async () => toUpdateState(await UpdateService.Cancel())
+  cancelUpdate: async () => toUpdateState(await UpdateService.Cancel()),
+
+  captureScreenshot: async (mode) => ScreenshotService.Capture(mode),
+  rememberScreenshotMode: async (mode) => {
+    await ScreenshotService.RememberMode(mode)
+  },
+  beginCapture: async (mode) => {
+    // Wails 生成的模型把数组标成可空（Go 侧的 nil slice），
+    // 这里收口成「不会是 null 的数组」：调用方拿到的 displays 一定是数组。
+    const s = await ScreenshotService.BeginCapture(mode)
+    return { displays: s.displays ?? [] }
+  },
+  getOverlayImage: async (index) => ScreenshotService.GetOverlayImage(index),
+  overlayReady: async (index) => {
+    await ScreenshotService.OverlayReady(index)
+  },
+  focusOverlay: async (index) => {
+    await ScreenshotService.FocusOverlay(index)
+  },
+  commitOverlay: async (dataB64, width, height) => {
+    await ScreenshotService.CommitOverlay(dataB64, width, height)
+  },
+  cancelOverlay: async () => {
+    await ScreenshotService.CancelOverlay()
+  },
+  saveOverlay: async (dataB64, destPath) => {
+    await ScreenshotService.SaveOverlay(dataB64, destPath)
+  },
+  pinOverlay: async (displayIndex, dataB64, width, height, offX, offY) =>
+    ScreenshotService.PinOverlay(displayIndex, dataB64, width, height, offX, offY),
+  getPinImage: async (id) => ScreenshotService.GetPinImage(id),
+  closePin: async (id) => {
+    await ScreenshotService.ClosePin(id)
+  },
+  sendScreenshotDraft: async (kind, convID, name, mime, width, height, dataB64) =>
+    ScreenshotService.SendDraft(kind, convID, name, mime, width, height, dataB64)
 }
 
 /**

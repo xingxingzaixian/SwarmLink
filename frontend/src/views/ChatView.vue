@@ -15,11 +15,13 @@ import EmojiPicker from '../components/EmojiPicker.vue'
 import GroupInfoPanel from '../components/GroupInfoPanel.vue'
 import Icon from '../components/Icon.vue'
 import ImageLightbox from '../components/ImageLightbox.vue'
-import type { Message } from '../api/types'
+import { getApi } from '../api'
+import type { Message, Screenshot } from '../api/types'
 import { useFileSend } from '../composables/useFileSend'
 import { useChatStore } from '../stores/chat'
 import { useGroupStore } from '../stores/group'
 import { usePeersStore } from '../stores/peers'
+import { SHOT_HIDE, SHOT_KEEP, useScreenshotStore } from '../stores/screenshot'
 import { useUiStore } from '../stores/ui'
 import { canClear, canRestore } from '../utils/clearView'
 import { dateLabel } from '../utils/format'
@@ -245,6 +247,9 @@ watch(
   () => chat.activeConvId,
   () => {
     atBottom.value = true
+    // 草稿是「给上一个会话看的」，切走就丢掉：
+    // 留着它，用户在另一个会话里点发送就会把图发给错的人。
+    shot.clearDraft()
     void toBottom()
   }
 )
@@ -257,7 +262,11 @@ watch(
   }
 )
 
-onMounted(() => void toBottom())
+onMounted(() => {
+  void toBottom()
+  // 截屏的「允不允许」与「上次用哪种模式」从设置里读一次。
+  void shot.syncFromSettings()
+})
 
 // ---------------------------------------------------------------- 跳转定位
 
@@ -320,14 +329,39 @@ watch(draft, () => void nextTick(autoGrow))
 async function submit(): Promise<void> {
   const c = conv.value
   const text = draft.value
-  if (!c || !text.trim()) return
+  const pending = shotDraft.value
+  if (!c || (!text.trim() && !pending)) return
   draft.value = ''
   await nextTick(autoGrow)
-  try {
-    await chat.send(c, text)
-  } catch (e: any) {
-    chat.error = String(e?.message ?? e)
-    draft.value = text
+
+  // 草稿优先：先发图，再发文字（若文字非空）。
+  //
+  // 两步分开 try：图失败时草稿必须留下（否则用户白截一次），
+  // 而文字失败时图已经发出去了，不该再放回去（否则会重复发图）。
+  if (pending) {
+    try {
+      await chat.sendScreenshot(
+        c,
+        shotName.value,
+        pending.mime,
+        pending.width,
+        pending.height,
+        pending.dataBase64
+      )
+      shot.clearDraft()
+    } catch (e: any) {
+      chat.error = String(e?.message ?? e) || '发送截图失败'
+      draft.value = text
+      return
+    }
+  }
+  if (text.trim()) {
+    try {
+      await chat.send(c, text)
+    } catch (e: any) {
+      chat.error = String(e?.message ?? e)
+      draft.value = text
+    }
   }
   void toBottom()
 }
@@ -404,39 +438,80 @@ async function insertEmoji(ch: string): Promise<void> {
   void autoGrow()
 }
 
-/**
- * 粘贴图片。
- *
- * 剪贴板里的 File 只有 Blob、没有本地路径，因此走 base64 字节入口
- * （与「选文件」不同：那条路有真实路径，可以让 Go 侧直接读盘）。
- * 纯文本粘贴不拦截，交给浏览器默认行为。
- */
-async function onPaste(e: ClipboardEvent): Promise<void> {
-  const c = conv.value
-  if (!c) return
-  const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith('image/'))
-  if (!files.length) return
+// ---------------------------------------------------------------- 截屏
 
-  e.preventDefault()
-  for (const f of files) {
-    try {
-      const bytes = new Uint8Array(await f.arrayBuffer())
-      await chat.sendImageBytes(c, f.name || 'clipboard.png', toBase64(bytes))
-    } catch (err: any) {
-      ui.notify(String(err?.message ?? err) || '粘贴图片失败')
-    }
+const shot = useScreenshotStore()
+
+/**
+ * 待发送的截图草稿（null = 没有草稿）。
+ *
+ * 它在 store 里而不是局部状态：交互式截图的结果是由【覆盖层窗口】
+ * 提交后经事件送回来的，跨窗口，局部状态接不住。
+ * 至于「切换会话就丢弃」，由下面的 watch 负责 —— 那是行为，
+ * 不是存储位置的问题。
+ */
+const shotDraft = computed(() => shot.draft)
+/** 正在抓屏（避免连点触发两次截图）。 */
+const shotBusy = ref(false)
+/**
+ * 上一次用的截屏模式。
+ *
+ * 只服务于「重截」：草稿是某个模式截出来的，重截应当沿用它，
+ * 而不是让用户再选一次。
+ */
+const lastShotMode = ref(SHOT_HIDE)
+
+/** 草稿的 data URL（缩略图用）。 */
+const shotPreview = computed(() => {
+  const d = shotDraft.value
+  if (!d || !d.dataBase64) return ''
+  return `data:${d.mime};base64,${d.dataBase64}`
+})
+
+/** 草稿文件名（发给对端时用；也让人一眼知道这是什么时候截的）。 */
+const shotName = computed(() => {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `截屏-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`
+})
+
+/**
+ * 截一张屏（交互式）。
+ *
+ * 两个入口只差一件事：画面里要不要有蜂群自己。
+ *   keep_window —— 主窗口留在原处，抓屏时一起拍进去
+ *   hide_window —— 先把主窗口最小化，确认收起后再抓屏，会话结束时恢复
+ *
+ * 两者都会开出覆盖层：选区、标注、贴图、另存为都在那一层里做。
+ * 完成后统一经 screenshot:ready 事件送回，落进输入框上方的草稿 ——
+ * 所以这里【不】直接设置草稿。
+ *
+ * 失败时给出一句能照着做的原因，而不是「截屏失败」—— 后端已经把
+ * 「设置里关掉了」「平台不支持」「Wayland 不行」这些分别说了出来。
+ */
+async function captureShot(mode: string): Promise<void> {
+  const c = conv.value
+  if (!c || shotBusy.value) return
+  shotBusy.value = true
+  lastShotMode.value = mode
+  try {
+    const api = await getApi()
+    await api.beginCapture(mode)
+  } catch (e: any) {
+    ui.notify(String(e?.message ?? e) || '截屏失败')
+  } finally {
+    shotBusy.value = false
   }
-  void toBottom()
 }
 
-/** Uint8Array → base64。分块转换：一次性展开大数组会顶爆调用栈。 */
-function toBase64(bytes: Uint8Array): string {
-  const CHUNK = 0x8000
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
-  }
-  return btoa(binary)
+/** 丢掉草稿。 */
+function discardShot(): void {
+  shot.clearDraft()
+}
+
+/** 重截：沿用上一次的模式，直接覆盖草稿。 */
+async function reshoot(): Promise<void> {
+  await captureShot(lastShotMode.value)
 }
 
 // ---------------------------------------------------------------- 发送文件
@@ -488,13 +563,9 @@ async function restoreView(): Promise<void> {
   <main class="pane-chat" data-file-drop-target="chat">
     <header class="chat-head">
       <template v-if="conv">
-        <Avatar
-          :seed="isGroup ? conv.convId : peer?.nodeId || conv.convId"
-          :name="title"
-          :size="40"
+        <Avatar :seed="isGroup ? conv.convId : peer?.nodeId || conv.convId" :name="title" :size="40"
           :shape="isGroup ? 'square' : 'circle'"
-          :online="isGroup ? null : peer ? peer.connected || peer.online : null"
-        />
+          :online="isGroup ? null : peer ? peer.connected || peer.online : null" />
         <div class="head-main" :class="{ clickable: isGroup }" @click="openInfo">
           <div class="head-title nowrap">
             {{ title }}
@@ -515,35 +586,20 @@ async function restoreView(): Promise<void> {
         </div>
       </div>
       <div class="head-actions">
-        <button
-          v-if="isGroup"
-          class="icon-btn"
-          title="群信息 / 成员管理"
-          aria-label="群信息"
-          @click="openInfo"
-        >
+        <button v-if="isGroup" class="icon-btn" title="群信息 / 成员管理" aria-label="群信息" @click="openInfo">
           <Icon name="info" :size="18" />
         </button>
         <!-- 共享中心入口：与其他全局功能（设置/调试/传输）不同，这个是【日常会用】
              的功能，藏在头像菜单里等于没有 —— 因此常驻顶栏，与主题切换并排。
              带文字而不是纯图标：共享/上传类的图标在中文语境里认不出是「共享文件」，
              而「认不出」正是它原来没人发现的原因。 -->
-        <button
-          class="btn btn-soft share-entry"
-          :class="{ on: ui.panel === 'share' }"
-          title="共享中心：发布目录给可见范围内的人，或下载他人的共享"
-          aria-label="打开共享中心"
-          @click="ui.openPanel('share')"
-        >
+        <button class="btn btn-soft share-entry" :class="{ on: ui.panel === 'share' }"
+          title="共享中心：发布目录给可见范围内的人，或下载他人的共享" aria-label="打开共享中心" @click="ui.openPanel('share')">
           <Icon name="share" :size="15" />
           <span>共享中心</span>
         </button>
-        <button
-          class="icon-btn"
-          :title="ui.theme === 'light' ? '切换到深色主题' : '切换到浅色主题'"
-          :aria-label="ui.theme === 'light' ? '切换到深色主题' : '切换到浅色主题'"
-          @click="ui.toggleTheme()"
-        >
+        <button class="icon-btn" :title="ui.theme === 'light' ? '切换到深色主题' : '切换到浅色主题'"
+          :aria-label="ui.theme === 'light' ? '切换到深色主题' : '切换到浅色主题'" @click="ui.toggleTheme()">
           <Icon :name="ui.theme === 'light' ? 'moon' : 'sun'" :size="18" />
         </button>
       </div>
@@ -596,150 +652,110 @@ async function restoreView(): Promise<void> {
         <!-- data-msg-id 是「跳转定位」的锚点：滚动时靠它在 DOM 里找回这条消息
              （不能按顺序索引 —— 消息列表随时被 upsert/筛选改变）。
              anchor 决定要不要上那 2s 的目标高亮。 -->
-        <ChatBubble
-          v-else
-          :data-msg-id="it.m.msgId"
-          :anchor="chat.anchorMsgId === it.m.msgId"
-          :message="it.m"
-          :out="it.m.direction === 'out'"
-          :show-sender="isGroup"
-          :tail="it.tail"
-          :first="it.first"
-          :sender-name="peers.nameOf(it.m.senderId)"
-          :sender-seed="it.m.senderId"
-          @zoom="(m) => (zoomed = m)"
-          @quote="quoteMessage"
-        />
+        <ChatBubble v-else :data-msg-id="it.m.msgId" :anchor="chat.anchorMsgId === it.m.msgId" :message="it.m"
+          :out="it.m.direction === 'out'" :show-sender="isGroup" :tail="it.tail" :first="it.first"
+          :sender-name="peers.nameOf(it.m.senderId)" :sender-seed="it.m.senderId" @zoom="(m) => (zoomed = m)"
+          @quote="quoteMessage" />
       </template>
     </div>
 
     <footer class="composer">
       <div class="tools">
-        <button
-          class="icon-btn"
-          :disabled="!conv || sending || groupDissolved"
-          :title="groupDissolved ? '群已解散' : '发送文件'"
-          aria-label="发送文件"
-          @click="attach"
-        >
+        <button class="icon-btn" :disabled="!conv || sending || groupDissolved"
+          :title="groupDissolved ? '群已解散' : '发送文件'" aria-label="发送文件" @click="attach">
           <Icon name="paperclip" :size="17" />
         </button>
 
-        <button
-          class="icon-btn"
-          :disabled="!conv || sending || groupDissolved"
-          :title="groupDissolved ? '群已解散' : '发送文件夹'"
-          aria-label="发送文件夹"
-          @click="attachFolder"
-        >
+        <button class="icon-btn" :disabled="!conv || sending || groupDissolved"
+          :title="groupDissolved ? '群已解散' : '发送文件夹'" aria-label="发送文件夹" @click="attachFolder">
           <Icon name="folder" :size="17" />
         </button>
 
-        <button
-          class="icon-btn"
-          :disabled="!conv || groupDissolved"
-          :title="groupDissolved ? '群已解散' : '发送图片'"
-          aria-label="发送图片"
-          @click="attachImage"
-        >
+        <button class="icon-btn" :disabled="!conv || groupDissolved" :title="groupDissolved ? '群已解散' : '发送图片'"
+          aria-label="发送图片" @click="attachImage">
           <Icon name="image" :size="17" />
         </button>
 
+        <!-- 截屏：两个按钮，只差「画面里要不要有蜂群自己」。
+             两者都是交互式截图（覆盖层里选区 + 标注），完成后进输入框草稿。 -->
+        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy || !shot.enabled" :title="shot.enabled ? '截屏' : '截屏功能已在设置中关闭'
+          " aria-label="截屏（保留本窗口）" @click="captureShot(SHOT_KEEP)">
+          <Icon name="camera" :size="17" />
+        </button>
+        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy || !shot.enabled" :title="shot.enabled
+            ? '隐藏窗口截屏'
+            : '截屏功能已在设置中关闭'
+          " aria-label="截屏（隐藏本窗口）" @click="captureShot(SHOT_HIDE)">
+          <Icon name="cameraOff" :size="17" />
+        </button>
+
         <div class="emoji-wrap">
-          <button
-            class="icon-btn"
-            data-emoji-toggle
-            :disabled="!conv"
-            title="表情"
-            aria-label="插入表情"
-            @click="emojiOpen = !emojiOpen"
-          >
+          <button class="icon-btn" data-emoji-toggle :disabled="!conv" title="表情" aria-label="插入表情"
+            @click="emojiOpen = !emojiOpen">
             <Icon name="smile" :size="17" />
           </button>
-          <EmojiPicker
-            v-if="emojiOpen"
-            class="emoji-pop"
-            @pick="insertEmoji"
-            @close="emojiOpen = false"
-          />
+          <EmojiPicker v-if="emojiOpen" class="emoji-pop" @pick="insertEmoji" @close="emojiOpen = false" />
         </div>
 
-        <button
-          class="icon-btn"
-          :disabled="!conv || !canClear(chat.activeMessages.length)"
-          title="清空聊天区（不删除消息，可随时查看历史）"
-          aria-label="清空聊天区"
-          @click="clearView"
-        >
+        <button class="icon-btn" :disabled="!conv || !canClear(chat.activeMessages.length)" title="清空聊天区（不删除消息，可随时查看历史）"
+          aria-label="清空聊天区" @click="clearView">
           <Icon name="trash" :size="17" />
         </button>
 
-        <button
-          class="icon-btn"
-          :disabled="!conv || !canRestore(chat.clearedAtOf(conv.convId))"
-          title="查看历史（恢复显示被清空的消息）"
-          aria-label="查看历史"
-          @click="restoreView"
-        >
+        <button class="icon-btn" :disabled="!conv || !canRestore(chat.clearedAtOf(conv.convId))"
+          title="查看历史（恢复显示被清空的消息）" aria-label="查看历史" @click="restoreView">
           <Icon name="clock" :size="17" />
         </button>
 
         <span class="spacer" />
       </div>
 
+      <!-- 截屏草稿：截完先落在输入框上方，可丢可重截，点发送才发出去。
+           刻意不直接发：聊天里的内容无法撤回（见 ChatBubble 的说明），
+           而截屏是一个很容易误点的动作。 -->
+      <div v-if="shotDraft" class="shot-draft">
+        <img v-if="shotPreview" class="shot-draft__thumb" :src="shotPreview" alt="截屏草稿" />
+        <div class="shot-draft__meta">
+          <div class="shot-draft__name nowrap">{{ shotName }}</div>
+          <div class="shot-draft__size">
+            {{ shotDraft.width }}×{{ shotDraft.height }}
+          </div>
+        </div>
+        <div class="shot-draft__acts">
+          <button class="btn btn-soft" title="重新截一张" @click="reshoot">重截</button>
+          <button class="icon-btn" title="丢弃这张截图" aria-label="丢弃截图" @click="discardShot">
+            <Icon name="x" :size="15" />
+          </button>
+        </div>
+      </div>
+
       <div class="entry">
         <!-- @提及候选：贴着输入框上沿弹出，不占据正文空间 -->
         <div v-if="mentionCandidates.length" class="mention-pop">
-          <button
-            v-for="m in mentionCandidates"
-            :key="m.nodeId"
-            class="mention-item"
-            @click="pickMention(m.name)"
-          >
+          <button v-for="m in mentionCandidates" :key="m.nodeId" class="mention-item" @click="pickMention(m.name)">
             <Avatar :seed="m.nodeId" :name="m.name" :size="22" :online="null" />
             <span class="nowrap">{{ m.name }}</span>
           </button>
         </div>
 
-        <textarea
-          ref="draftEl"
-          v-model="draft"
-          class="scroll"
-          :disabled="!conv || groupDissolved"
-          rows="1"
-          :placeholder="
-            !conv
+        <textarea ref="draftEl" v-model="draft" class="scroll" :disabled="!conv || groupDissolved" rows="1"
+          :placeholder="!conv
               ? '先选择一个会话'
               : groupDissolved
                 ? '该群已解散'
                 : '输入消息…（Enter 发送，Shift+Enter 换行）'
-          "
-          @keydown="onKeydown"
-          @input="refreshMention"
-          @click="refreshMention"
-          @paste="onPaste"
-          @compositionstart="onCompositionStart"
-          @compositionend="onCompositionEnd"
-        />
-        <button
-          class="send"
-          :disabled="!conv || groupDissolved || !draft.trim()"
-          title="发送"
-          aria-label="发送"
-          @click="submit"
-        >
+            " @keydown="onKeydown" @input="refreshMention" @click="refreshMention" @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd" />
+        <button class="send" :disabled="!conv || groupDissolved || (!draft.trim() && !shotDraft)" title="发送"
+          aria-label="发送" @click="submit">
           <Icon name="send" :size="18" />
         </button>
       </div>
 
       <!-- 原生对话框不可用时的兜底（浏览器预览 / 无 GUI 环境） -->
       <div v-if="ui.pathInputVisible" class="fallback">
-        <input
-          v-model="pathInput"
-          class="mono"
-          placeholder="文件绝对路径，例如 D:\releases\build.zip"
-          @keydown.enter="sendTypedPath"
-        />
+        <input v-model="pathInput" class="mono" placeholder="文件绝对路径，例如 D:\releases\build.zip"
+          @keydown.enter="sendTypedPath" />
         <button class="btn btn-primary" @click="sendTypedPath">发送</button>
         <button class="btn btn-soft" @click="ui.hidePathInput()">取消</button>
       </div>
@@ -748,11 +764,7 @@ async function restoreView(): Promise<void> {
     <ImageLightbox v-if="zoomed" :message="zoomed" @close="zoomed = null" />
 
     <!-- 群信息面板（成员管理 / 改名 / 解散） -->
-    <GroupInfoPanel
-      v-if="infoOpen && activeGroup"
-      :group="activeGroup"
-      @close="infoOpen = false"
-    />
+    <GroupInfoPanel v-if="infoOpen && activeGroup" :group="activeGroup" @close="infoOpen = false" />
 
     <!-- 拖放高亮：file-drop-target-active 由 Wails 运行时在拖入时加上 -->
     <div class="drop-overlay">
@@ -936,10 +948,57 @@ async function restoreView(): Promise<void> {
   z-index: 20;
 }
 
+/* ---------------------------------------------------------------- 截屏 */
+
+/* 草稿行：缩略图 + 文件名 + 操作。 */
+.shot-draft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  border: 1px solid var(--divider);
+}
+
+.shot-draft__thumb {
+  width: 88px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: var(--r-sm);
+  background: var(--bg-base);
+  flex: 0 0 auto;
+}
+
+.shot-draft__meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shot-draft__name {
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+
+.shot-draft__size {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.shot-draft__acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
 /* 输入容器：边框与光晕都落在容器上（里面的 textarea 是裸的），
    否则会出现双层边框、且 focus 时只有文字框发光 */
 .entry {
-  position: relative; /* @提及候选框相对它定位 */
+  position: relative;
+  /* @提及候选框相对它定位 */
   display: flex;
   align-items: flex-end;
   gap: 10px;

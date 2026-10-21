@@ -307,7 +307,9 @@ export function createMockApi(): SwarmApi {
     autoStart: false,
     updateEnabled: true,
     updateMode: 'prompt',
-    updateAutoInstallHours: 4
+    updateAutoInstallHours: 4,
+    screenshotEnabled: true,
+    screenshotLastMode: 'keep_window'
   }
 
   // 种子 192.168.2.x 在 mock 里恒为失败：状态灯必须能演示出
@@ -904,6 +906,83 @@ export function createMockApi(): SwarmApi {
     // 也被真实执行到（例如 watch 写错了会在这里报错）。
     async setActiveConversation() {
       // 空实现：mock 里没有提示决策，收下即可
+    },
+    // 浏览器里抓不到本机屏幕。返回一张 1×1 的占位图：
+    // 让「截屏 → 草稿 → 发送」这条链路在 mock 模式下也能跑通，
+    // 而不是在中途抛错。
+    async captureScreenshot() {
+      return { mime: 'image/jpeg', width: 1, height: 1, dataBase64: '' }
+    },
+    async rememberScreenshotMode() {
+      // 空实现：mock 里没有配置落盘
+    },
+    async beginCapture() {
+      // mock 里没有真的屏幕可抓，也不该真的弹窗（也就不需要最小化主窗口）。
+      // 返回一块「假显示器」让调用方能走通流程。
+      return {
+        displays: [
+          {
+            index: 0,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            physicalWidth: 1920,
+            physicalHeight: 1080,
+            scaleFactor: 1
+          }
+        ]
+      }
+    },
+    async getOverlayImage() {
+      // 一张 1x1 的黑图：够让覆盖层跑通，不占地方。
+      return {
+        mime: 'image/jpeg',
+        width: 1,
+        height: 1,
+        scaleFactor: 1,
+        dataBase64: '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wgALAAABAQEBAREA/8QAFAABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAACD/2gAIAQEAAT8Af//Z'
+      }
+    },
+    async overlayReady() {
+      // 空实现：mock 里没有真窗口
+    },
+    async focusOverlay() {
+      // 空实现：mock 里没有真窗口
+    },
+    async commitOverlay() {
+      // 空实现：mock 里没有真窗口
+    },
+    async cancelOverlay() {
+      // 空实现：mock 里没有真窗口
+    },
+    async saveOverlay() {
+      // 空实现：mock 里没有真文件系统
+    },
+    async pinOverlay() {
+      // 空实现：mock 里没有真窗口。返回 0 让调用方走通「贴图后收起覆盖层」。
+      return 0
+    },
+    async getPinImage() {
+      // 一张 1x1 的占位图：够让贴图窗口跑通，不占地方。
+      return { mime: 'image/jpeg', width: 1, height: 1, dataBase64: '' }
+    },
+    async closePin() {
+      // 空实现：mock 里没有真窗口
+    },
+    async sendScreenshotDraft() {
+      // mock 里没有真实的图片消息可造：返回一条占位消息，
+      // 让「草稿 → 发送 → 气泡出现」这条链路在 mock 模式下也能走通。
+      return {
+        msgId: `mock-shot-${Date.now()}`,
+        convId: '',
+        senderId: 'self',
+        direction: 'out',
+        content: '',
+        msgType: 'image',
+        state: 'sent',
+        sentAt: Date.now()
+      }
     },
     async runSelfCheck(): Promise<SelfCheck> {
       const n = settings.seeds.length

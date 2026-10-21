@@ -3,6 +3,7 @@ import { useChatStore } from '../stores/chat'
 import { useDebugStore } from '../stores/debug'
 import { useGroupStore } from '../stores/group'
 import { usePeersStore } from '../stores/peers'
+import { useScreenshotStore } from '../stores/screenshot'
 import { useShareStore } from '../stores/share'
 import { useTransferStore } from '../stores/transfer'
 import { useUiStore } from '../stores/ui'
@@ -16,6 +17,7 @@ import {
   type FilesDroppedEvent,
   type Message,
   type Peer,
+  type Screenshot,
   type SystemNotifyEvent,
   type UpdateState
 } from '../api/types'
@@ -302,6 +304,11 @@ export function registerEvents(): void {
   // 而漏掉一帧的后果是弹框不出现 / 进度卡住。
   on(EV.updateState, (data: UpdateState) => {
     if (data?.phase) useUpdateStore().apply(data)
+  })
+
+  // 交互式截图完成：覆盖层窗口提交后由后端广播过来，主窗口把它放进草稿。
+  on(EV.screenshotReady, (data: Screenshot) => {
+    useScreenshotStore().setDraft(data)
   })
 
   on(EV.configChanged, () => {
