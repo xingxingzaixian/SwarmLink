@@ -152,7 +152,7 @@ func (s *ScreenshotService) PinOverlay(displayIndex int, dataB64 string, width, 
 		Height: dipH,
 		// 窗口没了就把字节放掉：ClosePin 与「用户直接关窗口」两条路
 		// 都要落到这里，否则图片会一直留在内存里。
-		OnClose: func() {
+		onClose: func() {
 			s.mu.Lock()
 			delete(s.pins, id)
 			s.mu.Unlock()

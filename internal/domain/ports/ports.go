@@ -650,46 +650,15 @@ type ScreenCapturer interface {
 
 // 截屏模式。
 //
-// 放在 ports（domain 层）而不是 screencap 适配器包里，是因为服务层
-// （adapters/wails）要用到它们，而红线 R2 规定适配器之间禁止互引 ——
-// 让服务层去 import 适配器只为拿两个常量，是一次不必要的架构破坏。
-//
-// 这些是纯字符串常量，不违反红线 R1（domain 层零 I/O）。
+// 只有交互式截图一条路（覆盖层里选区 + 标注），模式只决定一件事：
+// 画面里要不要有蜂群自己。放在 ports（domain 层）而不是 screencap
+// 适配器包里，是因为服务层（adapters/wails）要用到它们，而红线 R2
+// 规定适配器之间禁止互引 —— 让服务层去 import 适配器只为拿两个常量，
+// 是一次不必要的架构破坏。这些是纯字符串常量，不违反红线 R1。
 const (
-	// ScreenshotModeInteractive 交互式截图 —— 全屏变暗的覆盖层，
-	// 用户拖拽选区并可标注（矩形/箭头/画笔/文字/马赛克）。
-	//
-	// 这是主力模式：一整屏的截图往往不是用户真正想要的，
-	// 「框一块 + 圈出重点」才是。
-	ScreenshotModeInteractive = "interactive"
 	// ScreenshotModeKeepWindow 保留本应用窗口 —— 画面里能看到蜂群自己的界面。
 	ScreenshotModeKeepWindow = "keep_window"
-	// ScreenshotModeHideWindow 排除本应用窗口 —— 画面里没有蜂群自己的界面。
+	// ScreenshotModeHideWindow 排除本应用窗口 —— 先最小化主窗口再抓屏，
+	// 画面里没有蜂群自己的界面。
 	ScreenshotModeHideWindow = "hide_window"
 )
-
-// NormalizeScreenshotMode 把外部传入的模式归一成三个合法值之一。
-//
-// fallback 是「上次的模式」，在 mode 为空串时使用（主键单击的路径）。
-//
-// 兜底是 interactive：交互式是主力模式，也是唯一一个【不会】把
-// 用户自己不想给人看的东西（整个聊天窗口）框进去的模式。
-func NormalizeScreenshotMode(mode, fallback string) string {
-	switch mode {
-	case ScreenshotModeInteractive, ScreenshotModeKeepWindow, ScreenshotModeHideWindow:
-		return mode
-	}
-	switch fallback {
-	case ScreenshotModeInteractive, ScreenshotModeKeepWindow, ScreenshotModeHideWindow:
-		return fallback
-	}
-	return ScreenshotModeInteractive
-}
-
-// ScreenshotExcludesSelf 返回「该模式是否要排除本应用自己的窗口」。
-//
-// 交互式也算排除：那条流程在抓屏时同样把蜂群窗口排除了 ——
-// 覆盖层铺在屏幕上时，蜂群界面出现在被选区域里没有任何意义。
-func ScreenshotExcludesSelf(mode string) bool {
-	return NormalizeScreenshotMode(mode, ScreenshotModeKeepWindow) != ScreenshotModeKeepWindow
-}

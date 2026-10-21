@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
 	"sync"
 
-	"github.com/swarmlink/swarmlink/internal/adapters/config"
 	"github.com/swarmlink/swarmlink/internal/domain/identity"
 	"github.com/swarmlink/swarmlink/internal/domain/message"
 	"github.com/swarmlink/swarmlink/internal/domain/ports"
@@ -60,74 +58,6 @@ type ScreenshotService struct {
 	pinSeq int
 }
 
-// Capture 抓一张屏幕截图。
-//
-// mode 取 ports.ScreenshotModeKeepWindow（保留本窗口）或
-// ports.ScreenshotModeHideWindow（隐藏本窗口）；传空串表示「用上次的模式」。
-func (s *ScreenshotService) Capture(mode string) (ScreenshotDTO, error) {
-	if s.d.Capturer == nil {
-		return ScreenshotDTO{}, fmt.Errorf("截屏功能不可用：本机没有可用的屏幕抓取实现")
-	}
-	if s.d.Cfg == nil || !s.d.Cfg.Screenshot.Enabled {
-		return ScreenshotDTO{}, fmt.Errorf("截屏功能已在设置中关闭")
-	}
-
-	// 模式归一：空串 → 上次的模式；非法值 → 交互式（兜底）。
-	m := ports.NormalizeScreenshotMode(mode, s.d.Cfg.Screenshot.LastMode)
-	if m == ports.ScreenshotModeInteractive {
-		// 交互式要开覆盖层窗口、要在前端做选区与标注，
-		// 这条「一张整屏」的路径做不到。
-		return ScreenshotDTO{}, fmt.Errorf("交互式截图要走覆盖层，不能用整屏抓取")
-	}
-
-	img, err := s.d.Capturer.Capture(context.Background(), ports.ScreenshotExcludesSelf(m))
-	if err != nil {
-		return ScreenshotDTO{}, err
-	}
-
-	raw, err := encodeScreenshot(img)
-	if err != nil {
-		return ScreenshotDTO{}, err
-	}
-
-	inline, err := imagecodec.Prepare(raw, screenshotMaxEdge, screenshotMaxBytes)
-	switch {
-	case errors.Is(err, imagecodec.ErrNotImage):
-		return ScreenshotDTO{}, fmt.Errorf("截屏结果不是可识别的图片")
-	case errors.Is(err, imagecodec.ErrTooLarge):
-		return ScreenshotDTO{}, fmt.Errorf("截屏结果过大，压缩后仍超出上限")
-	case err != nil:
-		return ScreenshotDTO{}, fmt.Errorf("处理截屏结果失败: %w", err)
-	}
-
-	return ScreenshotDTO{
-		MIME:       inline.MIME,
-		Width:      inline.W,
-		Height:     inline.H,
-		DataBase64: base64.StdEncoding.EncodeToString(inline.Data),
-	}, nil
-}
-
-// RememberMode 记住用户显式选择的模式（工具栏下拉菜单选的那一次）。
-//
-// 只写 last_mode，【不碰】enabled —— enabled 归设置页管
-// （SettingsService.Save）。两个写者会互相覆盖：设置页保存时会把用户
-// 刚选的模式抹成配置里的旧值。
-func (s *ScreenshotService) RememberMode(mode string) error {
-	if s.d.Cfg == nil {
-		return fmt.Errorf("配置尚未就绪")
-	}
-	m := ports.NormalizeScreenshotMode(mode, s.d.Cfg.Screenshot.LastMode)
-	if m == s.d.Cfg.Screenshot.LastMode {
-		return nil
-	}
-	s.d.Cfg.Screenshot.LastMode = m
-	if err := config.Save(s.d.ConfigDir, s.d.Cfg); err != nil {
-		return fmt.Errorf("保存截屏模式失败: %w", err)
-	}
-	return nil
-}
-
 // SendDraft 把输入框里的截图草稿发出去。
 //
 // 为什么单独一条路，而不是复用 ChatService.SendImageBytes：
@@ -146,9 +76,6 @@ func (s *ScreenshotService) SendDraft(
 	width, height int,
 	dataB64 string,
 ) (MessageDTO, error) {
-	if s.d.Cfg == nil || !s.d.Cfg.Screenshot.Enabled {
-		return MessageDTO{}, fmt.Errorf("截屏功能已在设置中关闭")
-	}
 	data, err := decodeImageBytes(dataB64)
 	if err != nil {
 		return MessageDTO{}, err

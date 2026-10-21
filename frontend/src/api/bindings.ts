@@ -215,10 +215,6 @@ export const realApi: SwarmApi = {
   snoozeUpdate: async () => toUpdateState(await UpdateService.Snooze()),
   cancelUpdate: async () => toUpdateState(await UpdateService.Cancel()),
 
-  captureScreenshot: async (mode) => ScreenshotService.Capture(mode),
-  rememberScreenshotMode: async (mode) => {
-    await ScreenshotService.RememberMode(mode)
-  },
   beginCapture: async (mode) => {
     // Wails 生成的模型把数组标成可空（Go 侧的 nil slice），
     // 这里收口成「不会是 null 的数组」：调用方拿到的 displays 一定是数组。

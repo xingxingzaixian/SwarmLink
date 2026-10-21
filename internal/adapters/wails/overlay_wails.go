@@ -220,9 +220,9 @@ func (h *WailsOverlayHost) OpenPin(opts PinOptions) error {
 	win.SetPosition(opts.X, opts.Y)
 	win.SetSize(opts.Width, opts.Height)
 	// 窗口被关掉时（用户 Alt+F4 也算）通知服务层释放图片字节。
-	if opts.OnClose != nil {
+	if opts.onClose != nil {
 		win.RegisterHook(events.Common.WindowClosing, func(*application.WindowEvent) {
-			opts.OnClose()
+			opts.onClose()
 		})
 	}
 	return nil

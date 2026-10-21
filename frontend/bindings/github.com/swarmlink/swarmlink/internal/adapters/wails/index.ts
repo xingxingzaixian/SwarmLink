@@ -39,7 +39,6 @@ export type {
     OverlaySessionDTO,
     PeerDTO,
     PinImageDTO,
-    ScreenshotDTO,
     SeedDTO,
     SeedTestDTO,
     SelfCheckDTO,

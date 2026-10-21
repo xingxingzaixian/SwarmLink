@@ -307,9 +307,7 @@ export function createMockApi(): SwarmApi {
     autoStart: false,
     updateEnabled: true,
     updateMode: 'prompt',
-    updateAutoInstallHours: 4,
-    screenshotEnabled: true,
-    screenshotLastMode: 'keep_window'
+    updateAutoInstallHours: 4
   }
 
   // 种子 192.168.2.x 在 mock 里恒为失败：状态灯必须能演示出
@@ -906,15 +904,6 @@ export function createMockApi(): SwarmApi {
     // 也被真实执行到（例如 watch 写错了会在这里报错）。
     async setActiveConversation() {
       // 空实现：mock 里没有提示决策，收下即可
-    },
-    // 浏览器里抓不到本机屏幕。返回一张 1×1 的占位图：
-    // 让「截屏 → 草稿 → 发送」这条链路在 mock 模式下也能跑通，
-    // 而不是在中途抛错。
-    async captureScreenshot() {
-      return { mime: 'image/jpeg', width: 1, height: 1, dataBase64: '' }
-    },
-    async rememberScreenshotMode() {
-      // 空实现：mock 里没有配置落盘
     },
     async beginCapture() {
       // mock 里没有真的屏幕可抓，也不该真的弹窗（也就不需要最小化主窗口）。

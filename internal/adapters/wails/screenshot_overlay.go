@@ -43,12 +43,15 @@ type PinOptions struct {
 	URL string
 	// X / Y / Width / Height 是窗口在虚拟桌面上的 DIP 位置与尺寸。
 	X, Y, Width, Height int
-	// OnClose 在窗口被关掉时回调（无论关它的是谁：用户 Alt+F4、系统
+	// onClose 在窗口被关掉时回调（无论关它的是谁：用户 Alt+F4、系统
 	// 关机、还是 ClosePin）。
 	//
 	// 存在的理由：图片字节存在 Go 侧，窗口没了就必须一起释放；
 	// 只在 ClosePin 里删会漏掉「用户直接关窗口」这条路。
-	OnClose func()
+	//
+	// 刻意不导出：它不是给前端看的字段（函数也没法 JSON 编码），
+	// 只是服务层与壳层之间的回调。
+	onClose func()
 }
 
 // OverlayHost 是「开一个覆盖层窗口」这项壳层能力的最小抽象。
@@ -132,9 +135,6 @@ func (s *ScreenshotService) BeginCapture(mode string) (OverlaySessionDTO, error)
 	if s.d.Capturer == nil {
 		return OverlaySessionDTO{}, fmt.Errorf("截屏功能不可用：本机没有可用的屏幕抓取实现")
 	}
-	if s.d.Cfg == nil || !s.d.Cfg.Screenshot.Enabled {
-		return OverlaySessionDTO{}, fmt.Errorf("截屏功能已在设置中关闭")
-	}
 	if s.d.Overlay == nil {
 		return OverlaySessionDTO{}, fmt.Errorf("截屏功能不可用：本机没有可用的覆盖层窗口实现")
 	}
@@ -150,8 +150,9 @@ func (s *ScreenshotService) BeginCapture(mode string) (OverlaySessionDTO, error)
 		return OverlaySessionDTO{}, fmt.Errorf("没有找到可截屏的显示器")
 	}
 
-	m := ports.NormalizeScreenshotMode(mode, ports.ScreenshotModeKeepWindow)
-	hide := m == ports.ScreenshotModeHideWindow
+	// 只有 hide_window 会把窗口收起来；其余（含空串、未知值）一律按
+	// 「保留本窗口」处理 —— 默认值不该动用户的窗口。
+	hide := mode == ports.ScreenshotModeHideWindow
 	if hide {
 		if err := s.d.Overlay.MinimizeMain(); err != nil {
 			return OverlaySessionDTO{}, fmt.Errorf("隐藏本窗口失败: %w", err)
@@ -277,9 +278,6 @@ func (s *ScreenshotService) GetOverlayImage(index int) (OverlayImageDTO, error) 
 // 结果以 base64 JPEG 交上来：裁剪与标注都在前端 Canvas 上完成
 // （同一套代码在三个平台通用），后端只做校验与投递。
 func (s *ScreenshotService) CommitOverlay(dataB64 string, width, height int) error {
-	if s.d.Cfg == nil || !s.d.Cfg.Screenshot.Enabled {
-		return fmt.Errorf("截屏功能已在设置中关闭")
-	}
 	data, err := decodeImageBytes(dataB64)
 	if err != nil {
 		return err

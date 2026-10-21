@@ -373,15 +373,6 @@ export interface Settings {
   updateMode: string
   /** 弹框后多少小时无操作自动安装；**0 = 永不**。 */
   updateAutoInstallHours: number
-
-  /** 截屏总开关（关闭后聊天窗口的截屏按钮不可用）。 */
-  screenshotEnabled: boolean
-  /**
-   * 上次使用的截屏模式：`keep_window`（保留本窗口）| `hide_window`（隐藏本窗口）。
-   *
-   * 它决定截屏按钮【主键】的行为；下拉箭头可以临时改选。
-   */
-  screenshotLastMode: string
 }
 
 /**
@@ -803,22 +794,6 @@ export interface SwarmApi {
   getPinImage(id: number): Promise<PinImage>
   /** 关掉一张贴图（幂等：已经关掉的再关一次不算错）。 */
   closePin(id: number): Promise<void>
-  /**
-   * 抓一张本机屏幕截图。
-   *
-   * `mode`：`keep_window`（画面保留蜂群窗口）| `hide_window`（画面排除蜂群窗口）。
-   * 传空串表示「用上次的模式」。
-   *
-   * 抓的是【鼠标当前所在的那块显示器】——多屏用户把鼠标移到另一块屏再截，
-   * 截到的就是另一块。
-   */
-  captureScreenshot(mode: string): Promise<Screenshot>
-  /**
-   * 记住用户显式选择的模式（截屏按钮下拉菜单选的那一次）。
-   *
-   * 与设置页的保存是两条路：设置页管「允不允许截屏」，这里管「上次用哪种」。
-   */
-  rememberScreenshotMode(mode: string): Promise<void>
   /**
    * 开始一次交互式截图：抓下所有屏幕，开出全屏的覆盖层窗口。
    *

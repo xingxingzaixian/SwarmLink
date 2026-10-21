@@ -289,30 +289,6 @@ export interface PinImageDTO {
 }
 
 /**
- * ScreenshotDTO 是一张抓到的屏幕截图。
- */
-export interface ScreenshotDTO {
-    /**
-     * MIME 是图片类型（当前恒为 image/jpeg）。
-     */
-    "mime": string;
-
-    /**
-     * Width / Height 是图片的像素尺寸。
-     */
-    "width": number;
-    "height": number;
-
-    /**
-     * DataBase64 是图片字节的 base64。
-     * 
-     * 用 base64 字符串而不是 []byte：Wails 生成器把 []byte 映射成 TS 的
-     * `string | null`，参数类型与运行时编码之间会留下一次「猜」的机会。
-     */
-    "dataBase64": string;
-}
-
-/**
  * SeedDTO 是种子状态项（含退避信息）。
  */
 export interface SeedDTO {
@@ -433,20 +409,6 @@ export interface SettingsDTO {
      * 对运维更直观 —— 两个面各用各的自然单位，服务层做换算。
      */
     "updateAutoInstallHours": number;
-
-    /**
-     * ScreenshotEnabled 是截屏总开关（关闭后聊天窗口的截屏按钮不可用）。
-     */
-    "screenshotEnabled": boolean;
-
-    /**
-     * ScreenshotLastMode 是上次使用的截屏模式：
-     * keep_window（保留本窗口）| hide_window（隐藏本窗口）。
-     * 
-     * 它只被【读】：设置页保存时不会写它 —— 写者是 ScreenshotService
-     * （用户显式选过模式之后才记），两个写者会互相覆盖。
-     */
-    "screenshotLastMode": string;
 }
 
 /**

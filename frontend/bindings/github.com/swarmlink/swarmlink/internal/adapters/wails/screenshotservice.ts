@@ -47,16 +47,6 @@ export function CancelOverlay(): $CancellablePromise<void> {
 }
 
 /**
- * Capture 抓一张屏幕截图。
- * 
- * mode 取 ports.ScreenshotModeKeepWindow（保留本窗口）或
- * ports.ScreenshotModeHideWindow（隐藏本窗口）；传空串表示「用上次的模式」。
- */
-export function Capture(mode: string): $CancellablePromise<$models.ScreenshotDTO> {
-    return $Call.ByID(1220362724, mode);
-}
-
-/**
  * ClosePin 关掉一张贴图（幂等：已经关掉的再关一次不算错）。
  */
 export function ClosePin(id: number): $CancellablePromise<void> {
@@ -122,17 +112,6 @@ export function OverlayReady(index: number): $CancellablePromise<void> {
  */
 export function PinOverlay(displayIndex: number, dataB64: string, width: number, height: number, offX: number, offY: number): $CancellablePromise<number> {
     return $Call.ByID(1873949307, displayIndex, dataB64, width, height, offX, offY);
-}
-
-/**
- * RememberMode 记住用户显式选择的模式（工具栏下拉菜单选的那一次）。
- * 
- * 只写 last_mode，【不碰】enabled —— enabled 归设置页管
- * （SettingsService.Save）。两个写者会互相覆盖：设置页保存时会把用户
- * 刚选的模式抹成配置里的旧值。
- */
-export function RememberMode(mode: string): $CancellablePromise<void> {
-    return $Call.ByID(3840339238, mode);
 }
 
 /**

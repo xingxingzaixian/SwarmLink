@@ -264,8 +264,6 @@ watch(
 
 onMounted(() => {
   void toBottom()
-  // 截屏的「允不允许」与「上次用哪种模式」从设置里读一次。
-  void shot.syncFromSettings()
 })
 
 // ---------------------------------------------------------------- 跳转定位
@@ -678,14 +676,12 @@ async function restoreView(): Promise<void> {
 
         <!-- 截屏：两个按钮，只差「画面里要不要有蜂群自己」。
              两者都是交互式截图（覆盖层里选区 + 标注），完成后进输入框草稿。 -->
-        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy || !shot.enabled" :title="shot.enabled ? '截屏' : '截屏功能已在设置中关闭'
-          " aria-label="截屏（保留本窗口）" @click="captureShot(SHOT_KEEP)">
+        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy" title="截屏" aria-label="截屏（保留本窗口）"
+          @click="captureShot(SHOT_KEEP)">
           <Icon name="camera" :size="17" />
         </button>
-        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy || !shot.enabled" :title="shot.enabled
-            ? '隐藏窗口截屏'
-            : '截屏功能已在设置中关闭'
-          " aria-label="截屏（隐藏本窗口）" @click="captureShot(SHOT_HIDE)">
+        <button class="icon-btn" :disabled="!conv || groupDissolved || shotBusy" title="隐藏窗口截屏" aria-label="截屏（隐藏本窗口）"
+          @click="captureShot(SHOT_HIDE)">
           <Icon name="cameraOff" :size="17" />
         </button>
 
@@ -740,12 +736,12 @@ async function restoreView(): Promise<void> {
 
         <textarea ref="draftEl" v-model="draft" class="scroll" :disabled="!conv || groupDissolved" rows="1"
           :placeholder="!conv
-              ? '先选择一个会话'
-              : groupDissolved
-                ? '该群已解散'
-                : '输入消息…（Enter 发送，Shift+Enter 换行）'
-            " @keydown="onKeydown" @input="refreshMention" @click="refreshMention" @compositionstart="onCompositionStart"
-          @compositionend="onCompositionEnd" />
+            ? '先选择一个会话'
+            : groupDissolved
+              ? '该群已解散'
+              : '输入消息…（Enter 发送，Shift+Enter 换行）'
+            " @keydown="onKeydown" @input="refreshMention" @click="refreshMention"
+          @compositionstart="onCompositionStart" @compositionend="onCompositionEnd" />
         <button class="send" :disabled="!conv || groupDissolved || (!draft.trim() && !shotDraft)" title="发送"
           aria-label="发送" @click="submit">
           <Icon name="send" :size="18" />

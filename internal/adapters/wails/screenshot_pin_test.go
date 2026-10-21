@@ -229,10 +229,10 @@ func TestPinReleasesImageWhenWindowCloses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PinOverlay: %v", err)
 	}
-	if len(host.pins) != 1 || host.pins[0].OnClose == nil {
+	if len(host.pins) != 1 || host.pins[0].onClose == nil {
 		t.Fatal("开窗时必须带上释放回调")
 	}
-	host.pins[0].OnClose()
+	host.pins[0].onClose()
 	if _, err := svc.GetPinImage(id); err == nil {
 		t.Fatal("窗口关掉之后字节必须释放")
 	}

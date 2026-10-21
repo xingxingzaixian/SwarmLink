@@ -431,15 +431,6 @@ type SettingsDTO struct {
 	// 用小时而不是 Duration：设置页是数字输入框，而 TOML 里写 "4h"
 	// 对运维更直观 —— 两个面各用各的自然单位，服务层做换算。
 	UpdateAutoInstallHours int `json:"updateAutoInstallHours"`
-
-	// ScreenshotEnabled 是截屏总开关（关闭后聊天窗口的截屏按钮不可用）。
-	ScreenshotEnabled bool `json:"screenshotEnabled"`
-	// ScreenshotLastMode 是上次使用的截屏模式：
-	// keep_window（保留本窗口）| hide_window（隐藏本窗口）。
-	//
-	// 它只被【读】：设置页保存时不会写它 —— 写者是 ScreenshotService
-	// （用户显式选过模式之后才记），两个写者会互相覆盖。
-	ScreenshotLastMode string `json:"screenshotLastMode"`
 }
 
 // ScreenshotDTO 是一张抓到的屏幕截图。

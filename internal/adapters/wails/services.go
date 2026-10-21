@@ -179,9 +179,6 @@ func (s *SettingsService) Get() SettingsDTO {
 		UpdateEnabled:          c.Update.LANEnabled,
 		UpdateMode:             c.Update.Mode,
 		UpdateAutoInstallHours: int(c.Update.AutoInstallAfter.Std() / time.Hour),
-
-		ScreenshotEnabled:  c.Screenshot.Enabled,
-		ScreenshotLastMode: c.Screenshot.LastMode,
 	}
 }
 
@@ -220,13 +217,6 @@ func (s *SettingsService) Save(in SettingsDTO) ([]string, error) {
 	// 不存在「老前端不带这两个字段」的版本错配。
 	c.Notify.Sound = in.NotifySound
 	c.Notify.MinimizeToTray = in.NotifyMinimizeToTray
-
-	// 截屏总开关同样【无条件】赋值。
-	//
-	// 【不要】在这里写 last_mode：它的写者是 ScreenshotService.RememberMode
-	// （用户显式选过模式之后才记）。两个写者会互相覆盖 —— 设置页保存时
-	// 会把用户刚选的模式抹回配置里的旧值。
-	c.Screenshot.Enabled = in.ScreenshotEnabled
 
 	// 局域网更新：同样【无条件】赋值。
 	//
