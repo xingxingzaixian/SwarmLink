@@ -11,6 +11,11 @@ name: Release
 # 触发方式：
 #   - push tag（v*）→ 打包并创建 GitHub Release
 #   - 手动 workflow_dispatch → 只打包并上传 artifact，不发 Release
+#
+# 发布说明：Release 正文来自仓库根目录的 CHANGELOG.md，按 tag 名整段取。
+# 不用 gh 的 --generate-notes：本仓直接往主分支提交、提交信息是给人读的长句，
+# 自动生成的「提交列表」对用户没有任何意义，而缺了小节时它还会悄悄退化成
+# 一份空说明 —— 那正是「发版了但没人知道改了什么」的成因。
 
 on:
   push:
@@ -216,13 +221,12 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      # 必须有：gh release create 是"在 git 仓库里"工作的 —— 它要解析 tag、
-      # 算 --generate-notes 的区间。这个作业里只有 download-artifact，
-      # 工作目录下没有 .git，gh 于是直接抛
+      # 必须有：gh release create 是"在 git 仓库里"工作的 —— 它要解析 tag。
+      # 这个作业里只有 download-artifact，工作目录下没有 .git 时 gh 会直接抛
       # "failed to run git: fatal: not a git repository"。
       #
-      # fetch-depth: 0 也不能省：--generate-notes 要从上一个 tag 一路读到本 tag，
-      # 默认的浅克隆只有 1 个 commit，会生成一份几乎空白的 notes。
+      # fetch-depth: 0：下面要 git describe 找上一个 tag，用来拼「完整变更」链接。
+      # 默认的浅克隆只有 1 个 commit，取不到任何 tag。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -233,6 +237,79 @@ jobs:
 
       - name: 列出待发布文件
         run: find dist -type f | sort
+
+      # ------------------------------------------------------------ 发布说明素材
+
+      # tag 与二进制里的版本号必须一致。
+      #
+      # 这不是洁癖：局域网更新只认内嵌的 internal/version.Version。tag 写成
+      # v0.1.6、二进制广播 0.1.5 时，装完仍然是旧版 → 再拉一次的死循环，
+      # 而 Release 页面上写着 0.1.6，现场根本对不上号。
+      - name: 核对 tag 与 internal/version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(awk -F'"' '/^const Version = "/{print $2; exit}' internal/version/version.go)
+          [ -n "$code" ] || { echo "::error::读不到 internal/version/version.go 里的 Version"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag=v$tag，internal/version.Version=$code"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag v$tag 与 internal/version.Version（$code）不一致：局域网更新会按版本号判断谁是新版，装完可能还是旧版。"
+            exit 1
+          fi
+
+      # 从 CHANGELOG.md 取本节 —— 只取「## [x.y.z]」到下一个「## [」之间的内容。
+      #
+      # 找不到就【失败】而不是退回 --generate-notes：一份自动生成的提交列表
+      # 看起来像说明、实际什么也没说，比没有说明更容易让人以为功能没做。
+      - name: 生成发布说明
+        env:
+          VERSION: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          awk -v ver="$VERSION" '
+            # 用 index 而不是正则：版本号里的 . 在正则里是通配符，
+            # 0.1.5 会误匹配 0x1y5 这种根本不存在的小节。
+            index($0, "## [" ver "]") == 1 { inside = 1; next }
+            inside && index($0, "## [") == 1 { exit }
+            inside { lines[++n] = $0 }
+            END {
+              # 掐掉首尾空行，避免正文一开头就是一大块留白
+              start = 1
+              while (start <= n && lines[start] ~ /^[[:space:]]*$/) start++
+              end = n
+              while (end >= start && lines[end] ~ /^[[:space:]]*$/) end--
+              for (i = start; i <= end; i++) print lines[i]
+            }
+          ' CHANGELOG.md > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md 里没有 ## [$VERSION] 小节。发布前请先补上本次更新（新增 / 修复 / 已知问题）。"
+            exit 1
+          fi
+
+          echo "== 发布说明 =="
+          cat notes.md
+
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            echo
+            echo '---'
+            echo
+            echo '### 安装说明'
+            echo
+            echo '- **macOS**：.dmg 未签名也未公证，首次打开会被 Gatekeeper 拦下。'
+            echo '  临时绕过：右键 → 打开，或 `xattr -cr /Applications/SwarmLink.app`。'
+            echo '- **Windows**：安装包没有 Authenticode 签名，SmartScreen 会提示「未知发布者」。'
+            echo '- 局域网内的机器会自动提示更新；也可以直接下载下面任一安装包覆盖安装。'
+            if [ -n "$prev" ]; then
+              echo
+              echo "**完整变更**：https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            fi
+          } >> notes.md
 
       - name: 创建 Release
         env:
@@ -275,12 +352,17 @@ jobs:
 
           # 用数组而不是 $(find ...)：文件名里可能有空格，
           # 直接拼进命令行会被 word splitting 拆散。
+          #
+          # --notes-file 而不是 --generate-notes：正文是 CHANGELOG 里
+          # 人工写的「新增 / 修复」，上一步已经取好并附上了安装说明。
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file notes.md \
             "${files[@]}"
 
-      - name: 发布说明提醒（未签名的后果）
+      # 面向用户的安装提示已经写进 Release 正文（见「生成发布说明」），
+      # 这里只留维护者视角的「怎么彻底消除提示」，不重复一遍。
+      - name: 维护者提醒（签名与发布说明）
         run: |
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           ## 关于签名
@@ -294,4 +376,10 @@ jobs:
           要消除这些提示，需要配置证书：
             - Windows：`wails3 setup signing` + `wails3 task windows:sign:installer`
             - macOS：Apple Developer ID 证书 + `codesign` + `notarytool` 公证
+
+          ## 关于发布说明
+
+          Release 正文取自 `CHANGELOG.md` 中与 tag 同名的小节，发布后可在网页上直接编辑。
+          下一次发版记得：先改 `internal/version/version.go` 的 `Version`，再补一节
+          `## [x.y.z] - YYYY-MM-DD`，否则流水线会当场失败。
           EOF

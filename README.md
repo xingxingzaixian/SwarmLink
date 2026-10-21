@@ -382,6 +382,7 @@ docs/adr/        11 条架构决策记录
 - 分发包需自行触发：`make package`；Windows 上没有 `make` 时用
   `.\scripts\pack.ps1 windows package`（需要 NSIS 的 `makensis`，脚本会去标准安装位置找它）。
   三平台产物由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 在对应 runner 上出；
+  Release 正文取 [`CHANGELOG.md`](CHANGELOG.md) 里与 tag 同名的小节，缺小节流水线会直接失败；
   `build/` 内的图标与 DMG 资源仍是 Wails 模板默认值 —— 替换 `build/appicon.png` 后重新构建即换成自己的图标。
 
 **v1.1 计划（接缝已留）**
@@ -398,6 +399,7 @@ docs/adr/        11 条架构决策记录
 
 - [`架构设计书.md`](架构设计书.md) —— 架构评审 + 目标架构 + 协议 v2 + 数据模型 v2 + ADR + 演进路线图
 - [`设计书.md`](设计书.md) —— 前置技术调研与原始方案
+- [`CHANGELOG.md`](CHANGELOG.md) —— 更新日志，Release 正文的唯一来源（按 tag 名取同名小节）
 - [`docs/adr/README.md`](docs/adr/README.md) —— ADR 索引 + 实现偏差汇总
 - [`docs/superpowers/specs/`](docs/superpowers/specs/) —— 实现规格
 - [`docs/superpowers/plans/`](docs/superpowers/plans/) —— 实现计划
