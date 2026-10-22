@@ -1,4 +1,4 @@
-import { directConvId } from './ids'
+import { directConvId, isGroupId } from './ids'
 import { EV } from './types'
 import { baseName } from '../utils/format'
 import { likeContains } from '../utils/search'
@@ -1241,13 +1241,18 @@ export function createMockApi(): SwarmApi {
         peers.find((p) => directConvId(self.nodeId, p.nodeId) === convId)
 
       return [...threads.keys()].map((convId) => {
+        // 群会话必须报 kind='group'：与后端 Contract 一致。
+        // 写成 'direct' 会让「打开群聊」这条路径在预览模式里退化成单聊
+        // （群信息面板不渲染、群历史按 peerId 查成空）。
+        const isGroup = isGroupId(convId)
         const p = peerOf(convId)
+        const g = groups.find((x) => x.groupId === convId)
         const last = page(convId, 1)[0]
         return {
           convId,
-          kind: 'direct',
-          title: p?.displayName ?? convId.slice(0, 8),
-          peerId: p?.nodeId,
+          kind: isGroup ? 'group' : 'direct',
+          title: isGroup ? (g?.name ?? convId.slice(0, 8)) : (p?.displayName ?? convId.slice(0, 8)),
+          peerId: isGroup ? undefined : p?.nodeId,
           state: p?.state,
           isOnline: !!p?.connected,
           lastTime: last?.sentAt ?? 0
