@@ -12,6 +12,12 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    // 必须显式绑 IPv4 回环，不能让 host 留在默认的 'localhost'。
+    // Node 17+ 在 Windows 上把 localhost 优先解析成 ::1，Vite 于是只监听 [::1]；
+    // 而 Wails dev 的 asset server 连的是 127.0.0.1:9245 —— 请求被拒后转成
+    // HTTP 502 吐给窗口，终端里 Vite 却一切正常，排查时极容易被带偏。
+    // 诊断方法：curl 127.0.0.1:9245 返回 000、curl [::1]:9245 返回 200，即是此症。
+    host: '127.0.0.1'
   }
 })

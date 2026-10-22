@@ -1,405 +1,106 @@
-# SwarmLink
+# 蜂群 · SwarmLink
 
-无中心内网 P2P 聊天与文件分享工具。所有节点对等，**不依赖任何中心服务器或引导节点**。
+**在同一张网里直接聊天、传文件、共享目录。**
+没有服务器，不用注册，不连外网 —— 装上就能用。
 
-- **技术栈**：Go + Wails v3 + Vue3 + Pinia + SQLite（纯 Go 驱动，无 CGO）
-- **权威设计**：[`架构设计书.md`](架构设计书.md)（v1.2）；本仓库是该设计的实现
-- **决策记录**：[`docs/adr/`](docs/adr/README.md)（11 条，多数带可执行验收测试）
-- **实现规格**：[`docs/superpowers/specs/2026-09-20-swarmlink-v1-design.md`](docs/superpowers/specs/2026-09-20-swarmlink-v1-design.md)
+![主界面](docs/screenshots/01-main.png)
 
 ---
 
-## 1. 架构一览
+## 为什么用它
 
-```
-L4 入站适配器   adapters/wails（5 个服务 + 事件桥）              ──┐
-L3 应用层       app/{chat,transfer,discovery,peer,group}_app      ──┤ 只能向下调用
-L2 领域核心     domain/{identity,peer,message,group,transfer,protocol,ports}（零 I/O）
-L1 出站适配器   adapters/{net/{tcp,udp},store/{sqlite,mem},config,filesink,keystore}
-横切            infra/{eventbus,clock,log,fsutil}
-组合根          internal/bootstrap（唯一允许 new 具体适配器的地方）
-```
-
-**三条红线由测试强制**（`internal/archtest`，等价于 `make lint-arch`），而不是靠自觉。
-它随 `go test ./...` 自动执行，并由 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-在 Windows 与 Linux 上各跑一遍：
-
-| 红线 | 内容                                                          |
-| ---- | ------------------------------------------------------------- |
-| R1   | `domain/**` 禁止 import `net` / `database/sql` / `os` / Wails |
-| R2   | 适配器之间禁止互引；跨模块只走 `ports` 接口或事件总线         |
-| R3   | 业务代码（`app` / `domain`）禁止 `new` 具体适配器             |
+- **真的不需要服务器**。消息和文件在你的电脑和对方的电脑之间直接走，没有任何中转，
+  也没有任何云端备份。断网的内网照样能用。
+- **装上就能找到人**。同一个网段里的电脑，几秒钟内自动出现在联系人列表里，
+  不用加好友、不用知道对方的 IP。
+- **大文件不心疼**。断点续传、离线排队（对方上线自动发）、文件夹整体传输，
+  断了网也不用从头再来。
+- **内网友好**。机房、车间、活动现场这种没有外网的环境，是它最舒服的地方；
+  跨楼层、跨网段也能用，只要网络本身能互通。
 
 ---
 
-## 2. 快速开始
+## 能做什么
 
-### 2.1 构建与测试
+- 💬 **单聊 / 群聊** —— 文字、表情、图片，群聊最多 20 人
+- 📁 **发文件 / 发文件夹** —— 支持拖拽、断点续传、对方离线时自动排队
+- 📷 **截图标注** —— 框选、矩形、箭头、画笔、文字、马赛克，截完直接发
+- 🗂️ **共享中心** —— 把自己的文件夹挂出来，别人随时来取，不用反复传
+- 🔍 **搜索记录** —— 聊天记录存在本机，随时按关键词翻回去
+- ⌨️ **全局快捷键** —— 在后台也能一键截图、一键唤出窗口
+- 🌓 **深色 / 浅色** —— 跟随系统，也可以手动切换、换背景图
+
+---
+
+## 下载与安装
+
+到 [Releases](../../releases) 页面下载对应平台的安装包：
+
+- **Windows**：`.exe` 安装包（首次运行请允许防火墙访问，否则找不到身边的电脑）
+- **macOS**：`.dmg`
+- **Linux**：`.AppImage`
+
+安装后直接打开就能用，不需要任何配置。
+
+---
+
+## 三步上手
+
+1. **打开软件**，左边列表里会自动出现同一个网里的其他人；
+2. **点一个人的名字**，在下方输入框打字，按 `Enter` 发送；
+3. **把文件拖进窗口**，就开始传了。
+
+想分享一整个文件夹给大家？按 `Ctrl+Shift+H` 打开共享中心，发布即可。
+
+![共享中心](docs/screenshots/03-share-center.png)
+
+---
+
+## 常用快捷键
+
+| 快捷键 | 作用 |
+|--------|------|
+| `Ctrl+Shift+A` | 截图（应用在后台也生效） |
+| `Ctrl+Alt+Space` | 唤出 / 收起主窗口 |
+| `Ctrl+K` | 搜索聊天记录 |
+| `Ctrl+J` | 文件传输面板 |
+| `Ctrl+Shift+H` | 共享中心 |
+| `Ctrl+,` | 设置 |
+| `Ctrl+/` | 查看全部快捷键 |
+
+所有快捷键都可以在 设置 → 快捷键 里改成自己顺手的组合。
+
+---
+
+## 需要知道的三件事
+
+1. **共享和群文件，发布者必须在线**。东西是从对方电脑直接取的，没有服务器替你保管。
+2. **跨网段需要网络本身能互通**。如果两个网段之间被防火墙或 NAT 隔开又不放行，
+   软件帮不上忙 —— 它刻意不做中继。用 设置 → 部署自检 可以提前确认。
+3. **每台电脑的身份跟着数据目录走**。换数据目录或重装，等于换了一个新身份，
+   旧记录还在原来的目录里。
+
+---
+
+## 文档
+
+- 📖 **[用户使用手册](docs/用户使用手册.md)** —— 图文并茂，从安装到排障，不需要技术背景
+- 🔧 **[开发与部署指南](docs/开发指南.md)** —— 构建、架构、配置项、测试、部署前置条件
+- 📝 **[更新日志](CHANGELOG.md)** —— 每个版本改了什么
+
+---
+
+## 开发者
+
+技术栈：**Go + Wails v3 + Vue 3 + SQLite**（桌面端），前端可单独开发。
 
 ```bash
-make build              # 编译后端
-make test               # 全部测试
-make lint-arch          # 架构红线（+ gofmt 格式闸门）
-make test-e2e           # 端到端（含跨网段收敛）
-make test-scale         # 20 节点规模验证
-make test-fuzz          # 协议畸形输入
-make ci                 # 等价于 CI 的一条命令
+go test ./...                              # 全部测试（含架构红线）
+./scripts/pack.ps1 windows build           # Windows 构建（无需 make）
+make gui                                   # 有 make 时等价
 ```
 
-> **Windows 上通常没有 `make`**（本仓开发机实测就没有），而 `make` 只是这些命令的
-> 一层包装。等价做法：
->
-> - **测试**：直接 `go test ./...`（不带 `make` 也能跑）。三条架构红线与 gofmt 闸门
->   就在 `internal/archtest` 里，随 `go test ./...` 自动执行 —— 它们不依赖 `make`，
->   这正是当初把它们从 Makefile 里搬出来的原因。
-> - **构建 / 打包**：用 [`scripts/pack.ps1`](scripts/pack.ps1)，见 §2.3。
+架构约束、构建环境要求、打包与发布流程、部署前置条件，都在
+[开发与部署指南](docs/开发指南.md) 里。
 
-### 2.2 部署前置条件自检（**部署前必做**）
-
-桌面 GUI → 设置 →「部署自检」→ **运行自检**。
-
-它会真实探通每个种子、拉取目录，并报告 P-1 / P-2 是否成立（见第 4 节）。
-
-只想定位某**一颗**种子时，用 设置 →「跨网段种子」里每一行的 **测试** 按钮：
-它会分别报告 UDP 与 TCP 两跳的结果（跨网段最常见的故障正是「UDP 通、TCP 被防火墙挡」）。
-种子清单支持逐行增删改，**保存后立即生效**，不需要重启。
-
-### 2.3 桌面 GUI
-
-前置：**Go ≥ 1.26**、**Node ≥ 24**（见 [`frontend/.nvmrc`](frontend/.nvmrc)，
-CI 与发布流水线都以它为准）、`wails3` CLI **v3.0.0-beta.29**。
-
-> **`wails3` CLI 还必须是「用与你相同的 Go 版本编译」的那一份。** 否则
-> `wails3 build` 会刷出一屏
-> `package requires newer Go version go1.26 (application built with go1.25)` 和
-> `This application uses version go1.25 of the source-processing packages but runs
-version go1.26 of 'go list'`。
->
-> 关键点：**`wails3 doctor` 里的 `Go Version` 报的是 CLI 自己的构建版本，不是 PATH
-> 里的 Go** —— 两者不一致时就以它为准。核对与修复：
->
-> ```powershell
-> go version (Get-Command wails3).Source          # 应当与本机 `go version` 一致
-> go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.29
-> ```
->
-> 多版本 Go（vfox / asdf / scoop 等）下格外容易踩：`go install` 会把 CLI 装进
-> **当时激活的那个 Go 的 `GOPATH\bin`**，之后切换 Go 版本**不会**更新它，而旧的那份
-> 仍留在 PATH 上（用 `Get-Command wails3 -All` 可以看到全部副本）。实测本机两份副本的
-> 构建版本分别是 go1.26.8 与 go1.25.5，且后者的路径还经一层 Junction 指向旧 Go 的安装树。
-> `scripts/pack.ps1` 会把当前 Go 的 `GOPATH\bin` 提到 PATH 最前，因此经它构建总是用对的那份。
-
-> Go 的下限以 `go.mod` 的 `go 1.26.0` 为准，**不是**更早文档里写的 1.25。
-> 用 1.25 也能编，但那会触发 `GOTOOLCHAIN=auto` 去下载第二份工具链，进而出现
-> `GOROOT` 与实际使用的 go 不一致的经典报错
-> （`compile: version "go1.25.5" does not match go tool version "go1.26.3"`）——
-> `scripts/pack.ps1` 里有一整段专门处理这个坑的代码。
->
-> Node 的下限是 24 而不是 20：`npm run test` 直接执行 `.ts`
-> （`node --test "tests/**/*.test.ts"`），依赖 Node 的类型擦除，而类型擦除要到
-> Node 23.6 才默认开启。
-
-```bash
-make gui            # = 生成绑定 + wails3 build → bin/SwarmLink
-./bin/SwarmLink      # 运行（会打开窗口）
-
-make gui-dev         # 开发模式（改 Go/前端都热重载）
-make package          # 出安装包（Windows → NSIS 安装器）
-```
-
-#### 2.3.1 没有 `make` 时（Windows 的常态）
-
-用 [`scripts/pack.ps1`](scripts/pack.ps1)：它做的是同一件事，并强制导出
-`EXTRA_TAGS=wails` —— 漏了那个 tag，产物会是一个 2.4MB 的占位程序，**却照样能打包
-成安装包并「构建成功」**，是本项目最隐蔽的失败模式（脚本末尾会按体积再挡一次）。
-
-```powershell
-.\scripts\pack.ps1 windows build      # 只出 bin/SwarmLink.exe
-.\scripts\pack.ps1 windows package    # 出 NSIS 安装包（需要 makensis）
-```
-
-开发模式另有启动器：
-
-```powershell
-.\start_dev.bat                       # 默认端口 9245（参数会透传给 wails3 dev）
-.\start_dev.bat -port 9250
-```
-
-> **`pack.ps1` 首次运行常被执行策略拦住**，报
-> `未对文件进行数字签名`。本脚本没有「来自互联网」标记，所以
-> `Unblock-File` **解决不了**它。用只对这一次调用生效的方式跑：
->
-> ```powershell
-> powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\pack.ps1 windows build
-> ```
->
-> 或者在当前 shell 里临时放宽（关掉窗口即失效，不写注册表）：
->
-> ```powershell
-> Set-ExecutionPolicy -Scope Process Bypass
-> .\scripts\pack.ps1 windows build
-> ```
->
-> 不要用 `-Scope CurrentUser Unrestricted`：它是持久的，且比 `RemoteSigned` 弱。
->
-> 若本机 `CurrentUser` 已是 `RemoteSigned`（允许本地未签名脚本）却仍被拦，说明
-> **你所在的那个 shell 的有效策略更严**：在同一 shell 里跑
-> `Get-ExecutionPolicy -List` 看是哪个作用域把它收紧了。
-
-手工等价命令：
-
-```bash
-wails3 generate bindings -f "-tags wails" -clean .   # 生成前端 TypeScript 绑定
-wails3 build -tags wails                             # 产物 bin/SwarmLink
-```
-
-> **入口在仓库根目录**（`main_wails.go`）。原因有二：wails3 的构建任务在根目录执行
-> 不带包路径的 `go build`；而架构书本来就把 `main.go` 定义为唯一组合根。
->
-> 它也是**唯一**接触 Wails API 的文件。服务层与事件桥（`internal/adapters/wails`）
-> 是零 Wails 依赖的纯 Go，因此 `go build ./...` 与 `go test ./...` **不需要 Wails 工具链**：
-> 未启用 `wails` tag 时根目录没有可编译文件，构建会跳过它（根目录因此也不会再
-> 悄悄产出占位程序 —— 忘传 tag 时 `wails3 build` 会直接失败，这正是想要的）。
-
-生成的绑定 `frontend/bindings/` **已提交入库**，因此前端可脱离 Go 工具链构建
-（CI 的 frontend job 依赖这一点）。若改了服务的导出方法，重新执行一次 `make bindings` 即可。
-
-前端也可单独跑（用于调样式，无后端时自动进入降级 mock 模式）：
-
-```bash
-cd frontend && npm install && npm run dev
-cd frontend && npm run typecheck && npm run build
-```
-
----
-
-## 3. 功能范围（v1.0）
-
-| 能力                                                                             | 状态                                                                    |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| 节点自动发现（网段内 UDP 广播 + 签名 ANNOUNCE + 多网卡策略）                     | ✅                                                                      |
-| 跨网段发现（每网段 ≥2 种子 + 单跳目录拉取，零特权零中继）                        | ✅                                                                      |
-| 节点身份（Ed25519 持久化 + 三段握手认证 + 防重放）                               | ✅                                                                      |
-| 单聊（`msg_id` + ACK + outbox 重发 + 幂等去重 + 送达状态）                       | ✅                                                                      |
-| 群聊（全互联单播扇出，≤ 20 人，epoch 签名成员同步）                              | ✅                                                                      |
-| 单文件断点续传（滑动窗口 + 周期性全量位图 + 坏块定位重传）                       | ✅                                                                      |
-| 文件共享（发布目录/文件 + 摘要随发现传播 + 可见性控制 + P2P 拉取，复用续传引擎） | ✅ 见 §3.2                                                              |
-| 聊天记录（SQLite + WAL + 版本化迁移 + 单写队列）                                 | ✅                                                                      |
-| 桌面 GUI（Wails v3 + Vue3，含**调试面板**）                                      | ✅ 已构建并启动验证通过（`wails3 build -tags wails` → `bin/SwarmLink`） |
-| 移除列表里的失效节点（本地标记 + 目录抑制，对方再次上线自动恢复）                | ✅ 见 §3.1                                                              |
-| 文件夹 / 批量传输（递归展开、相对路径还原、空目录、批次跨重启认领）              | ✅                                                                      |
-| 离线传输 v2（对方离线即排队、上线自动开传、按位图续传、跨重启保留）              | ✅                                                                      |
-| 群文件 / 群文件夹传输（成员各自 P2P 拉取，非群主中转）                           | ✅                                                                      |
-| 图片消息（内联 ≤300 KB）+ 表情 + 粘贴 + 灯箱另存                                 | ✅                                                                      |
-| 截屏（**交互式**：全屏拖拽框选 + 矩形 / 箭头 / 画笔 / 文字 / 马赛克标注；另有整屏截图可选隐藏本窗口；Windows / macOS / Linux X11） | ✅ 见 `docs/plans/2026-10-20-screenshot-design.md`                        |
-| 聊天视图软清空（清空点，不删消息，可恢复）                                       | ✅                                                                      |
-| 托盘常驻 + 提示音 + 窗口未读计数（**气泡与提示音当前仅 Windows**）               | ✅ Windows 优先                                                         |
-
-**明确不做**：NAT 穿透 / 中心服务器 / 引导节点 / **中继（永久不做）** /
-跨设备身份合并 / 端到端加密（v1.1，接缝已留）。
-
-### 3.1 移除列表里的节点（清理失效身份）
-
-节点列表每一行都有「移除」入口（在线、离线都有）。它针对的是**已经失效的旧身份**，
-典型来源：对方重装应用、或换了数据目录之后生成了新的 `node_id`，
-旧的那条会永远留在你的列表里（`peers` 表以 `node_id` 为主键，没有任何自动清理）。
-
-三条边界（UI 的确认弹窗里写了同样的话）：
-
-1. **只在本机生效**：不发任何网络通告 —— 对方不会收到通知，别人的列表也不变，历史消息不会被删除。
-2. **不是拉黑**：不拒绝对方的握手与连接（真正的拉黑是另一层语义，当前未实现），
-   只是让它不再出现在你的列表里、也不再由你把这条目录条目传播给别人。
-3. **并非永久**：该节点若再次上线（有效签名通告）或与你重新握手 —— 那说明它没死 ——
-   会自动回到列表。因此**活跃节点是"删不掉"的**，这是刻意设计。
-
-> 反过来说，这正是它可靠的场景：一个**永远不再上线**的旧身份（密钥已丢）删掉之后就不会再回来
-> —— 即使别人的目录里还留着它、下一次目录同步仍会把它送过来。
-
-### 3.2 文件共享（发布目录 → 他人浏览下载）
-
-入口：顶栏右侧的「共享中心」按钮（在主题切换旁边），或左栏底部头像菜单 →「共享中心」。
-两者都打开同一个**独立弹框**：左边选共享（我的共享 / 各联系人）、右边是文件清单表格，
-工具栏提供 共享文件 / 共享文件夹 / 取消共享 / 设置可见性 / 立即刷新，以及针对勾选项的
-下载（他人共享）或定位（我的共享）。
-
-**数据怎么流动**：共享的**摘要**（名字 / 文件数 / 总大小 / 可见性）挂在那条节点条目上，
-随 `ANNOUNCE` 与目录交换一起传播 —— 因此跨网段也能发现，且不需要任何新通道。
-完整的**文件清单**不进摘要（大目录会让每 45 秒一轮的广播背上几 MB），由下载方按需发
-`SHARE_INDEX_REQ` 现拉；**字节**由共享方经 `SHARE_PULL_REQ` 受理后用现有传输引擎推送，
-所以断点续传、暂停、取消、失败重试全部继承，界面也不必再写一套进度。
-
-**落盘规则（同名目录就是同一个目录）**：下载按「共享名/相对路径」还原目录树，且**已存在的
-同名目录会被复用**、**同名同路径的文件会被覆盖**：分几次下载同一条共享只会得到一个目录，
-对方改了内容再下一次也是就地覆盖，不会堆出 `A (1)`、`c (1).txt`。
-只有「此刻正有另一个任务在写同一条路径」这一种情况会退到唯一名（并发写者不互相覆盖）。
-注：聊天里单个文件的传输仍保留 ` (1)` 去重 —— 那里没有「同一个目录」这个判据，
-覆盖用户下载目录里的同名文件才是更危险的默认。
-
-**四条必须知道的边界**：
-
-1. **共享方必须在线**：本项目不做服务器托管（也没有服务器），对方离线时下载会失败并提示
-   「共享方不在线」。这是刻意的取舍，不是缺陷。
-2. **可见性是「提示 + 强制」两层**：摘要里带着可见性，名单外的人根本不会在列表里看到它
-   （客户端过滤）；即使靠转述或伪造拿到了 `share_id`，共享方在收到请求时仍会**权威校验**
-   并拒绝（`ShareApp.HandleIndexReq` 是唯一的访问控制点）。
-3. **摘要是可篡改的**：它不参与 `ANNOUNCE` 签名（参与就会硬破坏与旧版本的兼容 ——
-   旧端会因验签失败丢掉新端的全部通告）。因此摘要只用于「去哪儿问」，任何真实访问
-   都要向共享方单独请求，由它校验。这条取舍写在 `peer.Announcement.Shares` 的注释里。
-4. **同一根目录只能发布一次**，且同时最多 `share.MaxAnnouncedShares`（32）条 ——
-   摘要跟着每次广播走，不设上限时「每个子目录发布一次」的用法会让目录响应随
-   节点数 × 共享数相乘膨胀。
-
-发布时**必弹确认**（明示将被可见的文件范围与可见者），可见性默认是「指定人」而不是
-「全部」：误共享敏感文件的代价远大于「忘了加人所以别人看不到」。
-
----
-
-## 4. 部署前置条件（**代码救不了，必须在部署前确认**）
-
-| #       | 前置条件                                                             | 不满足的后果                                                                      | 自检                                        |
-| ------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------- |
-| **P-1** | 任意两网段的种子 IP 之间**可 TCP 直连**（三层路由可达，非 NAT 隔离） | 跨网段发现与消息全部失效，此时只能引入中继 —— 而中继是本项目刻意回避的设计        | 设置页 → 运行自检                           |
-| **P-2** | 各网段使用**不重叠的地址段**（不得都是 `192.168.1.0/24`）            | 目录中出现 node_id 不同、IP 相同的条目 → **跨网段寻址崩溃，且现象隐蔽、极难排查** | `ANNOUNCE` 携带 `subnet`，CLI 与 GUI 均展示 |
-
-> P-2 不是理论风险：「多个厂区/门店各自一个 `192.168.1.0/24`，再靠 VPN 互联」
-> 是内网组网里最常见的形态之一。
-
-**种子配置硬约束**：被选为种子的机器必须**固定 `udp_port`**（关闭端口自动回退），
-否则跨网段节点拿着配置里的端口发第一个报文就石沉大海。
-`tcp_port` 仍可回退 —— 对端从种子回传的 ANNOUNCE 学到实际端口。
-
-另需在防火墙放行 TCP/UDP 端口，并在 VPN 场景把虚拟网卡加入 `deny_interfaces`（默认已含常见项）。
-
----
-
-## 5. 配置
-
-配置文件：`<用户配置目录>/SwarmLink/config.toml`（首次启动自动生成）。
-数据库：`<用户配置目录>/SwarmLink/data/app.db`。
-
-### 5.1 数据放在哪里（以及放不了时怎么办）
-
-默认在系统用户配置目录（Windows 是 `%APPDATA%\SwarmLink`）。两种方式改掉它：
-
-```powershell
-# ① 环境变量：想放哪就放哪（脚本 / 终端里最方便）
-$env:SWARMLINK_DATA_DIR = 'D:\swarmlink-data'
-.\bin\SwarmLink.exe
-
-# ② 便携模式：在 exe 旁边放一个空的 portable.mode，数据就与程序在一起
-New-Item -ItemType File .\bin\portable.mode
-```
-
-便携模式下 `config.toml`、`data/`、`identity/`、`logs/`、`webview/` 全部落在 exe 同级目录，
-适合拷到 U 盘、或运行在写不了用户目录的机器上。
-
-> **为什么不默认放在程序旁边**：装到 `C:\Program Files` 之后普通用户对它没有写权限 ——
-> 这正是 Windows 要引入 `%APPDATA%` 的原因；而且同一台机器上的多个用户会共用同一个数据库。
-> 所以「放在程序旁边」是显式选择，不是默认行为。
->
-> **两个必须知道的副作用**：
->
-> 1. **换数据目录 = 换节点身份**。`identity/node.key` 跟着数据目录走，换一处就会生成新的
->    `node_id`，对端看到的是一个新节点（历史聊天记录也留在旧目录里）。
-> 2. WebView2 的缓存目录也跟着数据目录走（`<数据目录>/webview`）。它默认在
->    `%APPDATA%\<exe 名>`，那里不可写时 WebView2 会以 `ERROR_BUSY` 失败，且错误由
->    Wails 内部收尾 —— 现象就是「双击没反应」。跟着数据目录走，「换个可写目录就能跑」才真正成立。
-
-**启动失败不再静默**：产物没有控制台（`-H windowsgui`），所以后端起不来时会弹一个原生
-对话框说明原因，对话框内容可用 `Ctrl+C` 复制。
-
-日志落在 `<数据目录>/logs/swarmlink.log`；**该目录写不了时会退到
-`%TEMP%\SwarmLink\swarmlink.log`**（数据目录不可写恰恰是最需要日志的故障，
-所以必须有个兜底位置）。对话框里会写明日志实际落在哪一处。
-
-自动化场景可用 `SWARMLINK_NO_STARTUP_DIALOG=1` 关掉对话框。
-
-| 段                  | 关键项                                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------------------- |
-| `[general]`         | `display_name`                                                                                          |
-| `[download]`        | `default_dir`、`auto_open`（接收不弹框，同名自动加 `(1)`）                                              |
-| `[network]`         | `tcp_port=0`/`udp_port=0`（0 = 自动）、`port_fallback_range`、`interface_mode`、`allow/deny_interfaces` |
-| `[discovery]`       | `announce_interval`、`peer_ttl`、`max_peers`、`max_peer_list_size`                                      |
-| `[discovery.seeds]` | `refresh_interval`、`seeds_per_refresh=2`、`list`（格式 `IP:UDP_PORT`）                                 |
-| `[connection]`      | `idle_conn_timeout`、`max_dial_concurrency`、`max_active_conns`                                         |
-| `[transfer]`        | `max_concurrent`、`chunk_size`、`window_size`、`bitmap_flush_interval`                                  |
-| `[security]`        | `require_auth=true`（**强烈建议保持开启**）、`encryption`（v1.1）                                       |
-
----
-
-## 6. 目录结构
-
-```
-main_wails.go    ★ 桌面外壳组合根（build tag: wails）—— 唯一接触 Wails API 的文件
-Taskfile.yml     wails3 构建任务入口
-build/           wails3 平台构建配置与图标资源（darwin/linux/windows + 交叉编译镜像）
-internal/
-  domain/        纯领域（零 I/O）: identity peer message group transfer protocol ports
-  app/           用例编排: peer/chat/group/transfer/discovery App + Router
-  adapters/      net/{tcp,udp} store/{sqlite,mem} config filesink keystore wails
-  infra/         eventbus clock log fsutil
-  bootstrap/     ★ 唯一组合根（GUI 装配路径）
-test/
-  harness/       单进程多节点装配器
-  e2e/           发现/握手/单聊/幂等/传输/续传/跨网段收敛
-  scale/         20 节点全量目录 + 零常驻连接
-frontend/
-  src/           Vue3 + Pinia + TS
-  bindings/      wails3 生成的绑定（已入库，勿手改）
-docs/adr/        11 条架构决策记录
-```
-
----
-
-## 7. 测试矩阵
-
-| 层级 | 范围                  | 命令                                        | 目标                      |
-| ---- | --------------------- | ------------------------------------------- | ------------------------- |
-| 单元 | `domain/**`           | `make test-domain-cover`                    | 覆盖率 ≥ 80%              |
-| 组件 | 协议编解码            | `make test-fuzz`                            | 无 panic                  |
-| 组件 | SQLite 迁移/仓储      | `go test ./internal/adapters/store/sqlite/` | 迁移可重入                |
-| 集成 | 2 节点握手 / 会话管理 | `go test ./internal/adapters/net/...`       | 主链路通过                |
-| E2E  | 3~4 节点全链路        | `make test-e2e`                             | 通过                      |
-| E2E  | **跨网段收敛**        | `make test-e2e`                             | 通过（ADR-011 的验收物）  |
-| 规模 | 20 节点               | `make test-scale`                           | 目录同步正确 + 常驻连接 0 |
-| 前端 | 类型 + 构建           | `make frontend-typecheck frontend-build`    | 通过                      |
-
-`FakeClock` 是必需品：心跳超时（30 s）、TTL（300 s）、空闲回收（5 min）
-若用真实时间测试，一个用例要跑几分钟；有了 `Clock` 接口全部变成微秒级。
-
----
-
-## 8. 已知限制与后续
-
-**当前限制**
-
-- 原生文件/文件夹/图片选择**已经接入**（`frontend/src/api/dialog.ts` 直接用
-  `@wailsio/runtime` 的 `Dialogs.OpenFile` / `Dialogs.SaveFile`）。只有在没有原生
-  对话框的环境（浏览器预览模式）才降级：文件给一个路径输入框，文件夹与图片只给提示；
-- 空闲回收后的「连接不再可用」不触发自动重连，下次发消息时才按需拨号（符合 ADR-009，但首条消息有 +1 RTT）；
-- 群聊消息对离线成员由发送端本地按投递记录重发（退避上限 5 分钟），对端上线时立即补投，全员确认后才出队；
-- 未接入混沌测试（随机杀连接）的自动化 CI 任务；
-- 分发包需自行触发：`make package`；Windows 上没有 `make` 时用
-  `.\scripts\pack.ps1 windows package`（需要 NSIS 的 `makensis`，脚本会去标准安装位置找它）。
-  三平台产物由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 在对应 runner 上出；
-  Release 正文取 [`CHANGELOG.md`](CHANGELOG.md) 里与 tag 同名的小节，缺小节流水线会直接失败；
-  `build/` 内的图标与 DMG 资源仍是 Wails 模板默认值 —— 替换 `build/appicon.png` 后重新构建即换成自己的图标。
-
-**v1.1 计划（接缝已留）**
-
-- Noise 加密通道（`Flags.ENCRYPTED` + `KEY_EXCHANGE` 已预留）；
-- 群聊上限提至 50 人（扇出改并行 + 连接复用）；
-- 节点指纹校验 UI（首次连接让用户确认，防 MITM）。
-
-**v1.2 / v2.0**：并发传输与带宽预算、目录传输、`sdk/` 插件接口（**无中继**）。
-
----
-
-## 9. 相关文档
-
-- [`架构设计书.md`](架构设计书.md) —— 架构评审 + 目标架构 + 协议 v2 + 数据模型 v2 + ADR + 演进路线图
-- [`设计书.md`](设计书.md) —— 前置技术调研与原始方案
-- [`CHANGELOG.md`](CHANGELOG.md) —— 更新日志，Release 正文的唯一来源（按 tag 名取同名小节）
-- [`docs/adr/README.md`](docs/adr/README.md) —— ADR 索引 + 实现偏差汇总
-- [`docs/superpowers/specs/`](docs/superpowers/specs/) —— 实现规格
-- [`docs/superpowers/plans/`](docs/superpowers/plans/) —— 实现计划
+当前版本：**0.1.5** · 三平台安装包由 CI 构建 · 无中继、无中心服务器（刻意的设计取舍）
