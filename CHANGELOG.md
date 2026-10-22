@@ -9,10 +9,34 @@
 2. 只写**用户能感知的变化**：新增功能、行为改变、修复、已知问题。
    重构、测试、CI 调整不写 —— 它们是给维护者看的，写进来只会稀释重点。
 3. 发布前先改 `internal/version/version.go` 的 `Version`，再补这一节；
-   tag（`v0.1.5`）与 `Version`（`0.1.5`）不一致时流水线同样会失败。
+   tag（`v0.1.6`）与 `Version`（`0.1.6`）不一致时流水线同样会失败。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 小标题固定用 `新增` / `变更` / `修复` / `已知问题`，按需取舍。
+
+## [0.1.6] - 2026-10-22
+
+### 变更
+
+- **macOS 点关闭改为收进菜单栏**：点主窗口的红点不再退出进程，行为与 Windows
+  的托盘一致 —— 窗口隐藏、菜单栏保留图标，后台继续收发消息；点 Dock 图标或
+  菜单栏图标即可恢复窗口。在设置 → 提示里关掉「关闭时最小化到托盘」后，
+  关闭窗口即退出应用。
+
+### 修复
+
+- **macOS 应用图标始终是 Wails 默认图标**：构建资源里残留了模板 `Assets.car`，
+  而 `Info.plist` 里的 `CFBundleIconName` 让 macOS 12+ 优先读它，把由
+  `appicon.png` 生成的 `icons.icns` 整个盖掉了。已移除这份残留及其声明，
+  Dock / Finder 现在显示蜂群图标。
+- **macOS 点关闭直接退出、菜单栏不留图标**：`ApplicationShouldTerminateAfterLastWindowClosed`
+  让 AppKit 在最后一个窗口关闭时直接终止进程，那一步绕过了「最小化到托盘」的
+  判断逻辑。现在由统一的窗口关闭钩子决定收托盘还是退出，三平台行为一致。
+
+### 已知问题
+
+- macOS 换图标后如果 Dock / Finder 仍显示旧图，是系统图标缓存没刷新，
+  执行 `killall Dock` 或注销重登即可。
 
 ## [0.1.5] - 2026-10-21
 

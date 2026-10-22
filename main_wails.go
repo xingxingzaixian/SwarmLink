@@ -346,8 +346,14 @@ func main() {
 		Windows: application.WindowsOptions{
 			WebviewUserDataPath: filepath.Join(node.ConfigDir, "webview"),
 		},
+		// 【必须为 false】否则 macOS 在最后一个窗口关闭时由 AppKit 直接
+		// terminate 进程，那一步绕过 WindowClosing 钩子 —— 表现就是
+		// 「点了关闭（红点）窗口没了、进程也没了，菜单栏不留图标」，
+		// 设置里的「关闭时最小化到托盘」永远没机会执行。
+		// 退出与否统一交给下面的 WindowClosing 钩子显式决定，
+		// 这样 Windows / macOS 的行为完全一致。
 		Mac: application.MacOptions{
-			ApplicationShouldTerminateAfterLastWindowClosed: true,
+			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
 		// 使用 Wails 内置的单实例功能
 		SingleInstance: &application.SingleInstanceOptions{
@@ -770,7 +776,17 @@ func main() {
 	trayOK.Store(true)
 
 	// 关闭按钮：默认收进托盘而不是退出。
+	//
+	// macOS 的 MacOptions.ApplicationShouldTerminateAfterLastWindowClosed 已置为
+	// false（见上面创建应用处），因此「关掉最后一个窗口」不再等于「退出进程」，
+	// 收进托盘与真正退出都由这里显式决定。
+	var quitting atomic.Bool
 	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		if quitting.Load() {
+			// 已经在退出流程里（app.Quit 会再走一遍窗口关闭）：
+			// 放行原生关闭，否则 "最小化到托盘" 会把窗口又拦下来。
+			return
+		}
 		for _, a := range notifier.OnWindowClose() {
 			if a.Kind == capp.ActHideToTray {
 				e.Cancel()
@@ -782,7 +798,14 @@ func main() {
 				return
 			}
 		}
-		// 走到这里即 ActAllowQuit：不取消，正常退出
+		// ActAllowQuit：先取消这次原生关闭，再显式退出。
+		// 直接放行的话窗口会先被默认监听器销毁，进程却留在原地
+		// （macOS 上窗口没了、图标还在），看起来像「关不掉」。
+		e.Cancel()
+		if !quitting.CompareAndSwap(false, true) {
+			return
+		}
+		go app.Quit()
 	})
 
 	// 焦点回到窗口：停闪、未读归零、托盘图标复位。

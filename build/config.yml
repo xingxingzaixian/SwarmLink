@@ -11,10 +11,12 @@ info:
   description: "无中心内网 P2P 聊天与文件分享工具" # The application description
   copyright: "(c) 2026, SwarmLink" # Copyright text
   comments: "Local-first, peer-to-peer LAN chat and file transfer" # Comments
-  version: "0.1.4" # The application version
-  # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)
-  #                               # Should match the name of your .icon file without the extension
-  #                               # If not set and Assets.car exists, defaults to "appicon"
+  version: "0.1.6" # The application version
+  # ⚠️ 不要打开 cfBundleIconName，也不要往 build/appicon.icon 里放模板 .icon：
+  # 一旦 darwin/Assets.car 存在，generate build assets 会自动写入
+  # CFBundleIconName，而 macOS 12+ 优先用 Assets.car 里的图标，
+  # 于是「换了 appicon.png 但 Dock/Finder 图标没变」。
+  # 本项目的图标只有一条链路：appicon.png → darwin/icons.icns。
 
 # iOS build configuration (uncomment to customise iOS project generation)
 # Note: Keys under `ios` OVERRIDE values under `info` when set.

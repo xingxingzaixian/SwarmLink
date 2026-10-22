@@ -25,7 +25,7 @@ import (
 //
 // 不要在这里写 "dev" 期望它表示「开发版」—— 那会被解析成 0.0.0，
 // 效果同样是「不参与更新」，但字符串更难看懂。
-const Version = "0.1.5"
+const Version = "0.1.6"
 
 // parts 是版本被拆成的四段数字。
 const parts = 4

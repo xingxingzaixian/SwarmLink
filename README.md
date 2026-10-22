@@ -84,9 +84,13 @@
 
 ## 文档
 
-- 📖 **[用户使用手册](docs/用户使用手册.md)** —— 图文并茂，从安装到排障，不需要技术背景
-- 🔧 **[开发与部署指南](docs/开发指南.md)** —— 构建、架构、配置项、测试、部署前置条件
-- 📝 **[更新日志](CHANGELOG.md)** —— 每个版本改了什么
+- 📖 **[用户使用手册](https://xingxingzaixian.github.io/swarm-docs/guide/what-is-it.html)** —— 图文并茂，从安装到排障，不需要技术背景
+- 🏢 **[现场部署前必读](https://xingxingzaixian.github.io/swarm-docs/deploy/)** —— 跨网段的条件清单与自检方法，给 IT 管理员
+- 🔧 **[开发与部署指南](https://xingxingzaixian.github.io/swarm-docs/dev/)** —— 构建、架构、配置项、测试、部署前置条件
+- 📝 **[更新日志](https://xingxingzaixian.github.io/swarm-docs/changelog.html)** —— 每个版本改了什么
+
+> 用户文档已迁至文档站，本仓库不再保留 `docs/用户使用手册.md` 与 `docs/开发指南.md`。
+> 仓库内的 `docs/adr/`、`docs/plans/` 是面向维护者的决策记录与实现计划，不对外发布。
 
 ---
 
@@ -101,6 +105,6 @@ make gui                                   # 有 make 时等价
 ```
 
 架构约束、构建环境要求、打包与发布流程、部署前置条件，都在
-[开发与部署指南](docs/开发指南.md) 里。
+[开发与部署指南](https://xingxingzaixian.github.io/swarm-docs/dev/) 里。
 
-当前版本：**0.1.5** · 三平台安装包由 CI 构建 · 无中继、无中心服务器（刻意的设计取舍）
+当前版本：**0.1.6** · 三平台安装包由 CI 构建 · 无中继、无中心服务器（刻意的设计取舍）
