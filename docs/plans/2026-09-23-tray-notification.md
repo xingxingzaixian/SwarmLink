@@ -1148,3 +1148,8 @@ Expected: 均通过（声音为空实现、托盘用 Wails 原生支持）
     - **提示框不能盖住光标/托盘图标**：弹在光标处 → 光标「移到」新窗口上 → shell 判定离开图标 → 立刻 `NIN_POPUPCLOSE`（实测 ENTER 之后 29ms 就是 LEAVE）。改为弹在光标**上方 110px** 后，悬停时长恢复成用户的真实停留时间（实测 4.2s / 10s）。
     - **`TTM_SETMAXTIPWIDTH` 会让提示框塌成 6×4**：它把控件切进自动换行模式，换行宽度取自 tool 矩形，而跟踪型 tool 的矩形是退化的。同一段代码只改这一项：设了 → 6×4（文字溢出边框，看不见）；不设 → 189×21。**所有 Win32 调用都返回成功、窗口 visible=1、日志无错误**，只能靠断言尺寸发现 —— 已补 `TestHoverTipPlumbing` 的尺寸断言，并把该常量加回去复验过（测试立刻红：`提示框尺寸 = 6x4`）。
     - **新增「收到消息主动弹出」**：`ActShowPopup` 由决策层在入站消息时产生（传输事件刻意不弹），组合根用 `HoverTip.ShowNearNotificationArea` 弹在通知区域上方 4 秒。位置自己算（`Shell_TrayWnd` → `TrayNotifyWnd` → 其上 120px + 夹进屏幕），并有测试断言气泡**尺寸正常且不越界**。
+14. **提示音与气泡补齐 macOS/Linux（原「仅 Windows，其余空实现」已作废）**：
+    - **提示音**：Windows 仍是 `winmm` 的 `PlaySound`（`play_windows.go`）；macOS 用系统自带的 `afplay`（`play_darwin.go`）；Linux 依次尝试 `paplay` → `pw-play` → `aplay`（`play_linux.go`）。后两者只接受文件路径，因此共用 `play_external.go`：每次播放把内嵌 WAV 写到临时文件、放完删除；先用 `LookPath` 过滤候选，再**按退出码**逐个退让（只看 `Start` 成功会让「播放器装上了但声音服务没起来」表现成「有提示音却永远听不到」）；单个播放器 10s 超时，防 goroutine 泄漏。`play_other.go` 现在只覆盖 `!windows && !darwin && !linux`。
+    - **气泡**：Windows 保持自建 `tooltips_class32`（`hovertip_windows.go`）；macOS/Linux 因为纯 Go 建不出 Cocoa/GTK 窗口（且本包不认识 Wails，红线 R2），改用系统通知 —— macOS 走 `osascript` 的 `display notification`，Linux 走 `notify-send`，共用 `hovertip_external.go`，平台差异只有「命令名 + 参数」（`hovertip_{darwin,linux}.go`）。文案一律通过 **argv** 传递，不拼进 AppleScript 脚本（内容来自对端，拼字符串就是一个注入面）。
+    - **刻意的行为差异**（见设计文档 §9）：通知位置由系统决定，做不到「贴在托盘上方」；`Hide()` 退化为空操作（通知发出后无法收回），因此组合根的 4 秒自动收起在这两个平台不产生动作；`LastSize()` 恒为 0,0。
+    - **可测性**：「找不到播放器」「临时文件写坏」这两条都会表现成「从来不响」，所以候选选择与临时文件写入放在不带构建标签的 `sound_player.go`，由 `sound_player_test.go` 在任意平台覆盖；平台文件只剩候选列表与命令参数。三平台均已 `go build`/`go vet` 通过（`GOOS=darwin|linux` 只编译本包，不涉及 Wails 的交叉编译限制）。

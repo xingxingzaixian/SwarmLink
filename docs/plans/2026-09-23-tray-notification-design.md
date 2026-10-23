@@ -48,7 +48,8 @@
         │ ② 事件（组合根订阅已有 bus 后转发）          │ ③ 播放声音
         ▼                                              ▼
   TopicChatReceived / TransferDone / TransferError   internal/adapters/notify/
-                                                     sound_windows.go（winmm PlaySound）
+                                                     play_*.go（Windows/macOS/Linux 各自实现）
+                                                     hovertip_*.go（Windows 原生 / macOS·Linux 系统通知）
                                                      assets/（wav + 两个托盘 PNG）
 ```
 
@@ -191,8 +192,9 @@
 ## 9. 已知限制
 
 - **Wails 的托盘 tooltip 在 Windows 上不可用，悬停提示改为自建（已实现）**：Wails 建托盘图标时会发 `NIM_SETVERSION` + `NOTIFYICON_VERSION_4`（`systemtray_windows.go:619`），MSDN 明确规定该模式下 "the standard tooltip is suppressed"，要重新打开需要 `NIF_SHOWTIP`；Wails 在 `setTooltip` 里确实带了该标志（`:512`），但它把 `NIM_MODIFY` 的失败**静默吞掉**（`:524` 直接 return），且对 `NIN_POPUPOPEN` 只做转发、不自行绘制 tooltip（`:475`）。实测（Windows 10 19045）：`tray.SetTooltip(...)` 后悬停**毫无反应**，连初始的 `SwarmLink` 都不显示。
-  因此改用自建的 `internal/adapters/notify/hovertip_windows.go`：直接使用系统的 `tooltips_class32` 控件（圆角/阴影/DPI/字体全由系统负责，不自绘），由 `NIN_POPUPOPEN`/`NIN_POPUPCLOSE`（Wails 转发的 `OnMouseEnter`/`OnMouseLeave`）驱动。**仅 Windows 实现**，其它平台是空实现。
-- **声音只有 Windows 实现**（`winmm` 的 `PlaySound`）；macOS/Linux 为空实现（不响、不崩）。要做需要各自平台的原生播放（`afplay` / `paplay` 或 GStreamer），本次不做。
+  因此改用自建的 `internal/adapters/notify/hovertip_windows.go`：直接使用系统的 `tooltips_class32` 控件（圆角/阴影/DPI/字体全由系统负责，不自绘），由 `NIN_POPUPOPEN`/`NIN_POPUPCLOSE`（Wails 转发的 `OnMouseEnter`/`OnMouseLeave`）驱动。**Windows 专属实现**；macOS/Linux 走另一条通道（见下一条）。
+- **气泡（悬停提示 / 新消息弹出）三平台实现**：Windows 是贴着托盘的原生提示框；macOS/Linux 没有纯 Go 可用的自绘通道（Cocoa / GTK 都要 cgo，而本包又不认识 Wails），改由系统通知承载 —— macOS 用系统自带的 `osascript` 的 `display notification`，Linux 用 libnotify 的 `notify-send`，实现在 `hovertip_external.go` + `hovertip_{darwin,linux}.go`。差异是刻意的：位置由通知中心决定（做不到「贴托盘上方」），`Hide` 无法收回（4 秒自动收起在这两个平台退化为空操作），`LastSize` 恒为 0,0。其余平台仍是空实现（`hovertip_other.go`，只为能编译通过）。
+- **提示音三平台实现**：Windows 用 `winmm` 的 `PlaySound`（内存缓冲，异步）；macOS 用系统自带的 `afplay`；Linux 依次尝试 `paplay` → `pw-play` → `aplay`（覆盖 PulseAudio / PipeWire / 纯 ALSA）。macOS/Linux 的播放器只吃文件路径，因此每次播放落一个临时 WAV、放完删除；先 `LookPath` 过滤候选，再**按退出码**逐个退让 —— 只看 `Start` 成功会让「装上了播放器但声音服务没起来」表现为「有提示音却永远听不到」。全平台失败一律静默。
 - **托盘与闪烁的跨平台差异**：macOS 的托盘位于菜单栏、习惯上「关闭窗口」不等于退出；Linux 依赖 AppIndicator 支持。本次只保证 Windows 行为符合预期，其它平台不保证细节。
 - **不做气泡通知**（原因见 §2 非目标）。
 - 未读数是 Go 侧自算的「托盘计数」，与前端 per-conversation 未读可能短暂不一致（例如同一会话内前端已标记已读但窗口尚未获得焦点）——以窗口焦点为归零点，够用且可预期。
@@ -201,7 +203,7 @@
 
 1. **决策器 + 单测**：`internal/app/notify_app.go`（纯逻辑，先跑通规则表）；
 2. **素材**：合成 wav + 生成两张托盘 PNG + 素材自检；
-3. **适配器**：`internal/adapters/notify` 声音实现（Windows + 空实现）；
+3. **适配器**：`internal/adapters/notify` 声音实现（Windows / macOS / Linux + 其余平台空实现）；
 4. **组合根**：托盘、关闭拦截、焦点钩子、动作执行；
 5. **配置与设置页**：`[notify]` 段、DTO 与绑定、前端两个开关、`NotifyService.SetActiveConversation`；
 6. **验收**：手工走查 14 条 + 回归。

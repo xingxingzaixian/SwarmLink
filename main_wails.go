@@ -643,6 +643,10 @@ func main() {
 	//   - 鼠标悬停在图标上（NIN_POPUPOPEN / NIN_POPUPCLOSE，Wails 转发给
 	//     OnMouseEnter / OnMouseLeave）→ 按光标位置弹；
 	//   - 收到新消息主动弹 → 按通知区域位置弹（此时鼠标可能在屏幕任何地方）。
+	//
+	// 平台差异全部收敛在 notify 包里，组合根不必分支：Windows 是贴着托盘的
+	// 原生提示框；macOS/Linux 没有纯 Go 可用的自绘通道，改由系统通知承载
+	// （位置与能否收回由系统决定，见 hovertip_external.go 的说明）。
 	tip := notify.NewHoverTip()
 	defer tip.Close()
 

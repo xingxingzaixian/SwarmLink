@@ -9,10 +9,28 @@
 2. 只写**用户能感知的变化**：新增功能、行为改变、修复、已知问题。
    重构、测试、CI 调整不写 —— 它们是给维护者看的，写进来只会稀释重点。
 3. 发布前先改 `internal/version/version.go` 的 `Version`，再补这一节；
-   tag（`v0.1.6`）与 `Version`（`0.1.6`）不一致时流水线同样会失败。
+   tag（`v0.1.7`）与 `Version`（`0.1.7`）不一致时流水线同样会失败。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 小标题固定用 `新增` / `变更` / `修复` / `已知问题`，按需取舍。
+
+## [0.1.7] - 2026-10-23
+
+### 新增
+
+- **macOS / Linux 也有提示音了**：新消息与传输事件的提示音不再只有 Windows 会响。
+  macOS 用系统自带的 `afplay`，Linux 依次尝试 `paplay` → `pw-play` → `aplay`
+  （覆盖 PulseAudio / PipeWire / 纯 ALSA），装了哪个就用哪个，一个都没有时静默。
+- **macOS / Linux 也能看到消息气泡**：收到消息时「谁发来的、说了什么」的提示
+  改由系统通知承载（macOS 通知中心 / Linux 通知服务），不再只有 Windows 可见。
+
+### 已知问题
+
+- macOS / Linux 的气泡位置由系统通知中心决定，不会像 Windows 那样贴在托盘图标
+  上方；通知弹出后应用无法收回，因此 Windows 上的「4 秒后自动收起」在这两个
+  平台不生效。
+- 这两个平台的提示依赖系统组件（macOS 的 `osascript`、Linux 的 `notify-send`）。
+  缺失时该条提示静默不可用，闪烁、窗口标题里的未读计数与提示音都不受影响。
 
 ## [0.1.6] - 2026-10-22
 

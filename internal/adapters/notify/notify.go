@@ -1,7 +1,15 @@
-// Package notify 提供与提示相关的平台能力：提示音播放 + 托盘图标素材。
+// Package notify 提供与提示相关的平台能力：提示音播放 + 托盘气泡 + 托盘图标素材。
 //
 // 它刻意不认识 Wails、也不认识事件桥 —— 两者都由组合根接线，
 // 这样「什么时候提示」的决策（app.NotifyApp）与「怎么提示」的执行互不耦合。
+//
+// 三平台各有实现，没有「主平台 + 空实现」这回事：
+//
+//	提示音：Windows winmm PlaySound｜macOS afplay｜Linux paplay/pw-play/aplay
+//	气泡　：Windows 自建 tooltips_class32｜macOS osascript｜Linux notify-send
+//
+// 空实现只保留给其余平台（见 play_other.go / hovertip_other.go），
+// 它们的存在是为了让那些平台能编译通过，而不是「等着被补上的占位」。
 package notify
 
 import _ "embed"
